@@ -15,7 +15,13 @@ import { checkPreviewsNow, macAccess, macAccessLevels, setMacAccess } from "./pr
 import { cloudSkills, copyLogins, markLogin, setCloudSkills, setCopyLogins, skillInCloud } from "./sync.js";
 import { secondsSinceFirstLaunch } from "./setup-telemetry.js";
 import { teleports } from "./teleport.js";
-import { binding, command, teleportBlocked, teleportProgress } from "./store.js";
+import {
+  binding,
+  command,
+  sessionThreads,
+  teleportBlocked,
+  teleportProgress,
+} from "./store.js";
 import { browserRequestProblem } from "../../browser-request-guard.js";
 import { cancelClaudeToken, claudePlan, connectClaude, isClaudeApiKey, withClaudeTokenRun } from "./claude-token.js";
 import { startClaudeVersionSync } from "./harness-versions.js";
@@ -346,8 +352,13 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (!parsed.success) throw new ApiError(400, "invalid_request", "Feedback must be 1 to 4,000 characters. Send a longer report as several messages.");
     return context.json(await reportBug(deps, parsed.data));
   });
+  app.get("/api/v1/cloudroom/account/referrals", async (context) => context.json(await cloudroom(deps).sandboxes.referrals("get")));
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
   app.get("/api/v1/cloudroom/threads/:id/credits", async (context) => context.json(await threadCredits(deps, context.req.param("id"))));
+  app.post("/api/v1/cloudroom/account/referrals", async (context) => {
+    z.object({}).strict().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.referrals("create"));
+  });
   app.post("/api/v1/cloudroom/account/more-usage", async (context) => {
     z.object({}).strict().parse(await context.req.json());
     return context.json(await cloudroom(deps).sandboxes.requestMoreUsage().catch((error: unknown) => {
@@ -421,7 +432,18 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
       const averages = (answer as { averages?: (CloudRun & { name: string; runs: number; accounts: number })[] } | null)?.averages ?? [];
       return context.json({ averages: averages.map((average) => ({ name: average.name, harness: average.harness, runs: average.runs, accounts: average.accounts, tokens: weightedRun(average) })) });
     }
-    return context.json(answer);
+    // A child's loop names the sandbox's root thread and the child's session; `session_thread_id` is that session's
+    // thread here, so the sidebar marks the child (#1136). One read for the whole list.
+    const loops = input.action === "list" ? (answer as { automations?: { session_id?: string | null }[] }).automations : undefined;
+    if (!loops?.length) return context.json(answer);
+    const threads = sessionThreads(deps.db, [...new Set(loops.flatMap((loop) => loop.session_id ?? []))]);
+    return context.json({
+      ...(answer as object),
+      automations: loops.map((loop) => {
+        const thread = loop.session_id ? threads.get(loop.session_id) : undefined;
+        return thread ? { ...loop, session_thread_id: thread } : loop;
+      }),
+    });
   });
   // Loop usage estimates (docs/scopes/loops.md): tokens the Loops plugin's runs used, and all of the provider's.
   app.post("/api/v1/cloudroom/account/token-usage", async (context) => {
@@ -450,6 +472,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json(await cloudroom(deps).sandboxes.projectShares(body).catch((error: unknown) => {
       const status = error instanceof CloudroomError ? error.status : null;
       throw new ApiError(status === 403 || status === 404 || status === 409 ? status : status ? 400 : 503, "cloud_project_shares", error instanceof Error ? error.message : String(error));
+    }) as Record<string, unknown>);
+  });
+  // The Director's lessons (docs/scopes/director.md#learning): the Director plugin's requests, passed to the website as this account.
+  app.post("/api/v1/cloudroom/account/director", async (context) => {
+    if (getGateAuthKind(context) !== null) return context.json({ message: "Use the Director plugin on this device." }, 403);
+    const body = z.object({ action: z.enum(["read", "teach"]) }).passthrough().parse(await context.req.json());
+    return context.json(await cloudroom(deps).sandboxes.director(body).catch((error: unknown) => {
+      const status = error instanceof CloudroomError ? error.status : null;
+      throw new ApiError(status === 401 || status === 403 ? status : status ? 400 : 503, "cloud_director", error instanceof Error ? error.message : String(error));
     }) as Record<string, unknown>);
   });
   // GPUs (docs/scopes/gpus.md): the GPU plugin's `room-cli gpu` steps, passed to the website as this account. Never

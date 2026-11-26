@@ -4099,6 +4099,71 @@ describe("PromptBoxInternal prompt actions", () => {
     expect(onAttachFiles).toHaveBeenCalledWith([image]);
   });
 
+  it("names an image that an Android keyboard pastes without a name", async () => {
+    const onAttachFiles = vi.fn().mockResolvedValue(undefined);
+    const { promptBoxRef } = renderPromptBox("", { onAttachFiles });
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({
+      files: [
+        new File(["one"], "", { type: "image/png" }),
+        new File(["two"], "", { type: "image/jpeg" }),
+        new File(["three"], "notes.txt", { type: "text/plain" }),
+      ],
+    });
+
+    await waitFor(() => expect(onAttachFiles).toHaveBeenCalled());
+    const files: File[] = onAttachFiles.mock.calls[0]![0];
+    expect(files.map(({ name, type }) => [name, type])).toEqual([
+      ["pasted-image.png", "image/png"],
+      ["pasted-image-2.jpg", "image/jpeg"],
+      ["notes.txt", "text/plain"],
+    ]);
+    expect(await files[0]!.text()).toBe("one");
+  });
+
+  it("attaches the copied image from Paste image on a touch device", async () => {
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+    const restoreMatchMedia = mockPointerCoarse(true);
+    const read = vi.fn().mockResolvedValue([
+      { types: ["text/plain"], getType: async () => new Blob(["text"]) },
+    ]);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { read },
+    });
+    const tapPasteImage = async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Prompt actions" }));
+      fireEvent.click(await screen.findByText("Paste image"));
+    };
+    try {
+      const onAttachFiles = vi.fn().mockResolvedValue(undefined);
+      renderPromptBox("", { onAttachFiles });
+
+      await tapPasteImage();
+      expect(await screen.findByText(/No image on the clipboard/)).toBeTruthy();
+      expect(onAttachFiles).not.toHaveBeenCalled();
+
+      read.mockResolvedValue([
+        {
+          types: ["text/html", "image/png"],
+          getType: async (type: string) => new Blob(["image"], { type }),
+        },
+      ]);
+      await tapPasteImage();
+      await waitFor(() => expect(onAttachFiles).toHaveBeenCalled());
+      const files: File[] = onAttachFiles.mock.calls[0]![0];
+      expect(files.map(({ name, type }) => [name, type])).toEqual([
+        ["pasted-image.png", "image/png"],
+      ]);
+      expect(screen.queryByText(/No image on the clipboard/)).toBeNull();
+    } finally {
+      restoreMatchMedia();
+      if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+      else Reflect.deleteProperty(navigator, "clipboard");
+    }
+  });
+
   it("pastes deeply nested clipboard html without overflowing the stack", async () => {
     const { changes, promptBoxRef } = renderPromptBox("");
     const depth = 2_000;

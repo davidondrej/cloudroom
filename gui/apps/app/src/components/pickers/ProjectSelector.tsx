@@ -167,7 +167,7 @@ export function ProjectSelector({
   const folderRows = pathMode ? folders.matches : folderResults;
   const topFolder = pathMode
     ? folders.leaf
-      ? folders.matches[0]
+      ? folders.drive ? folders.exact : folders.matches[0]
       : undefined
     : folderResults[0];
   // While typing, the most likely row is highlighted, so Enter picks it.
@@ -179,7 +179,7 @@ export function ProjectSelector({
         ? NO_HIGHLIGHT_VALUE
         : folders.canAddHere
           ? HERE_VALUE
-          : folders.matches[0]
+          : folders.matches[0] && !folders.drive
             ? folderValue(folders.matches[0].path)
             : NO_HIGHLIGHT_VALUE
     : searchQuery.trim()
@@ -221,7 +221,7 @@ export function ProjectSelector({
     pickedFolder ?? homeMatch ?? highlightedFolder ?? (pathMode ? (topFolder ?? folders.matches[0]) : undefined);
   const ghost =
     pathMode && completion && (folders.leaf || highlightedFolder)
-      ? `${completion.name}/`.slice(folders.leaf.length)
+      ? `${completion.name}${folders.separator}`.slice(folders.leaf.length)
       : !pathMode && completion && completion === homeMatch
         ? `${completion.name}/`.slice(searchQuery.trim().length)
         : "";
@@ -278,7 +278,7 @@ export function ProjectSelector({
     const fill = !completion
       ? null
       : pathMode
-        ? `${folders.folder}${completion.name}/`
+        ? `${folders.folder}${completion.name}${folders.separator}`
         : folders.home?.startsWith("/")
           ? `${tildePath(completion.path, folders.home)}/`
           : null;
@@ -387,7 +387,9 @@ export function ProjectSelector({
       ? null
       : queried
         ? suggestions
-          ? "Nothing matches. Type ~/ to browse folders."
+          ? folders.windows
+            ? "Nothing matches. Paste a folder path like C:\\code\\app."
+            : "Nothing matches. Type ~/ to browse folders."
           : "No projects found"
         : suggestions
           ? "No projects yet."

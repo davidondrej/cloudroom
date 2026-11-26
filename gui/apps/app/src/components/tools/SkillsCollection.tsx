@@ -17,6 +17,7 @@ import {
   ResourceRowDetailChevron,
   ResourceSortMenu,
   ResourceToolbar,
+  ResourceDetailIncludesSection,
 } from "@cloudroom/shared-ui/resource-list";
 import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import {
@@ -27,7 +28,11 @@ import { CreateWithTemplatesButton } from "@/components/create-via-prompt-exampl
 import { ProvenancePill } from "@/components/tools/ProvenancePill";
 import { SkillDetailView } from "@/components/tools/SkillDetailView";
 import { TOOLS_PAGE_BAND_CLASSES } from "@/components/tools/tools-navigation";
-import { skillScopeLabel } from "@/components/tools/skill-taxonomy";
+import {
+  groupSkillCopies,
+  skillScopeLabel,
+  type SkillGroup,
+} from "@/components/tools/skill-taxonomy";
 import type { ProviderInfo } from "@cloudroom/domain";
 import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
 import { getProviderIconInfo } from "@/lib/provider-icon";
@@ -36,7 +41,6 @@ import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing"
 type ResourceProviderFilter = "bb" | SkillProvider;
 export type ProviderRoster = ReadonlyMap<string, ProviderInfo>;
 type ResourceSkillSourceFilter = "included" | "bb-official" | "user";
-type ResourceSortMode = "provider" | "alpha";
 type ResourceSortDirection = "asc" | "desc";
 
 const RESOURCE_SKILL_SOURCE_FILTERS: readonly ResourceSkillSourceFilter[] = [
@@ -66,7 +70,9 @@ function providerFilterLabel(
   provider: ResourceProviderFilter,
   providerRoster: ProviderRoster,
 ): string {
-  return provider === "bb" ? "Cloudroom" : providerLabel(provider, providerRoster);
+  return provider === "bb"
+    ? "Cloudroom"
+    : providerLabel(provider, providerRoster);
 }
 
 function skillSourceFilterId(skill: SkillSummary): ResourceSkillSourceFilter {
@@ -161,20 +167,70 @@ export function SkillProvenanceTooltip({
 function SkillLeading({
   skill,
   providerRoster,
+  className = "size-6",
 }: {
   skill: SkillSummary;
   providerRoster: ProviderRoster;
+  className?: string;
 }) {
   if (skill.provider !== null) {
     return (
       <ProviderLogo
         providerId={skill.provider}
         provider={providerRoster.get(skill.provider)}
-        className="size-6"
+        className={className}
       />
     );
   }
-  return <RoomLogo className="size-6" />;
+  return <RoomLogo className={className} />;
+}
+
+function groupProviderFilterIds(group: SkillGroup): ResourceProviderFilter[] {
+  return [...new Set(group.copies.map(skillProviderFilterId))];
+}
+
+/** One logo per agent that has a copy: up to 4 in a 2x2 grid, else 3 and "+N". */
+function SkillGroupLeading({
+  group,
+  providerRoster,
+}: {
+  group: SkillGroup;
+  providerRoster: ProviderRoster;
+}) {
+  const agentCopies = group.copies.filter(
+    (copy, index) =>
+      group.copies.findIndex((other) => other.provider === copy.provider) ===
+      index,
+  );
+  if (agentCopies.length === 1) {
+    return (
+      <SkillLeading skill={agentCopies[0]} providerRoster={providerRoster} />
+    );
+  }
+  const hidden = agentCopies.length > 4 ? agentCopies.length - 3 : 0;
+  return (
+    <span
+      data-skill-agents={agentCopies.map(skillProviderFilterId).join(",")}
+      title={agentCopies
+        .map((copy) => providerLabel(copy.provider, providerRoster))
+        .join(", ")}
+      className="grid size-6 grid-cols-2 place-items-center gap-px"
+    >
+      {agentCopies.slice(0, hidden > 0 ? 3 : 4).map((copy) => (
+        <SkillLeading
+          key={skillProviderFilterId(copy)}
+          skill={copy}
+          providerRoster={providerRoster}
+          className="size-2.5"
+        />
+      ))}
+      {hidden > 0 ? (
+        <span className="text-[8px] leading-none text-muted-foreground">
+          +{hidden}
+        </span>
+      ) : null}
+    </span>
+  );
 }
 
 function skillDescription(
@@ -226,11 +282,14 @@ function skillMutationDisabledReason(
 const PREFETCH_HOVER_INTENT_MS = 150;
 
 function SkillRow({
+  group,
   skill,
   providerRoster,
   onSelect,
   onPrefetch,
 }: {
+  group: SkillGroup;
+  /** The copy this row opens. */
   skill: SkillSummary;
   providerRoster: ProviderRoster;
   onSelect: () => void;
@@ -259,7 +318,9 @@ function SkillRow({
       onBlur={cancelScheduledPrefetch}
     >
       <ResourceRow
-        leading={<SkillLeading skill={skill} providerRoster={providerRoster} />}
+        leading={
+          <SkillGroupLeading group={group} providerRoster={providerRoster} />
+        }
         title={skill.name}
         titleMeta={
           skill.scope === "bb-builtin" ? (
@@ -330,7 +391,6 @@ export function SkillsOverview({
   const [sourceFilters, setSourceFilters] = useState<
     ResourceSkillSourceFilter[]
   >([]);
-  const [sortMode, setSortMode] = useState<ResourceSortMode>("alpha");
   const [sortDirection, setSortDirection] =
     useState<ResourceSortDirection>("asc");
   const [libraryViewport, setLibraryViewport] = useState<HTMLDivElement | null>(
@@ -341,21 +401,21 @@ export function SkillsOverview({
     normalizedQuery,
     providerFilters.join(","),
     sourceFilters.join(","),
-    sortMode,
     sortDirection,
   ].join("\u0000");
   const libraryPageSize = useResourceViewportPageSize(libraryViewport, {
     resetKey: libraryResetKey,
   });
+  const groups = useMemo(() => groupSkillCopies(skills), [skills]);
   const providerCounts = useMemo(() => {
     const counts = new Map<ResourceProviderFilter, number>();
-    for (const skill of skills) {
-      const provider = skillProviderFilterId(skill);
-      counts.set(provider, (counts.get(provider) ?? 0) + 1);
+    for (const group of groups) {
+      for (const provider of groupProviderFilterIds(group)) {
+        counts.set(provider, (counts.get(provider) ?? 0) + 1);
+      }
     }
     return counts;
-  }, [skills]);
-  const providerBucketCount = providerCounts.size;
+  }, [groups]);
   const providerOptions = useMemo(() => {
     const present = new Set<ResourceProviderFilter>([
       "bb",
@@ -386,26 +446,13 @@ export function SkillsOverview({
         !providerCounts.has(provider) && !providerFilters.includes(provider),
     }));
   }, [providerCounts, providerRoster, providerFilters]);
-  useEffect(() => {
-    if (sortMode === "provider" && providerBucketCount <= 1) {
-      setSortMode("alpha");
-      setSortDirection("asc");
-    }
-  }, [providerBucketCount, sortMode]);
-  const visibleSkills = useMemo(() => {
-    const filtered = skills.filter((skill) => {
-      const source = skillSourceFilterId(skill);
-      if (sourceFilters.length > 0 && !sourceFilters.includes(source)) {
-        return false;
-      }
-      if (
-        providerFilters.length > 0 &&
-        !providerFilters.includes(skillProviderFilterId(skill))
-      ) {
-        return false;
-      }
-      return (
-        normalizedQuery === "" ||
+  // Each visible row and the copy it opens: the first copy that matches the
+  // agent filter and the search, so edit and delete act on that copy.
+  const visibleGroups = useMemo(() => {
+    const copyMatches = (skill: SkillSummary) =>
+      (providerFilters.length === 0 ||
+        providerFilters.includes(skillProviderFilterId(skill))) &&
+      (normalizedQuery === "" ||
         [
           skill.name,
           skill.description ?? "",
@@ -414,51 +461,42 @@ export function SkillsOverview({
         ]
           .join(" ")
           .toLowerCase()
-          .includes(normalizedQuery)
-      );
-    });
-    return [...filtered].sort((left, right) => {
+          .includes(normalizedQuery));
+    const rows: { group: SkillGroup; skill: SkillSummary }[] = [];
+    for (const group of groups) {
+      const source = skillSourceFilterId(group.copies[0]);
+      if (sourceFilters.length > 0 && !sourceFilters.includes(source)) {
+        continue;
+      }
+      const skill = group.copies.find(copyMatches);
+      if (skill !== undefined) rows.push({ group, skill });
+    }
+    return rows.sort((left, right) => {
       if (providerFilters.length === 1 && providerFilters[0] === "bb") {
         const officialResult =
-          Number(left.scope !== "bb-builtin") -
-          Number(right.scope !== "bb-builtin");
+          Number(left.skill.scope !== "bb-builtin") -
+          Number(right.skill.scope !== "bb-builtin");
         if (officialResult !== 0) return officialResult;
       }
-      const base =
-        sortMode === "provider"
-          ? providerLabel(left.provider, providerRoster).localeCompare(
-              providerLabel(right.provider, providerRoster),
-            ) || left.name.localeCompare(right.name)
-          : left.name.localeCompare(right.name);
+      const base = left.group.name.localeCompare(right.group.name);
       if (base !== 0) return sortDirection === "asc" ? base : -base;
-      return left.filePath.localeCompare(right.filePath);
+      return left.skill.filePath.localeCompare(right.skill.filePath);
     });
   }, [
+    groups,
     normalizedQuery,
     providerRoster,
     providerFilters,
-    skills,
     sortDirection,
-    sortMode,
     sourceFilters,
   ]);
-  const libraryList = useResourceInfiniteItems(visibleSkills, {
+  const libraryList = useResourceInfiniteItems(visibleGroups, {
     pageSize: libraryPageSize,
     resetKey: libraryResetKey,
   });
-  const handleSortChange = useCallback(
-    (nextSort: string) => {
-      if (nextSort !== "provider" && nextSort !== "alpha") return;
-      if (nextSort === "provider" && providerBucketCount <= 1) return;
-      if (nextSort === sortMode) {
-        setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
-        return;
-      }
-      setSortMode(nextSort);
-      setSortDirection("asc");
-    },
-    [providerBucketCount, sortMode],
-  );
+  const handleSortChange = useCallback(() => {
+    setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+  }, []);
   const libraryBody = hasError ? (
     <ResourceListState
       state="error"
@@ -467,7 +505,7 @@ export function SkillsOverview({
     />
   ) : isLoading ? (
     <ResourceListState state="loading" message="Loading skills" />
-  ) : visibleSkills.length === 0 ? (
+  ) : visibleGroups.length === 0 ? (
     <ResourceListState
       state="empty"
       message={
@@ -483,9 +521,10 @@ export function SkillsOverview({
   ) : (
     <>
       <ResourceListPanel>
-        {libraryList.items.map((skill) => (
+        {libraryList.items.map(({ group, skill }) => (
           <SkillRow
-            key={`${skill.scope}-${skill.provider ?? "bb"}-${skill.name}-${skill.filePath}`}
+            key={group.id}
+            group={group}
             skill={skill}
             providerRoster={providerRoster}
             onSelect={() => onSelectSkill(skill)}
@@ -553,17 +592,10 @@ export function SkillsOverview({
                     ]}
                   />
                   <ResourceSortMenu
-                    value={sortMode}
+                    value="alpha"
                     direction={sortDirection}
                     compact
-                    options={[
-                      {
-                        id: "provider",
-                        label: "Provider",
-                        disabled: providerBucketCount <= 1,
-                      },
-                      { id: "alpha", label: "Skill name" },
-                    ]}
+                    options={[{ id: "alpha", label: "Skill name" }]}
                     onChange={handleSortChange}
                   />
                 </>
@@ -578,8 +610,52 @@ export function SkillsOverview({
   );
 }
 
+function SkillCopyPicker({
+  skill,
+  copies,
+  providerRoster,
+  onSelectCopy,
+}: {
+  skill: SkillSummary;
+  copies: readonly SkillSummary[];
+  providerRoster: ProviderRoster;
+  onSelectCopy: (copy: SkillSummary) => void;
+}) {
+  const copiesDiffer =
+    new Set(copies.map((copy) => copy.description ?? "")).size > 1;
+  return (
+    <ResourceDetailIncludesSection label="Installed for">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {copies.map((copy) => (
+          <button
+            key={copy.id}
+            type="button"
+            aria-pressed={copy.id === skill.id}
+            title={copy.filePath}
+            onClick={() => onSelectCopy(copy)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground aria-pressed:bg-surface-recessed aria-pressed:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            <SkillLeading
+              skill={copy}
+              providerRoster={providerRoster}
+              className="size-3.5"
+            />
+            {skillScopeLabel(copy, providerLabelForScope(copy, providerRoster))}
+          </button>
+        ))}
+        {copiesDiffer ? (
+          <span className="text-xs text-muted-foreground">Copies differ</span>
+        ) : null}
+      </div>
+    </ResourceDetailIncludesSection>
+  );
+}
+
 interface SkillDetailDialogViewProps {
   skill: SkillSummary | null;
+  /** Every agent's copy of this skill, `skill` included. */
+  copies?: readonly SkillSummary[];
+  onSelectCopy?: (copy: SkillSummary) => void;
   providerRoster: ProviderRoster;
   files: readonly string[];
   selectedPath: string;
@@ -600,6 +676,8 @@ interface SkillDetailDialogViewProps {
 
 export function SkillDetailDialogView({
   skill,
+  copies = [],
+  onSelectCopy = () => {},
   providerRoster,
   files,
   selectedPath,
@@ -710,6 +788,16 @@ export function SkillDetailDialogView({
                   accessibleLabel: `${skill.name} is imported from ${providerLabel(skill.provider, providerRoster)}`,
                 }
               : undefined
+      }
+      copies={
+        copies.length > 1 ? (
+          <SkillCopyPicker
+            skill={skill}
+            copies={copies}
+            providerRoster={providerRoster}
+            onSelectCopy={onSelectCopy}
+          />
+        ) : undefined
       }
       files={files.length > 0 ? files : ["SKILL.md"]}
       markdownLinkRouting={markdownLinkRouting}

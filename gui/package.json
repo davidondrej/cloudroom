@@ -76,6 +76,7 @@
       "prosemirror-view": "^1.42.3",
       "prosemirror-model": "^1.25.12",
       "@modelcontextprotocol/sdk": "^1.32.1",
+      "vite@>=8.0.0 <8.1.7": "8.1.7",
       "undici@>=7.0.0 <7.29.1": "^7.30.1",
       "undici@>=8.0.0 <8.10.2": "^8.10.2",
       "app-builder-lib@26.15.7>electron-builder-squirrel-windows": "-",

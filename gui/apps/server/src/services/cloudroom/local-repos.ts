@@ -1,4 +1,4 @@
-import { readdir, readFile, realpath, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -6,6 +6,8 @@ export interface LocalRepo { name: string; path: string; updatedAt: number; remo
 
 const MAC_PRIVACY_FOLDERS = new Set(["Applications", "Desktop", "Documents", "Downloads", "Library", "Movies", "Music", "Pictures", "Public"]);
 const ROOTS = ["", "code", "Code", "Projects", "projects", "Developer", "dev", "src", "repos", "GitHub", "work"];
+/** Where Visual Studio and GitHub Desktop clone on Windows. A Mac asks before anything reads ~/Documents. */
+const WINDOWS_ROOTS: [string, string][] = process.platform === "win32" ? [["source", "repos"], ["Documents", "GitHub"]] : [];
 
 const mtime = (path: string) => stat(path).then((info) => info.mtimeMs, () => 0);
 const originUrl = (git: string) => readFile(join(git, "config"), "utf8").then((config) => config.match(/\[remote "origin"\][^[]*?\burl\s*=\s*(\S+)/)?.[1] ?? null, () => null);
@@ -14,7 +16,19 @@ export async function localRepos(limit = 8): Promise<LocalRepo[]> {
   const home = homedir();
   const found = new Map<string, LocalRepo>();
   // On a Mac, ~/code and ~/Code are one folder; the real path gives each repo one spelling.
-  const roots = new Set(await Promise.all(ROOTS.map((root) => realpath(join(home, root)).catch(() => ""))));
+  const roots = new Set(await Promise.all([
+    ...ROOTS.map((root) => realpath(join(home, root)).catch(() => "")),
+    // Only real folders inside home, checked parent first: a junction or link on the way could lead anywhere.
+    ...WINDOWS_ROOTS.map(async (parts) => {
+      let path = home;
+      for (const part of parts) {
+        path = join(path, part);
+        const info = await lstat(path).catch(() => null);
+        if (!info?.isDirectory() || info.isSymbolicLink()) return "";
+      }
+      return path;
+    }),
+  ]));
   roots.delete("");
   await Promise.all([...roots].map(async (folder) => {
     const entries = await readdir(folder, { withFileTypes: true }).catch(() => []);

@@ -608,6 +608,8 @@ function McpCard({ inCloud, onSaved }: { inCloud: string[]; onSaved: (data: Clou
                 >
                   <Icon name={server.cloud ? "Check" : "Plus"} className="size-3" />
                   {server.name}
+                  {/* A cloud sign-in reaches only Claude Code: Codex shows the server as not logged in (#1773). */}
+                  {"signIn" in server && server.signIn ? <span className="font-sans text-2xs">· works in Claude Code only</span> : null}
                 </button>
               ),
             )}

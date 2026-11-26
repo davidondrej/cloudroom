@@ -11,7 +11,7 @@
     "name": "Snippets",
     "description": "Save, expand, and share text snippets in Cloudroom chats.",
     "branding": {
-      "icon": "FileText"
+      "icon": "./icons/scissors.svg"
     },
     "server": "./server.ts",
     "app": "./app.tsx",

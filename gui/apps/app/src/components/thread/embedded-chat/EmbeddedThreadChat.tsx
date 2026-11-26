@@ -101,7 +101,8 @@ import { plainError } from "@/lib/fix-prompts";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
-import { showMutationErrorToast } from "@/lib/mutation-errors";
+import { isDefiniteRejection, showMutationErrorToast } from "@/lib/mutation-errors";
+import { FailedMessageNotice } from "@/components/promptbox/banner/FailedMessageNotice";
 import type { PromptDraftScope } from "@/hooks/usePromptDraftStorage";
 import { appToast } from "@/components/ui/app-toast";
 import {
@@ -757,14 +758,14 @@ function EmbeddedThreadChatWithComposer({
     if (submittedInput.length === 0 || isTurnSubmitting) {
       return false;
     }
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
     try {
       await defaultSendOrQueueInput(submittedInput);
       return true;
     } catch (error) {
-      promptDraft.restoreIfEmpty(submittedDraft);
+      promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error) });
       showMutationErrorToast({
         error,
         fallbackMessage: "Failed to send message",
@@ -827,7 +828,7 @@ function EmbeddedThreadChatWithComposer({
       return;
     }
 
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
     void sendThreadMessage
@@ -841,10 +842,10 @@ function EmbeddedThreadChatWithComposer({
         reportQueuedSendDelivery(result.delivery);
       })
       .catch((error) => {
+        promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error) });
         if (!isMountedRef.current) {
           return;
         }
-        promptDraft.restoreIfEmpty(submittedDraft);
         showMutationErrorToast({
           error,
           fallbackMessage: "Failed to send message",
@@ -1461,7 +1462,7 @@ function EmbeddedThreadChatWithComposer({
               : undefined
           }
           attachments={bottomAttachmentsConfig}
-          stack={queuedMessagesStack}
+          stack={<><FailedMessageNotice storageKey={promptDraft.storageKey} />{queuedMessagesStack}</>}
           pendingInteraction={pendingInteractionBanner}
           composer={bottomComposerConfig}
           pluginComposerHost={bottomPluginComposerHost}

@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   definePluginApp,
   useRealtime,
@@ -8,9 +15,10 @@ import {
 import { visibleLibrary, type Snippet } from "./library.ts";
 import {
   argumentFields,
-  matchKeyword,
+  compileLibrary,
   renderSnippet,
   requiresClipboard,
+  type SnippetIndex,
 } from "./template.ts";
 import type { rpcContract } from "./server.ts";
 import type { View } from "./service.ts";
@@ -40,6 +48,29 @@ interface Use {
   remove: number;
   suffix: string;
   copy?: boolean;
+}
+interface ComposerTextInputContext {
+  dom: HTMLElement;
+  text: string;
+  before(maxLen: number): string;
+  replace(remove: number, text: string, cursor?: number): boolean;
+}
+type ComposerTextInputHandler = (input: ComposerTextInputContext) => boolean;
+const TEXT_INPUT_REGISTRY_KEY = Symbol.for("cloudroom:composer-text-input");
+function registerTextInputHandler(handler: ComposerTextInputHandler) {
+  const store = window as unknown as Record<
+    symbol,
+    Set<ComposerTextInputHandler> | undefined
+  >;
+  let set = store[TEXT_INPUT_REGISTRY_KEY];
+  if (!set) {
+    set = new Set();
+    store[TEXT_INPUT_REGISTRY_KEY] = set;
+  }
+  set.add(handler);
+  return () => {
+    set.delete(handler);
+  };
 }
 const openEvent = "cloudroom:snippets-open";
 function open(
@@ -180,14 +211,19 @@ function Snippets() {
     const change = payload as { team?: boolean; origin?: string } | null;
     if (change?.origin !== origin) void refresh(change?.team ?? true, true);
   });
-  const close = () => {
+  const overlayOpen = Boolean(
+    screen || prompt || choices.length || problem || notice || typingError,
+  );
+  const overlayOpenRef = useRef(overlayOpen);
+  const close = useCallback(() => {
+    if (!overlayOpenRef.current) return;
     setChoices([]);
     setScreen(null);
     setPrompt(null);
     setProblem("");
     setNotice("");
     setTypingError("");
-  };
+  }, []);
   const items = useCallback(() => {
     const entries: Entry[] = [
       ...(view?.team ?? []).map((row) => ({
@@ -201,26 +237,45 @@ function Snippets() {
     ];
     return entries;
   }, [view]);
-  const library = useCallback(
-    () => visibleLibrary(view?.personal ?? [], view?.team ?? []),
+  const compiled = useMemo(
+    () =>
+      view
+        ? compileLibrary(
+            visibleLibrary(view.personal, view.team),
+            view.mode,
+            view.withinWords,
+          )
+        : null,
     [view],
   );
+  const compiledRef = useRef<SnippetIndex | null>(compiled);
+  const ownerRef = useRef<string | null>(view?.owner ?? null);
+  const library = useCallback(() => compiled?.library ?? [], [compiled]);
   const history = useClipboardHistory(
     view?.owner ?? null,
     view?.clipboardHistory ?? false,
   );
   async function perform(use: Use, args: Record<string, string>) {
-    const needsClipboard = requiresClipboard(use.row.text, use.library);
+    const index = compiledRef.current;
+    const meta = index?.compiledOf(use.row);
+    const needsClipboard =
+      meta && !meta.compileError
+        ? meta.needsClipboard
+        : requiresClipboard(use.row.text, use.library);
     const clipboard = needsClipboard
       ? await navigator.clipboard.readText()
       : "";
     if (!view || view.owner !== openOwner.current)
       throw new Error("The account changed. Reopen Snippets.");
-    const rendered = renderSnippet(use.row.text, use.library, {
+    const context = {
       values: args,
       clipboard,
       clipboardHistory: history.read(clipboard),
-    });
+    };
+    const rendered =
+      meta && index
+        ? index.renderSync(meta, context)
+        : renderSnippet(use.row.text, use.library, context);
     if (needsClipboard) history.remember(clipboard);
     if (use.copy) {
       await navigator.clipboard.writeText(rendered.text);
@@ -239,6 +294,11 @@ function Snippets() {
   }
   const begin = async (use: Use, fromTyping = false) => {
     try {
+      const meta = compiledRef.current?.compiledOf(use.row);
+      if (meta && !meta.compileError && !meta.hasArgs) {
+        await perform(use, {});
+        return;
+      }
       const fields = argumentFields(use.row.text, use.library);
       if (fields.length) {
         setPrompt(use);
@@ -251,8 +311,13 @@ function Snippets() {
     }
   };
   const beginRef = useRef(begin);
-  useEffect(() => {
+  const closeRef = useRef(close);
+  useLayoutEffect(() => {
+    overlayOpenRef.current = overlayOpen;
+    compiledRef.current = compiled;
+    ownerRef.current = view?.owner ?? null;
     beginRef.current = begin;
+    closeRef.current = close;
   });
 
   useEffect(() => {
@@ -350,42 +415,28 @@ function Snippets() {
     return () => window.clearInterval(timer);
   }, [followsCloud, refresh]);
   useEffect(() => {
-    if (!view || view.mode === "off") return;
-    const rows = library();
     let active = true;
     const scheduled = new Set<Element>();
-    function typed(event: Event) {
-      const el = event.target;
-      if (!(el instanceof Element) || !el.matches("[data-cloudroom-composer]"))
-        return;
-      if (
-        event instanceof InputEvent &&
-        (event.isComposing ||
-          ![
-            "insertText",
-            "insertReplacementText",
-            "insertCompositionText",
-            "insertParagraph",
-            "insertLineBreak",
-          ].includes(event.inputType))
-      )
-        return;
+    function schedulePostInput(el: Element) {
       if (scheduled.has(el)) return;
       scheduled.add(el);
       queueMicrotask(() => {
         scheduled.delete(el);
-        if (!active || document.activeElement !== el) return;
+        const index = compiledRef.current;
+        if (
+          !active ||
+          !index ||
+          index.mode === "off" ||
+          ownerRef.current !== openOwner.current ||
+          document.activeElement !== el
+        )
+          return;
         const range = rangeOf(el);
         if (!range || range.selected) return;
-        const hit = matchKeyword(
-          range.before,
-          rows,
-          view!.mode,
-          view!.withinWords,
-        );
+        const hit = index.match(range.before);
         if (!hit) return;
         const use = {
-          library: rows,
+          library: index.library,
           range,
           remove: hit.remove,
           suffix: hit.suffix,
@@ -396,16 +447,63 @@ function Snippets() {
         } else void beginRef.current({ ...use, row: hit.snippet }, true);
       });
     }
-    document.addEventListener("cloudroom:composer-break", typed);
-    document.addEventListener("input", typed, false);
-    document.addEventListener("compositionend", typed, false);
+    const unregisterTextInput = registerTextInputHandler((input) => {
+      const index = compiledRef.current;
+      if (
+        !index ||
+        ownerRef.current !== openOwner.current ||
+        !index.canEndWith(input.text)
+      )
+        return false;
+      const before = input.before(index.maxLookback);
+      const hit = index.match(before + input.text);
+      if (!hit) return false;
+      const { compiled: meta } = hit;
+      // Conflict picker, arguments form, or async clipboard: let ProseMirror commit the
+      // character normally, then run the interactive/async flow in a microtask.
+      if (hit.choices.length || meta.hasArgs || meta.needsClipboard) {
+        schedulePostInput(input.dom);
+        return false;
+      }
+      let rendered: { text: string; cursor?: number };
+      try {
+        rendered = index.renderSync(meta);
+      } catch (error) {
+        setTypingError(error instanceof Error ? error.message : String(error));
+        return false;
+      }
+      if (
+        !input.replace(hit.remove, rendered.text + hit.suffix, rendered.cursor)
+      )
+        return false;
+      if (overlayOpenRef.current) closeRef.current();
+      return true;
+    });
+    function onBreak(event: Event) {
+      const index = compiledRef.current;
+      if (!index || index.mode === "immediate" || index.mode === "off") return;
+      const el = event.target;
+      if (!(el instanceof Element) || !el.matches("[data-cloudroom-composer]"))
+        return;
+      schedulePostInput(el);
+    }
+    function onCompositionEnd(event: Event) {
+      const index = compiledRef.current;
+      if (!index || index.mode === "off") return;
+      const el = event.target;
+      if (!(el instanceof Element) || !el.matches("[data-cloudroom-composer]"))
+        return;
+      schedulePostInput(el);
+    }
+    document.addEventListener("cloudroom:composer-break", onBreak);
+    document.addEventListener("compositionend", onCompositionEnd, false);
     return () => {
       active = false;
-      document.removeEventListener("cloudroom:composer-break", typed);
-      document.removeEventListener("input", typed, false);
-      document.removeEventListener("compositionend", typed, false);
+      unregisterTextInput();
+      document.removeEventListener("cloudroom:composer-break", onBreak);
+      document.removeEventListener("compositionend", onCompositionEnd, false);
     };
-  }, [view, library]);
+  }, []);
   const run = (argv: string[], selected: Scope = "personal") => {
     if (!view) throw new Error("Wait for your library to load.");
     const result = rpc.call("run", {

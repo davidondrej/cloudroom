@@ -1,11 +1,20 @@
-import { PLUGIN_CATALOG_CATEGORIES, pluginCatalogCategory } from "@cloudroom/domain";
+import {
+  PLUGIN_CATALOG_CATEGORIES,
+  pluginCatalogCategory,
+} from "@cloudroom/domain";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
 import type { PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 
-export type PluginListFilter = "all" | "installed" | "updates";
+/** "cloudroom" is the "See all" of the Made by Cloudroom cards; it has no button in the filter toggle. */
+export type PluginListFilter = "all" | "installed" | "updates" | "cloudroom";
+
+/** The catalog of the plugins Cloudroom builds itself. */
+export const OFFICIAL_MARKETPLACE = "bb-official";
 
 export function pluginListFilter(value: string | null): PluginListFilter {
-  return value === "installed" || value === "updates" ? value : "all";
+  return value === "installed" || value === "updates" || value === "cloudroom"
+    ? value
+    : "all";
 }
 
 export interface PluginListRow {
@@ -101,6 +110,12 @@ export function filterPluginRows(
   return rows.filter((row) => {
     if (filter === "installed" && !row.installed) return false;
     if (filter === "updates" && !pluginRowHasUpdate(row)) return false;
+    if (
+      filter === "cloudroom" &&
+      row.entry?.marketplace !== OFFICIAL_MARKETPLACE
+    ) {
+      return false;
+    }
     if (needle === "") return true;
     if (row.entry !== null && catalogMatches?.has(row.key)) return true;
     return [
@@ -154,5 +169,14 @@ export function groupPluginRows(
   }
   return [...groups.values()].sort(
     (left, right) => groupRank(left.key) - groupRank(right.key),
+  );
+}
+
+/** Most installed first. The counts are the catalog's; plugins without one keep their catalog order at the end. */
+export function popularPluginRows(
+  rows: readonly PluginListRow[],
+): PluginListRow[] {
+  return [...rows].sort(
+    (left, right) => (right.entry?.installs ?? 0) - (left.entry?.installs ?? 0),
   );
 }

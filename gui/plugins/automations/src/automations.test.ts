@@ -28,6 +28,7 @@ import {
   listAutomationRuns,
   migrations,
   addReviewThread,
+  markAutomationThread,
   releaseSignInHolds,
   setAutomationEnabled,
   setAutomationRunThread,
@@ -59,7 +60,9 @@ import { RECOVERY_WAIT_MS, sweepDueAutomations } from "./sweep.js";
 import type { FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
 import { buildReview } from "./review.js";
+import { forgetCloud, loopThreads, pausedCloud } from "./paused.js";
 import { registerAutomationCli } from "./cli.js";
+import { createRpcHandlers } from "./rpc.js";
 import { automationScriptDir } from "./script-files.js";
 
 function createTestDb(): Db {
@@ -2910,6 +2913,95 @@ describe("loop fallback", () => {
 });
 
 describe("loop review", () => {
+  it("names the loops that started or wake each thread, for the sidebar's loop icon (#1136)", async () => {
+    const now = Date.now();
+    const db = createTestDb();
+    createScheduledAutomation(db, now + 60_000);
+    // Only the open threads the sidebar shows are looked up: an archived run thread gets nothing.
+    for (const threadId of ["thr_run", "thr_archived"])
+      markAutomationThread(db, {
+        threadId,
+        automationId: "auto_test",
+        runId: `run_${threadId}`,
+        now,
+      });
+    for (const [id, name] of [
+      ["auto_a", "Nightly tests"],
+      ["auto_b", "Dependency audit"],
+    ] as const) {
+      createScheduledAutomation(db, now + 60_000, id);
+      db.prepare(
+        "UPDATE automations SET name = ?, target_thread_id = 'thr_target' WHERE id = ?",
+      ).run(name, id);
+    }
+    addReviewThread(db, {
+      threadId: "thr_cloud_run",
+      automationId: null,
+      runId: null,
+      loopName: "PR loop",
+      createdAt: now - 1_000,
+    });
+    // A one-time loop that ran is turned off and wakes nothing, Local or Cloud. A child's Cloud loop names the
+    // sandbox's root thread; it wakes the thread its session belongs to.
+    createOnceAutomation(db, now - 60_000);
+    db.prepare(
+      "UPDATE automations SET target_thread_id = 'thr_reminded', enabled = 0 WHERE id = 'auto_once'",
+    ).run();
+    const cloudLoop = {
+      last_error: null,
+      last_run_at: null,
+      created_at: "2026-11-01T00:00:00Z",
+    };
+    forgetCloud();
+    const website = {
+      automations: vi.fn(async () => ({
+        automations: [
+          {
+            ...cloudLoop,
+            id: "c1",
+            thread_id: "thr_root",
+            session_id: "ses_target",
+            session_thread_id: "thr_target",
+            name: "Cloud check",
+            enabled: true,
+            run_at: null,
+          },
+          // A child whose session isn't synced here yet: marks nothing, never the sandbox's root.
+          {
+            ...cloudLoop,
+            id: "c3",
+            thread_id: "thr_root",
+            session_id: "ses_unsynced",
+            name: "Child check",
+            enabled: true,
+            run_at: null,
+          },
+          {
+            ...cloudLoop,
+            id: "c2",
+            thread_id: "thr_reminded",
+            name: "Check back",
+            enabled: false,
+            run_at: "2026-11-12T10:00:00Z",
+          },
+        ],
+      })),
+    };
+    // A read while the first waits on the website (the sidebar's threads arrived) gets its answer, not an empty one.
+    const [, cloud] = await Promise.all([
+      pausedCloud(website as never, now),
+      pausedCloud(website as never, now),
+    ]);
+    expect(website.automations).toHaveBeenCalledTimes(1);
+    const open = ["thr_run", "thr_target", "thr_cloud_run", "thr_reminded", "thr_root"];
+    expect(loopThreads(db, cloud.woken, open, now)).toEqual({
+      thr_run: "Started by loop: Test",
+      thr_target:
+        "Woken by loops: Nightly tests, Dependency audit, Cloud check",
+      thr_cloud_run: "Started by loop: PR loop",
+    });
+  });
+
   it("shows each run's saved report over its thread's summary (#1078)", async () => {
     const now = Date.now();
     const db = createTestDb();
@@ -2963,5 +3055,42 @@ describe("loop review", () => {
       expect(Object.fromEntries(review.items.map((item) => [item.id, { status: item.status, report: item.report }]))).toEqual(expected);
       expect(automations).toHaveBeenCalledWith({ action: "reports", runs: [run.id], threads: ["thr_cloud", "thr_busy", "thr_quiet"] });
     }
+  });
+});
+
+describe("scans_start on the Free plan (#2645)", () => {
+  async function start(planUsage: Record<string, unknown>) {
+    const spawned: { prompt: string; pluginMetadata: unknown }[] = [];
+    const saved = new Map<string, unknown>();
+    const sdk = {
+      cloudroom: {
+        status: async () => ({ plan: "free", planUsage }),
+        vps: async () => ({ connected: false, useForCloud: false }),
+        claudeAuth: async () => null,
+        codexAuth: async () => null,
+      },
+      threads: {
+        spawn: async (input: { prompt: string; pluginMetadata: unknown }) => { spawned.push(input); return { id: "thr_scan" }; },
+        pin: async () => null,
+      },
+    };
+    const kv = { get: async (key: string) => saved.get(key), set: async (key: string, value: unknown) => { saved.set(key, value); } };
+    const rpc = createRpcHandlers({} as never, sdk as never, undefined, () => {}, { kv: kv as never, pluginId: "automations" });
+    const error = await rpc.scans_start({ kind: "workflow" }).then(() => null, (e: Error) => e);
+    return { error, spawned, saved };
+  }
+
+  it("keeps the free scan unused when no Cloud threads are left", async () => {
+    const { error, spawned, saved } = await start({ threadsLeft: 0, threadsHourLeft: 5, resetsAt: "2026-12-24T12:00:00.000Z" });
+    expect(error?.message).toMatch(/still unused: try again after Dec 24/);
+    expect(spawned).toHaveLength(0);
+    expect(saved.size).toBe(0);
+  });
+
+  it("fits its readers in the threads left this month and hour", async () => {
+    const { error, spawned } = await start({ threadsLeft: 7, threadsHourLeft: 2 });
+    expect(error).toBeNull();
+    expect(spawned[0]?.prompt).toContain("Free plan: at most 2 readers, and Local loops.");
+    expect(spawned[0]?.pluginMetadata).toEqual({ workflowScan: { stage: "finding", maxReaders: 2 } });
   });
 });

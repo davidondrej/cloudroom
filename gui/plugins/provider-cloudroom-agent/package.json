@@ -3,13 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Keep going when Claude Code or Codex hits its plan limit. Runs on frontier open source models, paid with Cloud Credits.",
+  "description": "Keep going when Claude Code or Codex hits its plan limit. Runs on a mix of frontier models, paid with Cloud Credits.",
   "engines": {
     "bb": ">=0.0"
   },
   "bb": {
     "name": "Cloudroom Agent",
-    "description": "Keep going when Claude Code or Codex hits its plan limit. Runs on frontier open source models, paid with Cloud Credits.",
+    "description": "Keep going when Claude Code or Codex hits its plan limit. Runs on a mix of frontier models, paid with Cloud Credits.",
     "branding": {
       "icon": "Cloud"
     },

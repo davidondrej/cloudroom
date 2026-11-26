@@ -33,6 +33,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CompactLongPressMenu } from "@/components/ui/compact-long-press-menu";
 import { isThreadRead } from "@cloudroom/client-core";
 import { copyToClipboardWithToast } from "@/lib/clipboard";
+import { promptMentionClipboardHtml } from "@/components/promptbox/mentions/prompt-mention-clipboard";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
 import { useThreadActions } from "./ThreadActionsProvider";
 import { useThreadSectionMove } from "./ThreadSectionMoveProvider";
@@ -430,12 +431,18 @@ function ThreadActionsMenuItems({
         icon="Copy"
         onSelect={() => {
           void copyToClipboardWithToast(threadName, {
-            successMessage: "Thread name copied",
-            errorMessage: "Failed to copy thread name",
+            html: promptMentionClipboardHtml({
+              kind: "thread",
+              threadId: thread.id,
+              projectId: thread.projectId,
+              label: threadName,
+            }),
+            successMessage: "Thread copied",
+            errorMessage: "Failed to copy thread",
           });
         }}
       >
-        Copy thread name
+        Copy thread
       </ActionMenuItem>
       <ActionMenuItem
         surface={surface}

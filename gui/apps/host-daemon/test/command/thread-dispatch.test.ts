@@ -2604,3 +2604,123 @@ describe("thread command dispatch", () => {
     });
   });
 });
+
+describe("reopening a thread before a message", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const resumeTimeout = () =>
+    Object.assign(new Error("JSON-RPC request timed out: thread/resume"), {
+      code: "rpc_timeout",
+    });
+
+  function submitTo(providerId: string, threadId: string) {
+    return {
+      bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+      type: "turn.submit" as const,
+      environmentId: "env-1",
+      threadId,
+      requestId: nextClientRequestId(),
+      input: [textPromptInput("hi")],
+      options: {
+        model: "gpt-5",
+        serviceTier: "default" as const,
+        reasoningLevel: "medium" as const,
+        providerOptions: {},
+        permissionMode: "full" as const,
+        permissionScope: "full" as const,
+        approvalReviewer: null,
+        permissionEscalation: null,
+      },
+      target: { mode: "start" as const },
+      resumeContext: {
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        workspaceContext: { workspacePath: "/tmp/env-1" },
+        projectId: "project-1",
+        providerId,
+        providerThreadId: `provider-${threadId}`,
+        instructions: "Be a helpful coding agent.",
+        dynamicTools: [],
+        contributedEnv: [],
+        injectedSkillSources: [],
+        instructionMode: "append" as const,
+      },
+    };
+  }
+
+  /** Fails the first `failures` reopens with a timeout, as an agent cut off from its servers does. */
+  function harnessWithFailingResumes(failures: number) {
+    const harness = createHarness();
+    const resume = harness.runtime.resumeThread.bind(harness.runtime);
+    let calls = 0;
+    harness.runtime.resumeThread = async (args) => {
+      calls += 1;
+      if (calls <= failures) throw resumeTimeout();
+      return resume(args);
+    };
+    return { harness, calls: () => calls };
+  }
+
+  it("retries an offline Antigravity reopen and sends the message once", async () => {
+    const { harness, calls } = harnessWithFailingResumes(1);
+
+    await dispatchCommand(
+      submitTo("acp-antigravity", "thread-agy"),
+      harness.dispatchOptions(),
+    );
+
+    expect(calls()).toBe(2);
+    expect(harness.runtimeState.ranTurnText).toBe("hi");
+  }, 20_000);
+
+  it("names the agent and the internet after 3 minutes of retries", async () => {
+    const { harness } = harnessWithFailingResumes(Infinity);
+    let now = Date.now();
+    vi.spyOn(Date, "now").mockImplementation(() => (now += 61_000));
+
+    await expect(
+      dispatchCommand(
+        submitTo("acp-antigravity", "thread-agy-offline"),
+        harness.dispatchOptions(),
+      ),
+    ).rejects.toMatchObject({
+      code: "rpc_timeout",
+      message:
+        "Antigravity couldn't reach its servers for 3 minutes. Check your internet connection. Your message was not sent; send it again to retry.",
+    });
+    expect(harness.runtimeState.ranTurnText).toBeUndefined();
+  });
+
+  it("gives other agents a plain message for a timed-out reopen, without retrying", async () => {
+    const { harness, calls } = harnessWithFailingResumes(Infinity);
+
+    await expect(
+      dispatchCommand(
+        submitTo("claude-code", "thread-claude"),
+        harness.dispatchOptions(),
+      ),
+    ).rejects.toMatchObject({
+      code: "rpc_timeout",
+      message:
+        "The agent didn't start in time. Your message was not sent; send it again to retry.",
+    });
+    expect(calls()).toBe(1);
+  });
+
+  it.each([
+    { name: "a failed reopen", failures: 1 },
+    { name: "a reopen that succeeds", failures: 0 },
+  ])("never sends the message after a Stop during $name", async ({ failures }) => {
+    const { harness } = harnessWithFailingResumes(failures);
+
+    await expect(
+      dispatchCommand(submitTo("acp-antigravity", `thread-stop-${failures}`), {
+        ...harness.dispatchOptions(),
+        isThreadStopPending: () => true,
+      }),
+    ).rejects.toMatchObject({
+      code: "stopped_before_send",
+      message: "Stopped before Antigravity started. Your message was not sent.",
+    });
+    expect(harness.runtimeState.ranTurnText).toBeUndefined();
+  });
+});

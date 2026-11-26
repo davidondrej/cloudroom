@@ -5,6 +5,7 @@ import { getThreadDisplayTitle } from "@/lib/thread-title";
 import { withDraftEdits } from "@/lib/draft-edits";
 import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/TeleportNotice";
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
+import { FailedMessageNotice } from "@/components/promptbox/banner/FailedMessageNotice";
 import { TryCloudCard } from "@/components/thread/TryCloudCard";
 import { SkillSuggestionCard } from "@/components/thread/SkillSuggestionCard";
 import { BuildNextCard } from "@/components/thread/BuildNextCard";
@@ -15,6 +16,7 @@ import { FixPrompt } from "@/components/ui/fix-prompt";
 import { cloudThreadFixPrompt, plainError } from "@/lib/fix-prompts";
 import { openUpgrade, splitUpgradeLink } from "@/lib/upgrade-prompt";
 import { canTeleportLocalThread, canTeleportThread } from "@/components/thread/ThreadActionsMenu";
+import { MissingSessionNotice } from "@/components/MissingSessionNotice";
 import { CloudMcpSignInNotice } from "@/components/CloudMcpSignIn";
 import { openTeleportLogin } from "@/components/CodexConnectionPanel";
 import {
@@ -141,6 +143,7 @@ import {
 import { useThreadDefaultExecutionOptions } from "@/hooks/queries/thread-default-execution-options-query";
 import {
   getMutationErrorMessage,
+  isDefiniteRejection,
   showMutationErrorToast,
 } from "@/lib/mutation-errors";
 import { promptHistoryEntriesToDrafts } from "@/lib/prompt-history";
@@ -214,6 +217,7 @@ interface ThreadDetailPromptAreaProps {
   pendingInteractions: readonly PendingInteraction[];
   pendingInteractionsInitialLoading: boolean;
   providerAuthFailed?: boolean;
+  sessionMissing?: boolean;
   queuedMessageCount: number;
   onChangedFileClick: (selection: WorkspaceChangedFileSelection) => void;
   projectId: string;
@@ -391,7 +395,7 @@ async function runWhileFollowUpShortcutSending(
 }
 
 import { showCloudSignIn, useCloudLocked } from "@/hooks/useCloudLocked";
-import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudOpenCodeCatalog, partitionCloudOpenCodeModelOptions, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, cloudroomRequestEntry, clearCloudroomRequestId, cloudReasoningLevels, cloudOpenCodeCatalog, partitionCloudOpenCodeModelOptions, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
@@ -419,6 +423,7 @@ export function ThreadDetailPromptArea({
   pendingInteractions,
   pendingInteractionsInitialLoading,
   providerAuthFailed = false,
+  sessionMissing = false,
   queuedMessageCount,
   onChangedFileClick,
   projectId,
@@ -1091,9 +1096,11 @@ export function ThreadDetailPromptArea({
       serviceTier: cloudFastSupported && serviceTier ? serviceTier : "default" as const,
       mode: steer && thread.status === "active" ? "steer-if-active" as const : "queue-if-active" as const,
     };
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
+    let pinned: ReturnType<typeof cloudroomRequestEntry>;
     try {
       const requestId = await cloudroomRequestId(thread.id, request);
+      pinned = cloudroomRequestEntry(thread.id);
       await sendMessage.mutateAsync({
         ...request, requestId,
         ...(remoteMac && canRecoverCloudSend(submittedInput) ? { recoverCloudDelivery: true } : {}),
@@ -1102,7 +1109,8 @@ export function ThreadDetailPromptArea({
       draftEdits.commit();
       return true;
     } catch (error) {
-      promptDraft.restoreIfEmpty(submittedDraft);
+      // Unless surely refused, it waits as a failed message that keeps its request ID: never resent on its own.
+      promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error), request: pinned });
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
       return false;
     }
@@ -1123,7 +1131,7 @@ export function ThreadDetailPromptArea({
       return false;
     }
 
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
 
     try {
@@ -1150,7 +1158,7 @@ export function ThreadDetailPromptArea({
       }
       return true;
     } catch (nextError) {
-      promptDraft.restoreIfEmpty(submittedDraft);
+      promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
       showMutationErrorToast({
         error: nextError,
         fallbackMessage: isQueuingMessage
@@ -1268,13 +1276,13 @@ export function ThreadDetailPromptArea({
       execution: followUpExecutionSelection,
     });
     if (!request) return;
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     try {
       await createQueuedMessage.mutateAsync({ ...request, hardQueue: true });
       draftEdits.commit();
     } catch (nextError) {
-      promptDraft.restoreIfEmpty(submittedDraft);
+      promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
       showMutationErrorToast({
         error: nextError,
         fallbackMessage: "Failed to queue message",
@@ -1328,7 +1336,7 @@ export function ThreadDetailPromptArea({
         draftEdits.commit();
       } catch (scheduleError) {
         if (clearedSubmittedDraft) {
-          promptDraft.restoreIfEmpty(submittedDraft);
+          promptDraft.restoreFailedSend(submittedDraft, { cleared: true, refused: isDefiniteRejection(scheduleError) });
         }
         throw new Error(
           getMutationErrorMessage({
@@ -1378,7 +1386,7 @@ export function ThreadDetailPromptArea({
     }
 
     if (shortcutRequest.kind === "draft") {
-      promptDraft.clearIfCurrentMatches(submittedDraft);
+      const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
       dismissBottomAttachmentFailures();
       await runWhileFollowUpShortcutSending(
         setIsFollowUpShortcutSending,
@@ -1387,7 +1395,7 @@ export function ThreadDetailPromptArea({
             await sendMessage.mutateAsync(shortcutRequest.request);
             draftEdits.commit();
           } catch (nextError) {
-            promptDraft.restoreIfEmpty(submittedDraft);
+            promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
             showMutationErrorToast({
               error: nextError,
               fallbackMessage: "Failed to send message",
@@ -2449,7 +2457,7 @@ export function ThreadDetailPromptArea({
       threadProviderId={isCloud || (modelCatalogIsVerified && selectedProviderId === thread.providerId) ? thread.providerId : undefined}
       cloudShortcutModels={isCloud ? (shortcutHarness?.idle_set_model ? shortcutHarness.models?.map(({ model }) => model) ?? [] : []) : undefined}
       attachments={bottomAttachmentsConfig}
-      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{pendingInteractionNode && !pendingInteractionInChat ? pendingInteractionStack : promptStack}</>}
+      stack={<>{!isCloud && !teleporting && <TeleportCheckCard error={teleport.error} models={[...modelOptions, ...moreModelOptions]} reasoning={reasoningLevel} usedTokens={contextWindowUsage?.usedTokens ?? null} levelsFor={(model) => cloudReasoningLevels(cloudConnection.data, thread.providerId, model)} onTeleport={(choice) => teleport.mutate(choice)} onDismiss={teleport.reset} />}{slotCards}{thread.teleport && !movingToLocal && <TeleportNotice thread={thread} pendingDelivery={cloudState.data?.pendingDelivery} paused={cloudState.data?.paused} sending={sendMessage.isPending} />}{movingToLocal && <TeleportLocalNotice step={thread.teleportLocalStep} />}{thread.projectCopy && <ProjectCopyNotice thread={thread} />}{cloudNotice}{isCloud && claudeThread && !shouldHideComposer && <CloudMcpSignInNotice />}{!isCloud && !shouldHideComposer && sessionMissing && <MissingSessionNotice threadId={thread.id} />}{!shouldHideComposer && <FailedMessageNotice storageKey={promptDraft.storageKey} />}{pendingInteractionNode && !pendingInteractionInChat ? pendingInteractionStack : promptStack}</>}
       pendingInteraction={pendingInteractionInChat ? undefined : pendingInteractionNode}
       activePromptMode={activePromptMode}
       composer={shouldHideComposer || transferredChild ? null : bottomComposerConfig}

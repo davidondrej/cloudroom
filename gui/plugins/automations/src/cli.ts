@@ -1522,7 +1522,9 @@ async function runScanProgressCommand(
     const count = (value: unknown) => (typeof value === "number" ? value : null);
     trackScan(update.stage, { chats: count(next.chats), readers: count(next.readers), readers_done: count(next.readersDone), kind: scanKind(next) });
   }
-  return { exitCode: 0, stdout: optionalJson(args, { saved: true }) ?? "Scan progress saved\n" };
+  // `maxReaders`: the Free cap scans_start saved, which readers.py enforces (#2645); null when uncapped.
+  const saved = (current as { maxReaders?: unknown }).maxReaders, maxReaders = typeof saved === "number" ? saved : null;
+  return { exitCode: 0, stdout: optionalJson(args, { saved: true, maxReaders }) ?? "Scan progress saved\n" };
 }
 
 /** `room-cli loop report` (ADR 0298). Each `--action` counts, so the raw arguments are read for them. */

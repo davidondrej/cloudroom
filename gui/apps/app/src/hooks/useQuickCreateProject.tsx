@@ -123,6 +123,11 @@ export function QuickCreateProjectProvider({
   );
 }
 
+/** Null outside `QuickCreateProjectProvider`, such as plugin hooks in tests. */
+export function useOptionalQuickCreateProject(): QuickCreateProjectController | null {
+  return useContext(quickCreateProjectContext);
+}
+
 export function useQuickCreateProjectController(): QuickCreateProjectController {
   const quickCreateProject = useContext(quickCreateProjectContext);
   if (!quickCreateProject) {

@@ -77,11 +77,13 @@ import {
   createLocalStorageSyncStorage,
 } from "@/lib/browser-storage";
 import {
+  BROWSER_COLLAPSED_HEADER_RESERVE_CLASS,
   BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
   CHROME_ROW_CLASS,
   getRoomDesktopInfo,
   MACOS_CHROME_CONTROL_AXIS_CLASS,
   MACOS_CHROME_CONTROL_NO_DRAG_CLASS,
+  MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS,
   MACOS_SIDEBAR_MIN_WIDTH,
   MACOS_UNZOOMED_CHROME_CLASS,
   MACOS_WINDOW_DRAG_CLASS,
@@ -238,6 +240,27 @@ function SidebarStateBridge({
       {children}
     </SidebarProvider>
   );
+}
+
+// With no page header above them, top banners sit beside the window controls while the sidebar is closed: keep their text clear of them.
+function TopBanners({
+  children,
+  ownsWindowTopLeft,
+  reserveMacosTrafficLights,
+}: {
+  children: ReactNode;
+  ownsWindowTopLeft: boolean;
+  reserveMacosTrafficLights: boolean;
+}) {
+  const isSidebarShowing = useIsSidebarShowing();
+  const isCompactViewport = useIsCompactViewport();
+  const reserve =
+    ownsWindowTopLeft && (isCompactViewport || !isSidebarShowing)
+      ? reserveMacosTrafficLights
+        ? MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS
+        : BROWSER_COLLAPSED_HEADER_RESERVE_CLASS
+      : undefined;
+  return <div className={cn("flex shrink-0 flex-col", reserve)}>{children}</div>;
 }
 
 interface SidebarTriggerOverlayProps {
@@ -920,16 +943,21 @@ export function AppLayout({ children }: AppLayoutProps) {
                     />
                   ) : null}
                   <OtherMacStatus />
-                  <GitForWindowsBanner />
-                  <DesktopUpdateBanner />
-                  <LowDiskBanner />
-                  <CloudPausedBanner />
-                  <CloudLoginBanner
-                    threadId={threadId ?? null}
-                    onLoops={
-                      pluginPanelMatch?.params.pluginId === "automations"
-                    }
-                  />
+                  <TopBanners
+                    ownsWindowTopLeft={!showHeader}
+                    reserveMacosTrafficLights={reserveMacosTrafficLights}
+                  >
+                    <GitForWindowsBanner />
+                    <DesktopUpdateBanner />
+                    <LowDiskBanner />
+                    <CloudPausedBanner />
+                    <CloudLoginBanner
+                      threadId={threadId ?? null}
+                      onLoops={
+                        pluginPanelMatch?.params.pluginId === "automations"
+                      }
+                    />
+                  </TopBanners>
                   <ProviderLoginListener />
                   <main
                     ref={mainRef}

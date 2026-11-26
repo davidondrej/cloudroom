@@ -102,6 +102,7 @@ export const UI_PREFERENCE_KEYS = [
   "projectNudge.confidence",
   "search.smart",
   "appearance.theme",
+  "appearance.showSubagentBar",
   "defaults.startingMachine",
   "defaults.showUltraEfforts",
 ] as const;
@@ -313,6 +314,11 @@ export const uiPreferenceDefinitions = {
     z.enum(["light", "dark", "system"]),
     "system",
     "Light, dark, or system color mode for every Cloudroom window.",
+  ),
+  "appearance.showSubagentBar": defineUiPreference(
+    z.boolean(),
+    true,
+    "Show the bar of subagents (child threads) under a thread's title.",
   ),
   "defaults.startingMachine": defineUiPreference(
     z.enum(["cloud", "last"]),

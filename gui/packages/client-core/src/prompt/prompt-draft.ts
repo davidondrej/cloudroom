@@ -356,6 +356,79 @@ export function numberMessageContextInDraft(
   };
 }
 
+function endsInsideCodeFence(text: string): boolean {
+  let fence: CodeFenceState | null = null;
+  let start = 0;
+  for (const line of text.split("\n")) {
+    const end = start + line.length - (line.endsWith("\r") ? 1 : 0);
+    fence = updateCodeFenceState(fence, text, start, end);
+    start += line.length + 1;
+  }
+  return fence !== null;
+}
+
+/**
+ * Puts a failed send back above what the user wrote since. Quotes keep their own
+ * bodies: a colliding label in `current` is renamed and later mentions shift.
+ * Null when `failed` ends inside an open code fence, which would swallow `current`.
+ */
+export function prependPromptDraft(
+  failed: PromptDraftState,
+  current: PromptDraftState,
+): PromptDraftState | null {
+  if (endsInsideCodeFence(failed.text)) return null;
+  const byLabel = new Map((failed.contexts ?? []).map((c) => [c.label, c]));
+  const reserved = new Set((current.contexts ?? []).map((c) => c.label));
+  const renames = new Map<string, string>();
+  for (const context of current.contexts ?? []) {
+    const label = uniqueMessageContextLabel(
+      context.label,
+      context.text,
+      context.mentions,
+      byLabel,
+      new Set([...reserved].filter((other) => other !== context.label)),
+    );
+    if (label !== context.label) renames.set(context.label, label);
+    byLabel.set(label, { ...context, label });
+  }
+  let text = "";
+  let last = 0;
+  const shifts: { at: number; delta: number }[] = [];
+  for (const line of findMessageContextLines(current.text)) {
+    const label = renames.get(line.label);
+    if (label === undefined) continue;
+    const next = messageContextLine(label);
+    text += current.text.slice(last, line.start) + next;
+    last = line.end;
+    shifts.push({
+      at: line.end,
+      delta: (shifts.at(-1)?.delta ?? 0) + next.length - (line.end - line.start),
+    });
+  }
+  text += current.text.slice(last);
+  const offset = failed.text.length + 2;
+  const shiftAt = (index: number) =>
+    offset + (shifts.filter((shift) => shift.at <= index).at(-1)?.delta ?? 0);
+  const paths = new Set(failed.attachments.map((attachment) => attachment.path));
+  const contexts = [...byLabel.values()];
+  return {
+    text: `${failed.text}\n\n${text}`,
+    mentions: [
+      ...failed.mentions,
+      ...current.mentions.map((mention) => ({
+        ...mention,
+        start: mention.start + shiftAt(mention.start),
+        end: mention.end + shiftAt(mention.start),
+      })),
+    ],
+    attachments: [
+      ...failed.attachments,
+      ...current.attachments.filter((attachment) => !paths.has(attachment.path)),
+    ],
+    ...(contexts.length > 0 ? { contexts } : {}),
+  };
+}
+
 export function isPromptDraftEmpty(draft: PromptDraftState): boolean {
   return (
     draft.text.length === 0 &&

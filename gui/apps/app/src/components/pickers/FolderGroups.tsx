@@ -88,7 +88,7 @@ export function FolderPathGroup({
         <CommandItem
           key={entry.path}
           value={folderValue(entry.path)}
-          disabled={addingKey !== null && addingKey !== entry.path}
+          disabled={(folders.drive && entry !== folders.exact) || (addingKey !== null && addingKey !== entry.path)}
           onSelect={() => onPick(entry)}
           className={rowClassName}
         >

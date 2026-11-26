@@ -50,6 +50,43 @@ export function CloudCapacityCard({ capacity, onUseLocal }: { capacity: CloudCap
   );
 }
 
+/** "Dec 18" from an ISO date, or null. */
+export const limitDay = (iso: string | null | undefined) => {
+  const at = iso ? new Date(iso) : null;
+  return at && Number.isFinite(at.getTime()) ? at.toLocaleDateString("en-US", { month: "short", day: "numeric" }) : null;
+};
+
+/** Under the new-thread composer when Free's Cloud is used up (David, 2026-11-26): says so before the send, with when it
+ *  comes back, and offers Local, which is free and unlimited. Send still works: the thread waits for the reset. */
+export function CloudLimitCard({ limit, onUseLocal }: { limit: { kind: "credits" | "threads"; resetsAt: string | null }; onUseLocal: () => void }) {
+  useUpgradePromptViewed("limit_notice");
+  const day = limitDay(limit.resetsAt);
+  return (
+    <section aria-label="Free Cloud limit" className="mt-3 flex gap-3 rounded-lg border border-warning/30 bg-surface-raised-solid p-4">
+      <Icon name="Cloud" className="mt-0.5 size-4 shrink-0 text-warning-text" aria-hidden />
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-medium text-foreground">
+          {limit.kind === "threads" ? "You used Free's 10 Cloud threads this month" : "You used Free's Cloud Credits this month"}
+        </p>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+          {day ? `Cloud starts again on ${day}.` : "Cloud starts again when your credits refill."} Local threads are free and unlimited, so you can keep going right now.
+        </p>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" onClick={() => openUpgrade("limit_notice")}>
+            <Icon name="Zap" aria-hidden />
+            Upgrade to Pro
+          </Button>
+          <Button type="button" size="sm" variant="outline" onClick={onUseLocal}>
+            <Icon name="Laptop" aria-hidden />
+            Run it on Local
+          </Button>
+          <span className="text-xs text-muted-foreground">Pro is $50/month</span>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /** Under the new-thread composer while Cloud is picked and the account waits. */
 export function CloudQueueCard({ queue, onUseLocal }: { queue: CloudQueue; onUseLocal: () => void }) {
   const local = <Button type="button" size="sm" variant="outline" onClick={onUseLocal}><Icon name="Laptop" aria-hidden />Run it on Local</Button>;

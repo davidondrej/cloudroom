@@ -15,6 +15,80 @@ export function weightedTokens(tokens: { input: number | null; cacheRead: number
   return fresh + 0.1 * read + 1.25 * (tokens.cacheWrite ?? 0) + 5 * (tokens.output ?? 0);
 }
 
+/** Each thread's use added to its top parent's, so a parent counts its children. Biggest first. */
+export function byTopParent(
+  db: DbQueryConnection,
+  use: ReadonlyMap<string, number>,
+) {
+  type Row = {
+    id: string;
+    parent: string | null;
+    title: string | null;
+    providerId: string;
+    projectId: string;
+  };
+  const found = new Map<string, Row>();
+  for (
+    let next = [...use].flatMap(([id, tokens]) => (tokens > 0 ? [id] : []));
+    next.length > 0;
+  ) {
+    const rows: Row[] = db
+      .select({
+        id: threads.id,
+        parent: threads.parentThreadId,
+        title: sql<
+          string | null
+        >`coalesce(${threads.title}, ${threads.titleFallback})`,
+        providerId: threads.providerId,
+        projectId: threads.projectId,
+      })
+      .from(threads)
+      .where(inArray(threads.id, next))
+      .all();
+    for (const row of rows) found.set(row.id, row);
+    next = [
+      ...new Set(
+        rows.flatMap((row) =>
+          row.parent && !found.has(row.parent) ? [row.parent] : [],
+        ),
+      ),
+    ];
+  }
+  const tops = new Map<
+    string,
+    {
+      id: string;
+      title: string;
+      providerId: string;
+      projectId: string;
+      tokens: number;
+      children: number;
+    }
+  >();
+  for (const [id, tokens] of use) {
+    let top = found.get(id);
+    if (!top || tokens <= 0) continue;
+    for (
+      let depth = 0;
+      top.parent && found.has(top.parent) && depth < 50;
+      depth += 1
+    )
+      top = found.get(top.parent)!;
+    const entry = tops.get(top.id) ?? {
+      id: top.id,
+      title: top.title ?? "Untitled",
+      providerId: top.providerId,
+      projectId: top.projectId,
+      tokens: 0,
+      children: 0,
+    };
+    entry.tokens += tokens;
+    if (id !== top.id) entry.children += 1;
+    tops.set(top.id, entry);
+  }
+  return [...tops.values()].sort((a, b) => b.tokens - a.tokens);
+}
+
 /** A Cloud loop run as the website saved it: `input` is new input only, whatever the harness. */
 export type CloudRun = { thread: string; at: number; harness: string; input: number; output: number; cacheRead: number; cacheWrite: number };
 export const weightedRun = (run: Pick<CloudRun, "input" | "output" | "cacheRead" | "cacheWrite">): number =>

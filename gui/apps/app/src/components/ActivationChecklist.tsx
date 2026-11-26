@@ -30,6 +30,7 @@ const STEPS: { id: Step; title: string; route?: () => string; prompt?: string }[
   { id: "subagents", title: "Run 3 agents at once", prompt: "Start 3 sub-agents. Tell each of them to check a different part of this repo for security vulnerabilities. Report only." },
   { id: "phone", title: "Open Cloudroom on your phone", route: () => getPluginConfigurationRoutePath({ pluginId: "connect" }) },
 ];
+const FREE_LOOP_PROMPT = "Create a Local loop for this repo that runs every weekday at 9am: check for new security issues and only tell me if you find one.";
 const SCANS_WINDOW_THREADS = 10;
 const isChecklistCompleted = (data: Activation) => STEPS.every((step) => data.steps[step.id]);
 // Free plans: each Hide lasts longer, by the account's hides so far (8 hours, 3 days, then 7 days).
@@ -103,7 +104,7 @@ function useScansShown(data: Activation | undefined, onScreen = true) {
   const always = useAtomValue(alwaysShowScansAtom);
   const plan = useCloudroomAccount().data?.plan;
   const checklistDone = data !== undefined && isChecklistCompleted(data);
-  const inScansWindow = data !== undefined && data.started <= (data.completedStarted ?? 0) + SCANS_WINDOW_THREADS;
+  const inScansWindow = data !== undefined && (data.completedStarted != null ? data.started < data.completedStarted + SCANS_WINDOW_THREADS : data.started <= SCANS_WINDOW_THREADS);
   const wanted = data !== undefined && plan != null && (always || (checklistDone && inScansWindow));
   const agents = useScanAgents(wanted && onScreen);
   const state = useScanState(wanted && onScreen);
@@ -223,9 +224,11 @@ export function ActivationChecklist() {
   const start = (step: (typeof STEPS)[number]) => {
     void report(step.id, "clicked");
     if (step.route) return navigate(step.route());
-    selectCloudForNewThreads();
+    // Free: a Local loop, since each Cloud loop run is one of Free's 10 Cloud threads a month (#2645).
+    const local = step.id === "loop" && plan === "free";
+    if (!local) selectCloudForNewThreads();
     void navigate(getRootComposeRoutePath(), {
-      state: { focusPrompt: true, initialPrompt: step.prompt, replaceInitialPrompt: true, executionTarget: "cloud" },
+      state: { focusPrompt: true, initialPrompt: local ? FREE_LOOP_PROMPT : step.prompt, replaceInitialPrompt: true, executionTarget: local ? "local" : "cloud" },
     });
   };
   return (
@@ -252,7 +255,7 @@ export function ActivationChecklist() {
                 <span className={cn(isDone ? "text-muted-foreground/70 line-through decoration-foreground/25" : isNext ? "font-medium text-foreground" : "text-foreground/70")}>{step.title}</span>
                 {isDone ? null : (
                   <span className={cn("ml-auto flex shrink-0 items-center font-semibold", isNext ? "h-7 gap-1 rounded-[7px] bg-primary px-3 text-[13px] text-primary-foreground transition-colors group-hover:bg-primary/90" : "hidden gap-0.5 text-xs text-primary-text group-hover:flex")}>
-                    Start<Icon name="ArrowRight" className="size-3.5" aria-hidden />
+                    Show me<Icon name="ArrowRight" className="size-3.5" aria-hidden />
                   </span>
                 )}
               </button>
@@ -260,7 +263,9 @@ export function ActivationChecklist() {
           );
         })}
       </ul>
-      <div className="flex justify-end px-3 pb-2">
+      {/* Users skipped the steps, thinking a click acts for them. It only fills in a prompt (or shows the phone QR code). */}
+      <div className="flex items-center justify-between gap-3 pr-3 pb-2 pl-4">
+        <p className="text-[11px] text-muted-foreground/70">Nothing runs until you press send.</p>
         <TooltipProvider delayDuration={2000}>
           <Tooltip>
             <TooltipTrigger asChild>

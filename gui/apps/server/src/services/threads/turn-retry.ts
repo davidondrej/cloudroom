@@ -103,6 +103,8 @@ function requireFailedTurn(
 export interface RetryFailedTurnArgs {
   thread: Thread;
   request: RetryTurnRequest;
+  /** Runs once the retry is checked and reserved, before it dispatches; throwing cancels it (a fresh session, #335). */
+  prepare?: (failed: FailedTurnRecord) => Promise<void>;
 }
 
 // Tagged like the other Cloudroom notices, so the provider transcript doesn't read it as the user typing (#2219).
@@ -312,6 +314,7 @@ export async function retryFailedTurn(
   }
   retriesInFlight.add(inFlightKey);
   try {
+    await args.prepare?.(failed);
     const attempt = chain.attemptNumber + 1;
     const cancelledWhileScheduling = () =>
       explicitStops.get(thread.id) !== stop

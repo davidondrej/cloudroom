@@ -18,8 +18,10 @@ import {
 import {
   THREAD_HARNESS_SWITCH_OPERATION,
   THREAD_IMPORT_OPERATION,
+  THREAD_TELEPORT_LOCAL_OPERATION,
   promptInputSchema,
   type PromptInput,
+  type Thread,
 } from "@cloudroom/domain";
 import { z } from "zod";
 
@@ -154,4 +156,46 @@ export function latestOperationSeed(
   return parsed.success && parsed.data.seed.length > 0
     ? { input: parsed.data.seed, requestSequence: row.sequence, ...(parsed.data.carried ? { carried: true as const } : {}) }
     : null;
+}
+
+/** Codex's answer to resuming a session it never saved, or whose file is gone (#335). */
+export const MISSING_SESSION_ERROR = /\bno rollout found for thread id\b/i;
+
+/**
+ * Whether a native session may hold history this transcript lacks (tool output, reasoning): it ran a turn, which is
+ * when Codex saves it, or the thread came from a fork, a native import, a native edit fork or a Teleport.
+ */
+export function sessionMayHoldHistory(
+  db: DbQueryConnection,
+  thread: Pick<Thread, "id" | "originKind">,
+  providerThreadId: string,
+): boolean {
+  if (thread.originKind === "fork") return true;
+  const row = db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, thread.id),
+        // Both types up front, so SQLite seeks events_thread_type_sequence_idx instead of reading the whole thread.
+        inArray(events.type, ["turn/started", "system/operation"]),
+        or(
+          and(
+            eq(events.type, "turn/started"),
+            eq(events.providerThreadId, providerThreadId),
+          ),
+          and(
+            eq(events.type, "system/operation"),
+            or(
+              sql`json_extract(${events.data}, '$.operation') = ${THREAD_TELEPORT_LOCAL_OPERATION}`,
+              sql`json_extract(${events.data}, '$.metadata.sourceProviderThreadId') IS NOT NULL`,
+              sql`json_extract(${events.data}, '$.metadata.replacementProviderThreadId') IS NOT NULL`,
+            ),
+          ),
+        ),
+      ),
+    )
+    .limit(1)
+    .get();
+  return row !== undefined;
 }

@@ -92,12 +92,26 @@ def start(d, state, n):
     return thread.get("status")
 
 
+def max_readers():
+    """The scan's reader cap that the app saved on its thread (Free plans, #2645); None when uncapped or unknown."""
+    if not os.environ.get("ROOM_THREAD_ID"):
+        return None
+    try:
+        return json.loads(cli("loop", "scan-progress", "--data={}", "--json", check=True, timeout=60).stdout).get("maxReaders")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
+
+
 def spawn(d, provider, model):
     started = os.path.exists(os.path.join(d, "readers.json"))
     state = load(d) if started else {"provider": provider, "model": model, "readers": {}, "all": [],
                                      "prompt": os.environ.get("SCAN_READER_PROMPT"), "title": os.environ.get("SCAN_TITLE"),
                                      "reasoning": os.environ.get("SCAN_READER_REASONING")}
-    for path in sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt"))):
+    paths = sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt")))
+    cap = max_readers()
+    if cap is not None and len(paths) > cap:  # the lead skipped --max-readers: start none rather than spend Free's threads
+        sys.exit(f"The Free plan allows {cap} readers here, not {len(paths)}. Run step 1 again with --max-readers {cap}, then spawn again.")
+    for path in paths:
         n = os.path.basename(path)[6:-4]
         if n not in state["readers"]:
             try:

@@ -100,6 +100,27 @@ export function binding(db: DbQueryConnection, threadId: string): Binding | null
   return db.select(bindingColumns).from(cloudroomThreads).where(eq(cloudroomThreads.threadId, threadId)).get() ?? null;
 }
 
+/** The thread each Cloud session belongs to here, read in one query. */
+export function sessionThreads(
+  db: DbQueryConnection,
+  sessionIds: string[],
+): Map<string, string> {
+  if (!sessionIds.length) return new Map();
+  const rows = db
+    .select({
+      threadId: cloudroomThreads.threadId,
+      sessionId: cloudroomThreads.sessionId,
+    })
+    .from(cloudroomThreads)
+    .where(inArray(cloudroomThreads.sessionId, sessionIds))
+    .all();
+  return new Map(
+    rows.flatMap((row) =>
+      row.sessionId ? [[row.sessionId, row.threadId] as const] : [],
+    ),
+  );
+}
+
 export function bindings(db: DbQueryConnection): Binding[] {
   return db.select(bindingColumns).from(cloudroomThreads).all();
 }

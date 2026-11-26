@@ -194,6 +194,11 @@ pub(crate) fn needs_login(config: &Config) -> bool {
         .is_some_and(|profile| missing_hosted_login(config, profile))
 }
 
+/// Only our own sign-in error, never an OS permission error such as an `agy` that can't run (#2634).
+pub(crate) fn signed_out(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::PermissionDenied && error.to_string() == SIGN_IN
+}
+
 pub(crate) async fn models(config: &Config, storage: &Guard) -> io::Result<Vec<Model>> {
     let profile = config
         .harnesses
@@ -326,4 +331,18 @@ pub(super) fn validate(
         ));
     }
     files::open(&profile.home, &saved.path, identity).map(drop)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Error, ErrorKind};
+
+    // #2634: a non-executable `agy` (EACCES) once read as a missing login.
+    #[test]
+    fn only_our_sign_in_error_means_signed_out() {
+        let ours = Error::new(ErrorKind::PermissionDenied, super::SIGN_IN);
+        assert!(super::signed_out(&ours));
+        assert!(!super::signed_out(&Error::from_raw_os_error(13)));
+        assert!(!super::signed_out(&Error::other(super::SIGN_IN)));
+    }
 }

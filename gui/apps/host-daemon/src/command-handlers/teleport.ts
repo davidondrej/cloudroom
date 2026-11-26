@@ -164,6 +164,58 @@ async function codexRollouts(match: (name: string) => boolean) {
   return found;
 }
 
+/** Each saved conversation's size, and a Codex fork's parents', read before anything stops so the check refuses
+ *  what capture would (#2280). A missing file is left to capture, which says why. */
+async function nativeSizes(command: CommandOf<"thread.teleport">) {
+  const files: Omit<Source, "source">[] = [];
+  const fits = async (path: string, source: string, kind: Source["kind"]) => {
+    const { size } = await lstat(source);
+    files.push({ path, size, sha256: "", kind, executable: false });
+    return size <= HOST_ARTIFACT_MAX_BYTES;
+  };
+  for (const session of command.sessions ?? []) {
+    // Its export is the slow part, and capture bounds it.
+    if (session.harness === "opencode") continue;
+    const parent = session.threadId === command.threadId;
+    const kind = parent ? "native" : "context";
+    const source =
+      session.harness === "antigravity"
+        ? /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(session.nativeId)
+          ? join(homedir(), ".gemini", "antigravity-cli", "conversations", `${session.nativeId}.db`)
+          : null
+        : await nativePath(session.harness, session.threadId, session.nativeId, true);
+    if (!source || !(await fits(session.threadId, source, kind).catch(() => false))) continue;
+    if (!parent || session.harness !== "codex") continue;
+    let path: string = source;
+    for (let depth = 0; depth < 64; depth++) {
+      const base = await firstLine(path).then(
+        (line) => JSON.parse(line).payload?.history_base,
+        () => undefined,
+      );
+      const id = base?.thread_id === undefined ? "" : String(base.thread_id);
+      const [found] = id
+        ? await codexRollouts(
+            (name) =>
+              name.endsWith(`-${id}.jsonl`) || name.endsWith(`_${id}.jsonl`),
+          )
+        : [];
+      if (!found || !(await fits(basename(found), found, "lineage"))) break;
+      path = found;
+    }
+  }
+  return files;
+}
+
+async function firstLine(path: string): Promise<string> {
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    for await (const line of file.readLines({ autoClose: false })) return line;
+    return "";
+  } finally {
+    await file.close();
+  }
+}
+
 const captures = new Map<string, Promise<unknown>>();
 export function captureTeleport(
   command: CommandOf<"thread.teleport">,
@@ -187,6 +239,7 @@ async function runCapture(
 ) {
   if (!/^[a-zA-Z0-9_-]+$/.test(command.threadId))
     throw new Error("Invalid thread identity");
+  if (command.action === "size") return { files: await nativeSizes(command) };
   const root = join(
     options.threadStorageRootPath,
     command.threadId,
@@ -346,7 +399,9 @@ async function runCapture(
         capture.omitted.push(session.threadId + " has no saved Antigravity conversation");
         continue;
       }
-      if (!info?.isFile() || info.size > HOST_ARTIFACT_MAX_BYTES) throw new Error("Antigravity conversation unavailable or too large");
+      if (!info?.isFile()) throw new Error("Antigravity conversation unavailable");
+      // The server ends a transfer on this exact text like a Cancel (#2280).
+      if (info.size > HOST_ARTIFACT_MAX_BYTES) throw new Error("Native history exceeds the bounded capture size");
       const frozen = join(root, session.threadId + ".db");
       const db = new DatabaseSync(source, { readOnly: true });
       try {
@@ -720,7 +775,12 @@ async function exportOpenCode(
     nativeId,
     workspace,
     options,
-  );
+  ).catch((error: unknown) => {
+    // Too big for the buffer: the server ends the transfer on this text like a Cancel (#2280).
+    if ((error as { code?: unknown } | null)?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER")
+      throw new Error("Native history exceeds the bounded capture size");
+    throw error;
+  });
   JSON.parse(exported);
   const path = join(root, `${nativeId}.json`);
   await rm(path, { force: true });

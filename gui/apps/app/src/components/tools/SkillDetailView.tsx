@@ -45,6 +45,8 @@ interface SkillDetailViewProps {
   selectedPath: string;
   onSelectFile: (path: string) => void;
   contentState: SkillDetailContentState;
+  /** Shown above the files when several agents have their own copy. */
+  copies?: ReactNode;
   footer?: ReactNode;
   markdownLinkRouting?: MarkdownLinkRouting;
 }
@@ -224,6 +226,7 @@ export function SkillDetailView({
   selectedPath,
   onSelectFile,
   contentState,
+  copies,
   footer,
   markdownLinkRouting,
 }: SkillDetailViewProps) {
@@ -248,6 +251,7 @@ export function SkillDetailView({
       actions={headerActions}
     >
       <ResourceDetailStack>
+        {copies}
         {files.length > 1 ? (
           <ResourceDetailIncludesSection label="Files">
             <SkillFileList

@@ -527,7 +527,10 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
               supported={modeConfig.permission.supported}
               disabled={permissionPickerDisabledByPlanMode}
               showChevronWhenDisabled={permissionPickerDisabledByPlanMode}
-              displayOverride={permissionDisplayOverride}
+              displayOverride={
+                modeConfig.permission.displayOverride ??
+                permissionDisplayOverride
+              }
             />
           </div>
         </div>

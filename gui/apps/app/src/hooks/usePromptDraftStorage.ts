@@ -13,6 +13,7 @@ import {
   isPromptDraftEmpty,
   numberMessageContextInDraft,
   parsePromptDraftStorage,
+  prependPromptDraft,
   serializePromptDraftStorage,
 } from "@cloudroom/client-core";
 
@@ -186,6 +187,12 @@ function ensurePromptDraftStorageObserver(): void {
   promptDraftStorageObserverInitialized = true;
   window.addEventListener("storage", (event) => {
     if (!event.key) return;
+    if (event.key.startsWith(FAILED_MESSAGES_PREFIX)) {
+      const storageKey = event.key.slice(FAILED_MESSAGES_PREFIX.length, event.key.lastIndexOf(":"));
+      failedMessagesCache.delete(storageKey);
+      emitPromptDraftChange(storageKey);
+      return;
+    }
     if (pendingPromptDraftStorageKeys.has(event.key)) return;
     promptDraftCache.delete(event.key);
     emitPromptDraftChange(event.key);
@@ -278,6 +285,126 @@ function restorePromptDraftIfEmpty(
 
   writePromptDraft(storageKey, value);
   return true;
+}
+
+// Failed sends wait here, one key per message so tabs never overwrite each other, until the
+// user restores or dismisses them. Never resent. `request` pins a Cloud request ID for an unchanged restore.
+export interface FailedPromptMessage {
+  id: string;
+  draft: PromptDraftState;
+  uncertain: boolean;
+  request?: { key: string; value: string };
+}
+const FAILED_MESSAGES_PREFIX = "bb.failed-messages:";
+const NO_FAILED_MESSAGES: FailedPromptMessage[] = [];
+const failedMessagesCache = new Map<string, FailedPromptMessage[]>();
+const unsavedFailedMessages = new Map<string, FailedPromptMessage>(); // Storage full: kept for this session.
+const failedMessageKey = (storageKey: string, id: string) => `${FAILED_MESSAGES_PREFIX}${storageKey}:${id}`;
+
+function readFailedMessages(storageKey: string | null): FailedPromptMessage[] {
+  if (!storageKey || typeof window === "undefined") return NO_FAILED_MESSAGES;
+  const cached = failedMessagesCache.get(storageKey);
+  if (cached) return cached;
+  const prefix = failedMessageKey(storageKey, "");
+  const byKey = new Map([...unsavedFailedMessages].filter(([key]) => key.startsWith(prefix)));
+  for (let index = 0; index < window.localStorage.length; index += 1) {
+    const key = window.localStorage.key(index);
+    if (!key?.startsWith(prefix)) continue;
+    try {
+      const { uncertain, request, ...draft } = JSON.parse(readStoredPromptDraftValue(key) ?? "") as Omit<FailedPromptMessage, "id">;
+      const id = key.slice(prefix.length);
+      const parsed = parsePromptDraftStorage(JSON.stringify(draft));
+      if (isPromptDraftEmpty(parsed)) continue; // Corrupt or empty record: never show a blank notice.
+      byKey.set(key, { id, uncertain, ...(request ? { request } : {}), draft: parsed });
+    } catch {}
+  }
+  const messages = [...byKey.values()].sort((a, b) => a.id.localeCompare(b.id));
+  const result = messages.length > 0 ? messages : NO_FAILED_MESSAGES;
+  failedMessagesCache.set(storageKey, result);
+  return result;
+}
+
+/** Saves (or with no message, removes) one failed message. False: storage full, kept in memory only. */
+function changeFailedMessage(storageKey: string, id: string, message?: FailedPromptMessage): boolean {
+  const key = failedMessageKey(storageKey, id);
+  unsavedFailedMessages.delete(key);
+  let saved = true;
+  try {
+    if (!message) window.localStorage.removeItem(key);
+    else {
+      // Same shape as a saved draft, plus the two small fields: no bigger than main's draft write.
+      const draft = JSON.parse(serializePromptDraftStorage(message.draft) ?? "{}") as object;
+      window.localStorage.setItem(key, JSON.stringify({ ...draft, uncertain: message.uncertain, request: message.request }));
+    }
+  } catch {
+    saved = false;
+    if (message) unsavedFailedMessages.set(key, message);
+  }
+  failedMessagesCache.delete(storageKey);
+  emitPromptDraftChange(storageKey);
+  return saved;
+}
+
+/** A send of this exact draft is starting: its waiting copy goes; a new failure adds it back. */
+function takeFailedMessage(storageKey: string, draft: PromptDraftState): void {
+  const match = readFailedMessages(storageKey).find((message) => arePromptDraftStatesEqual(message.draft, draft));
+  if (match) changeFailedMessage(storageKey, match.id);
+}
+
+export interface FailedSend {
+  cleared: boolean;
+  refused: boolean;
+  request?: FailedPromptMessage["request"];
+}
+
+// Straight back into an empty composer when cleared and refused; otherwise kept as a failed message.
+function restoreFailedPromptDraft(
+  storageKey: string | null,
+  failed: PromptDraftState,
+  { cleared, refused, request }: FailedSend,
+): void {
+  if (!storageKey || isPromptDraftEmpty(failed)) return;
+  if (arePromptDraftStatesEqual(readPromptDraft(storageKey), failed)) return;
+  if (cleared && refused && restorePromptDraftIfEmpty(storageKey, failed)) return;
+  if (readFailedMessages(storageKey).some((message) => arePromptDraftStatesEqual(message.draft, failed))) return;
+  const id = `${Date.now().toString(36).padStart(9, "0")}-${Math.random().toString(36).slice(2, 8)}`;
+  const message = { id, draft: failed, uncertain: !refused, ...(request ? { request } : {}) };
+  // Storage full: do what main does (back into an empty composer), so a reload is never worse than main.
+  if (!changeFailedMessage(storageKey, id, message) && restorePromptDraftIfEmpty(storageKey, failed)) {
+    changeFailedMessage(storageKey, id);
+  }
+}
+
+/** The oldest failed message, how many wait, and restore (false: can't merge safely) or dismiss it. */
+export function useFailedPromptMessages(storageKey: string) {
+  const messages = useSyncExternalStore(
+    useCallback((listener) => subscribePromptDraft(storageKey, listener), [storageKey]),
+    useCallback(() => readFailedMessages(storageKey), [storageKey]),
+    () => NO_FAILED_MESSAGES,
+  );
+  const dismiss = useCallback(() => {
+    const [failed] = readFailedMessages(storageKey);
+    if (failed) changeFailedMessage(storageKey, failed.id);
+  }, [storageKey]);
+  const restore = useCallback((): boolean => {
+    const [failed] = readFailedMessages(storageKey);
+    if (!failed) return true;
+    const current = readPromptDraft(storageKey);
+    const unchanged = isPromptDraftEmpty(current);
+    const next = unchanged ? failed.draft : prependPromptDraft(failed.draft, current);
+    if (!next) return false;
+    writePromptDraft(storageKey, next);
+    try {
+      // Unchanged text sends with its first request ID, so the server's delivery check can dedupe it.
+      if (unchanged && failed.request) window.localStorage.setItem(failed.request.key, failed.request.value);
+    } catch {}
+    // Not saved (storage full): keep the notice so a reload can't lose both copies. Sending it removes the notice.
+    if (readStoredPromptDraftValue(storageKey) !== serializePromptDraftStorage(next)) return true;
+    changeFailedMessage(storageKey, failed.id);
+    return true;
+  }, [storageKey]);
+  const uncertain = messages.some((message) => message.uncertain);
+  return { message: messages[0] ?? null, count: messages.length, uncertain, restore, dismiss };
 }
 
 function addQuoteToPromptDraft(
@@ -445,6 +572,7 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
       }
 
       setDraftAndPersist(EMPTY_PROMPT_DRAFT);
+      if (storageKey) takeFailedMessage(storageKey, expectedDraft);
       return true;
     },
     [setDraftAndPersist, storageKey],
@@ -463,6 +591,13 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
   const restoreIfEmpty = useCallback(
     (nextDraft: PromptDraftState) => {
       restorePromptDraftIfEmpty(storageKey, nextDraft);
+    },
+    [storageKey],
+  );
+
+  const restoreFailedSend = useCallback(
+    (failedDraft: PromptDraftState, failure: FailedSend) => {
+      restoreFailedPromptDraft(storageKey, failedDraft, failure);
     },
     [storageKey],
   );
@@ -486,6 +621,7 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
       clear,
       clearIfCurrentMatches,
       restoreIfEmpty,
+      restoreFailedSend,
     }),
     [
       addAttachment,
@@ -498,6 +634,7 @@ export function usePromptDraftStorage(scope: PromptDraftScope) {
       draft.text,
       getCurrent,
       removeAttachment,
+      restoreFailedSend,
       restoreIfEmpty,
       setAttachments,
       setDraftAndPersist,

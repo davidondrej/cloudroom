@@ -619,6 +619,9 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
         r["package_count"] = len(r.pop("packages")) if r["path"] else None  # None: not checked, unlike 0 packages
     computer["kev_matches"] = kev_matches(recent["kev"], computer.get("apps") or [])
     critical = sum(v["severity"] == "CRITICAL" for r in repos for v in r["vulns"])
+    unreviewed = [r["github"] for r in repos if r["github"]][max_readers:]  # past the readers' cap (Free: 0-3, #2645)
+    if unreviewed:
+        unchecked.append(f"{len(unreviewed)} GitHub repos got no code review (readers review the {max_readers} busiest): {', '.join(unreviewed)}")
     json.dump({"computer": computer, "repos": repos, "skipped_repos": skipped, "not_checked": unchecked, "threats": recent}, open(os.path.join(out, "findings.json"), "w"), indent=1)
 
     # Readers: one per GitHub repo, most active first.
@@ -668,6 +671,6 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(errors="backslashreplace")  # Windows code pages can't print every repo name or error (#2646)
-    a = sys.argv[1:]
+    a = [x for arg in sys.argv[1:] for x in (arg.split("=", 1) if arg.startswith("--") and "=" in arg else [arg])]  # --flag=value too
     opt = lambda name, default: int(a[a.index(name) + 1]) if name in a else default
     main(a[0], opt("--days", 30), opt("--max-repos", 60), opt("--max-github", 10), opt("--max-readers", 8))

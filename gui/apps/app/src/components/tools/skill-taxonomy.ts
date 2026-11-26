@@ -47,3 +47,50 @@ export function isSkillEditable(
       return false;
   }
 }
+
+/** One skill and every agent's copy of it. `copies[0]` is the one a row opens. */
+export interface SkillGroup {
+  id: string;
+  name: string;
+  copies: readonly SkillSummary[];
+}
+
+function skillLevel(skill: SkillSummary): string {
+  switch (skill.scope) {
+    case "bb-builtin":
+      return "builtin";
+    case "plugin":
+      // Two plugins can each ship a different skill with the same name.
+      return `plugin:${skill.pluginId ?? ""}`;
+    case "bb-project":
+    case "provider-project":
+    case "shared-project":
+      return "project";
+    case "bb-user":
+    case "provider-user":
+    case "shared-user":
+      return "user";
+  }
+}
+
+/**
+ * The server lists one entry per SKILL.md, so a skill installed for Codex,
+ * Claude Code and Cursor comes back 3 times. Group copies by name and level:
+ * a project skill and a personal skill with the same name stay separate.
+ */
+export function groupSkillCopies(
+  skills: readonly SkillSummary[],
+): SkillGroup[] {
+  const groups = new Map<string, SkillSummary[]>();
+  for (const skill of skills) {
+    const key = `${skillLevel(skill)}\0${skill.name}`;
+    const copies = groups.get(key);
+    if (copies === undefined) groups.set(key, [skill]);
+    else copies.push(skill);
+  }
+  return [...groups.values()].map((copies) => ({
+    id: copies[0].id,
+    name: copies[0].name,
+    copies,
+  }));
+}

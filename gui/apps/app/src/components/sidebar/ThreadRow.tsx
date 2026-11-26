@@ -111,12 +111,44 @@ import {
 import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { useComputerUseActivity } from "@/lib/computer-use-active";
 import { usePluginThreadRowStatus } from "@/lib/plugin-thread-row-status";
+import { useLoopThreadLabel } from "@/lib/loop-threads";
 import { harnessIconModeAtom } from "@/components/settings/HarnessIconsSetting";
 import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { getProviderIconInfo } from "@/lib/provider-icon";
 
 const SIDEBAR_TITLE_DOUBLE_CLICK_MS = 400;
+
+/** A small glyph after the title (loop, other project); a click opens the row, hovering names it. */
+function ThreadTitleMark({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: IconName;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          role="img"
+          aria-label={label}
+          className="relative top-px z-10 flex shrink-0 items-center text-muted-foreground"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onClick();
+          }}
+        >
+          <Icon name={icon} className="size-3.5" aria-hidden />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
 
 let lastSidebarTitleClick: { at: number; threadId: string } | null = null;
 
@@ -620,6 +652,7 @@ function ThreadRowComponent({
   const threadUnreadSuccess = threadUnreadDone && !threadUnreadError;
   const threadTitle = getThreadDisplayTitle(thread);
   const labelTitle = useThreadTitleDisplayText(threadTitle);
+  const loopLabel = useLoopThreadLabel(thread.id);
   const crossProjectName = useSidebarProjectName(crossProjectId);
   const crossProjectLabel =
     crossProjectId === null
@@ -956,25 +989,19 @@ function ThreadRowComponent({
             )}
           </span>
         )}
+        {loopLabel !== null ? (
+          <ThreadTitleMark
+            icon="Repeat"
+            label={loopLabel}
+            onClick={() => rowLinkRef.current?.click()}
+          />
+        ) : null}
         {crossProjectLabel !== null ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <span
-                data-sidebar-thread-cross-project=""
-                role="img"
-                aria-label={crossProjectLabel}
-                className="relative top-px z-10 flex shrink-0 items-center text-muted-foreground"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  rowLinkRef.current?.click();
-                }}
-              >
-                <Icon name="FolderExport" className="size-3.5" aria-hidden />
-              </span>
-            </TooltipTrigger>
-            <TooltipContent side="top">{crossProjectLabel}</TooltipContent>
-          </Tooltip>
+          <ThreadTitleMark
+            icon="FolderExport"
+            label={crossProjectLabel}
+            onClick={() => rowLinkRef.current?.click()}
+          />
         ) : null}
         {parentOptions && hasChildren ? (
           <SidebarChildToggleChevron

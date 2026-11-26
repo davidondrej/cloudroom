@@ -87,8 +87,9 @@ export function cornerMay(log: CornerEntry[], card: CornerCard, key: string, now
   if (afterOpenDays !== undefined) {
     const firstOpen = mine.findIndex((entry) => entry.answer === "opened");
     if (firstOpen >= 0) {
-      if (mine.slice(firstOpen + 1).some((entry) => entry.answer !== null)) return false;
       const openedAt = mine[firstOpen]!.answeredAt ?? mine[firstOpen]!.at;
+      // Ignore a same-day duplicate answer from another device that still had the same showing open.
+      if (mine.slice(firstOpen + 1).some((entry) => entry.answer !== null && (entry.answeredAt ?? entry.at) - openedAt >= DAY)) return false;
       if (now - openedAt < afterOpenDays * DAY) return false;
     }
   }

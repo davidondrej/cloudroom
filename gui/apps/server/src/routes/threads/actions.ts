@@ -60,6 +60,7 @@ import {
 import { acceptThreadSendRequest } from "../../services/threads/thread-send-request.js";
 import { editThreadMessage } from "../../services/threads/thread-edit-message.js";
 import { clearThreadContext } from "../../services/threads/thread-context-clear.js";
+import { continueInFreshSession } from "../../services/threads/thread-harness-switch.js";
 import {
   installThreadMoves,
   moveThreadToProject,
@@ -265,7 +266,14 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.retry, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     ensureThreadIsWritable(thread);
-    const result = await retryFailedTurn(deps, { request: payload, thread });
+    const result = payload.freshSession
+      ? await continueInFreshSession(
+          deps,
+          thread.id,
+          getLastProviderThreadId(deps, thread.id),
+          payload,
+        )
+      : await retryFailedTurn(deps, { request: payload, thread });
     return context.json(result);
   });
 

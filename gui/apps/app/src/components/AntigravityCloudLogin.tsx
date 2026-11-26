@@ -182,12 +182,39 @@ function useAntigravityCloudFlow(
 }
 
 /** One-line Cloud sign-in bar under the new-thread composer. */
-export function AntigravityCloudLogin(_props?: { composer?: boolean }) {
-  const account = useCloudroomAccount().data?.account?.id;
-  return account ? <ComposerLogin key={account} account={account} /> : null;
+export function AntigravityCloudLogin({ state }: { state: "checking" | "unavailable" | "signed_out" }) {
+  const accountQuery = useCloudroomAccount();
+  const query = useQueryClient();
+  const account = accountQuery.data?.account?.id;
+  if (account) return <ComposerLogin key={account} account={account} state={state} />;
+  // No account answer yet, so the status check can't run: still say why Send is blocked.
+  if (accountQuery.isSuccess && state !== "unavailable") return null;
+  return accountQuery.isError || state === "unavailable"
+    ? <AgyCheckFailed onRetry={() => void retryAgyChecks(query)} />
+    : <div className="px-[18px] pt-2 text-xs text-muted-foreground">Checking Antigravity…</div>;
 }
 
-function ComposerLogin({ account }: { account: string }) {
+function retryAgyChecks(query: QueryClient, status?: { refetch: () => Promise<unknown> }) {
+  void status?.refetch();
+  void query.invalidateQueries({ queryKey: ["cloudroom-account"] });
+  return query.invalidateQueries({ queryKey: ["cloudroom-connection"] });
+}
+
+function AgyCheckFailed({ onRetry, inline }: { onRetry: () => void; inline?: boolean }) {
+  const body = (
+    <>
+      <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
+      Couldn't check Antigravity.
+      <button type="button" className="font-medium text-primary-text hover:underline" onClick={onRetry}>
+        Retry
+      </button>
+    </>
+  );
+  return inline ? body : <div className="flex flex-wrap items-center gap-1.5 px-[18px] pt-2 text-xs text-muted-foreground">{body}</div>;
+}
+
+// Stays mounted while the status rechecks, so a Google code being pasted isn't lost (#2637).
+function ComposerLogin({ account, state }: { account: string; state: "checking" | "unavailable" | "signed_out" }) {
   const {
     status,
     mode,
@@ -200,6 +227,7 @@ function ComposerLogin({ account }: { account: string }) {
     canRetryCode,
     submit,
   } = useAntigravityCloudFlow(account);
+  const query = useQueryClient();
   const quiet = (label: string, onClick: () => void, disabled = busy) => (
     <button
       type="button"
@@ -217,7 +245,11 @@ function ComposerLogin({ account }: { account: string }) {
   );
   return (
     <div className="flex flex-wrap items-center gap-1.5 px-[18px] pt-2 text-xs text-muted-foreground">
-      {!mode ? (
+      {!mode && state === "checking" ? (
+        "Checking Antigravity…"
+      ) : !mode && state === "unavailable" ? (
+        <AgyCheckFailed inline onRetry={() => void retryAgyChecks(query, status)} />
+      ) : !mode ? (
         <>
           <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
           Antigravity isn't connected.

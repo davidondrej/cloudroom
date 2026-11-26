@@ -6,16 +6,13 @@ import {
 import type { Thread } from "@cloudroom/domain";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import { useCreateThread } from "@/hooks/mutations/thread-runtime-mutations";
-import {
-  useArchiveThreadAndChildren,
-  usePinThread,
-} from "@/hooks/mutations/thread-state-mutations";
+import { useArchiveThreadAndChildren } from "@/hooks/mutations/thread-state-mutations";
 import { getThreadRoutePath } from "@/lib/route-paths";
 
 /**
  * "Fresh thread" on the context card: opens a new thread in the same folder
- * that continues this one, keeps its pin, and archives this one. Running
- * children stay open.
+ * that continues this one and archives this one. Running children stay open.
+ * The new thread is never pinned: only the user pins a thread.
  */
 export function useFreshThread({
   thread,
@@ -28,7 +25,6 @@ export function useFreshThread({
 }): { start: () => Promise<void>; isPending: boolean } {
   const navigate = useRouteNavigate();
   const { mutateAsync: createThread, isPending } = useCreateThread();
-  const { mutate: pinThread } = usePinThread();
   const { mutate: archiveThread } = useArchiveThreadAndChildren();
 
   const start = useCallback(async () => {
@@ -41,7 +37,6 @@ export function useFreshThread({
       requestId: crypto.randomUUID(),
     }).catch(() => null);
     if (fresh === null) return;
-    if (thread.pinnedAt !== null) pinThread({ id: fresh.id });
     navigate(
       getThreadRoutePath({ projectId: fresh.projectId, threadId: fresh.id }),
     );
@@ -52,7 +47,6 @@ export function useFreshThread({
     createThread,
     execution,
     navigate,
-    pinThread,
     providerId,
     thread,
   ]);

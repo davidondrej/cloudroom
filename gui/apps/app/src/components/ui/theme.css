@@ -143,6 +143,13 @@
 }
 
 @layer components {
+  /* App-wide banners: a full-width strip whose tint and bottom line fade in over 80px from the floating sidebar card. */
+  .app-banner {
+    --banner-color: var(--primary);
+    border-bottom: 1px solid;
+    border-image: linear-gradient(to right, transparent, color-mix(in oklab, var(--banner-color) 45%, transparent) 80px) 1;
+    background: linear-gradient(to right, transparent, color-mix(in oklab, var(--banner-color) 9%, transparent) 80px);
+  }
   [data-sidebar-sticky-stack] {
     /*
      * SidebarContent owns scrolling. This stack owns sticky padding, row
@@ -1110,6 +1117,30 @@
       calc(6500ms + (1.7 - var(--k)) * 230ms);
   }
 
+  /* Per-harness "Working..." icon: a strip of 28px frames, shown at 14px and stepped frame by frame. */
+  .harness-spinner {
+    flex: none;
+    width: var(--spinner-width);
+    height: 14px;
+    --spinner-size: calc(var(--spinner-width) * var(--spinner-frames)) 14px;
+    animation: harness-spinner var(--spinner-duration) steps(var(--spinner-frames)) infinite;
+    will-change: transform;
+  }
+
+  .harness-spinner[data-mode="mask"] {
+    /* Light brand colors fade on the light canvas; darken them there. */
+    background-color: color-mix(in oklab, var(--spinner-color), black 30%);
+    mask: var(--spinner-url) 0 0 / var(--spinner-size) no-repeat;
+  }
+
+  .dark .harness-spinner[data-mode="mask"] {
+    background-color: var(--spinner-color);
+  }
+
+  .harness-spinner[data-mode="color"] {
+    background: var(--spinner-url) 0 0 / var(--spinner-size) no-repeat;
+  }
+
   /*
    * A subagent's smaller cousin of the grid above: 2x2 pixels, lit one after
    * another clockwise. `--n` is a cell's place in the orbit; `--o` shifts the
@@ -1177,10 +1208,12 @@
   [inert] .animate-shine-icon,
   [inert] .working-grid i::after,
   [inert] .subagent-grid i::after,
+  [inert] .harness-spinner,
   [aria-hidden="true"] .animate-shine,
   [aria-hidden="true"] .animate-shine-icon,
   [aria-hidden="true"] .working-grid i::after,
-  [aria-hidden="true"] .subagent-grid i::after {
+  [aria-hidden="true"] .subagent-grid i::after,
+  [aria-hidden="true"] .harness-spinner {
     animation-play-state: paused;
     will-change: auto;
   }
@@ -1265,6 +1298,18 @@
     .subagent-grid i::after {
       animation: none;
     }
+
+    .harness-spinner {
+      animation: none;
+      will-change: auto;
+    }
+  }
+}
+
+@keyframes harness-spinner {
+  to {
+    mask-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
+    background-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
   }
 }
 

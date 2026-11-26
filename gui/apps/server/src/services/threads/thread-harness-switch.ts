@@ -1,6 +1,7 @@
 import {
   createEventId,
   deleteQueuedThreadMessage,
+  findStoredEventRow,
   getEnvironment,
   getLatestCompletedThreadContextClearSequence,
   getThread,
@@ -16,6 +17,10 @@ import {
   type ReasoningLevel,
   type Thread,
 } from "@cloudroom/domain";
+import type {
+  RetryTurnRequest,
+  RetryTurnResponse,
+} from "@cloudroom/server-contract";
 import { ApiError } from "../../errors.js";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import {
@@ -28,12 +33,19 @@ import { emitPluginMessageCancelled } from "../plugins/plugin-thread-events.js";
 import { storeAttachment } from "../projects/attachments.js";
 import { resolveDeferredFirstTurnContext } from "./deferred-first-turn-context.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
-import { appendThreadEventInTransaction } from "./thread-events.js";
+import {
+  appendThreadEvent,
+  appendThreadEventInTransaction,
+  getLastProviderThreadId,
+} from "./thread-events.js";
 import { resolveHarnessSwitchOverride } from "./thread-execution-override.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
 import { acceptThreadSendRequest } from "./thread-send-request.js";
-import { cancelRetriesForExplicitStop } from "./turn-retry.js";
+import { cancelRetriesForExplicitStop, retryFailedTurn } from "./turn-retry.js";
+import { loadFailedTurn, type FailedTurnRecord } from "./turn-failed.js";
 import {
+  MISSING_SESSION_ERROR,
+  sessionMayHoldHistory,
   threadMessages,
   transcriptMarkdown,
   type ThreadMessage,
@@ -290,6 +302,108 @@ async function resendAfterSwitch(
   return result
     ? { delivery: "failed", error: result.message }
     : { delivery: "started" };
+}
+
+/**
+ * Codex saves a session only once a turn starts, so it can't resume one whose first turn never started: "no rollout
+ * found" (#335). The thread then moves to a fresh session that gets the conversation so far, as a switch does, and
+ * its failed turn runs again there. `automatic` does this only when nothing is lost; a session that may hold history
+ * the transcript lacks waits for the user's "Start fresh with the history". Nothing is written until the failed turn
+ * is the latest, failed for this reason on `session`, and its retry is reserved.
+ */
+export async function continueInFreshSession(
+  deps: LoggedPendingInteractionWorkSessionDeps,
+  threadId: string,
+  session: string | null,
+  request: RetryTurnRequest,
+  automatic = false,
+): Promise<RetryTurnResponse> {
+  const thread = getThread(deps.db, threadId);
+  if (!thread) throw new ApiError(404, "thread_not_found", "Thread not found");
+  if (isCloudThread(thread)) {
+    throw new ApiError(
+      409,
+      "invalid_request",
+      "Cloud threads can't start fresh this way.",
+    );
+  }
+  const refuse = (message: string) =>
+    new ApiError(409, "no_failed_turn", message);
+  // A newer send or recovery may move on while the history file is written; it wins.
+  const unchanged = (failed: FailedTurnRecord) => {
+    const current = getThread(deps.db, threadId);
+    const rejection = findStoredEventRow(deps.db, {
+      threadId,
+      type: "client/turn/rejected",
+      afterSequence: failed.requestSequence,
+    });
+    if (
+      session === null ||
+      current?.status !== "error" ||
+      current.providerId !== "codex" ||
+      current.archivedAt !== null ||
+      current.deletedAt !== null ||
+      teleportBlocked(deps.db, threadId) ||
+      loadFailedTurn(deps.db, threadId)?.requestSequence !==
+        failed.requestSequence ||
+      getLastProviderThreadId(deps, threadId) !== session
+    ) {
+      throw refuse(
+        "This thread has moved on, so there's nothing to start fresh.",
+      );
+    }
+    const reason = rejection
+      ? (JSON.parse(rejection.data) as { message?: unknown }).message
+      : null;
+    if (typeof reason !== "string" || !MISSING_SESSION_ERROR.test(reason)) {
+      throw refuse("This thread's last failure wasn't a lost session.");
+    }
+    return current;
+  };
+  return retryFailedTurn(deps, {
+    thread,
+    request,
+    prepare: (failed) =>
+      withThreadContextClearGuard(
+        threadId,
+        async () => {
+          const before = unchanged(failed);
+          if (
+            automatic &&
+            session !== null &&
+            sessionMayHoldHistory(deps.db, before, session)
+          ) {
+            throw refuse(
+              "This session may hold history, so it waits for Start fresh.",
+            );
+          }
+          const seed = await historySeed(
+            deps,
+            before,
+            `[Cloudroom] ${before.providerId} couldn't reopen this conversation's session, so you continue it in a new one.`,
+          );
+          const current = unchanged(failed);
+          appendThreadEvent(deps, {
+            threadId,
+            environmentId: current.environmentId,
+            type: "system/operation",
+            scope: threadScope(),
+            data: {
+              operation: THREAD_HARNESS_SWITCH_OPERATION,
+              operationId: createEventId(),
+              status: "completed",
+              message: `Continued in a new ${current.providerId} session.`,
+              metadata: {
+                from: current.providerId,
+                to: current.providerId,
+                seed,
+              },
+            },
+          });
+        },
+        "This thread is starting a new session. Try again in a moment.",
+      ),
+  });
 }
 
 export function requireSwitchableThread(

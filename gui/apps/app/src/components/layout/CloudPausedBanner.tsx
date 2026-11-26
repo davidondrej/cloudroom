@@ -1,5 +1,5 @@
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { publishBannerHeight } from "./DesktopUpdateBanner";
+import { BANNER_CLASS, publishBannerHeight } from "./DesktopUpdateBanner";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 
 /** "Cloud is paused" on every screen while the website's database can't answer: an outage, or planned work like a
@@ -11,7 +11,7 @@ export function CloudPausedBanner() {
     <div
       ref={publishBannerHeight}
       role="status"
-      className="flex shrink-0 items-center justify-center gap-2.5 border-y border-primary/25 bg-primary/10 px-4 py-2 text-sm"
+      className={`flex shrink-0 items-center justify-center gap-2.5 px-4 py-2 text-sm ${BANNER_CLASS}`}
     >
       <Icon name="Cloud" className="size-4 shrink-0 text-primary" aria-hidden />
       <span className="min-w-0 truncate">

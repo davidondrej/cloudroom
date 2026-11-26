@@ -41,6 +41,14 @@ function parseJsonAttribute(value: string): unknown | null {
   }
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
 export function promptMentionClipboardDataAttributes(
   args: PromptMentionClipboardDataAttributesArgs,
 ): PromptMentionClipboardDataAttributes {
@@ -49,6 +57,22 @@ export function promptMentionClipboardDataAttributes(
     [PROMPT_MENTION_CLIPBOARD_RESOURCE_ATTR]: JSON.stringify(args.resource),
     [PROMPT_MENTION_CLIPBOARD_SERIALIZED_TEXT_ATTR]: args.serializedText,
   };
+}
+
+export function promptMentionClipboardHtml(
+  resource: PromptMentionResource,
+  {
+    displayText = resource.label,
+    trailingSpace = true,
+  }: { displayText?: string; trailingSpace?: boolean } = {},
+): string {
+  const serializedText = serializedTextForPromptMentionResource(resource);
+  const attributes = Object.entries(
+    promptMentionClipboardDataAttributes({ resource, serializedText }),
+  )
+    .map(([name, value]) => `${name}="${escapeHtml(value)}"`)
+    .join(" ");
+  return `<span ${attributes}>${escapeHtml(displayText)}</span>${trailingSpace ? " " : ""}`;
 }
 
 export function serializedTextForPromptMentionResource(

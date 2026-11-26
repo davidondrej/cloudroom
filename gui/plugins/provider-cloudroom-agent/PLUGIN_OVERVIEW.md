@@ -4,7 +4,7 @@ Keep going when Claude Code or Codex hits its plan limit. Cloudroom Agent picks 
 
 - A "Continue with Cloudroom Agent" button on the plan-limit card.
 - Cloudroom Agent in the agent picker, for new threads too.
-- It runs on frontier open source models and is paid with your Cloud Credits, at cost.
+- It runs on a mix of frontier models and is paid with your Cloud Credits, at cost plus 5.5%.
 
 ## How it works
 

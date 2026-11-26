@@ -8,6 +8,7 @@ import {
 } from "react";
 import { pluginCommandId, pluginCommandIdSchema, type ThreadListEntry } from "@cloudroom/domain";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useSetAtom } from "jotai";
 import { useNavigate } from "react-router";
 import { Dialog, DialogContent, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { Icon } from "@cloudroom/shared-ui/icon";
@@ -44,6 +45,7 @@ import {
   getThreadRoutePath,
 } from "@/lib/route-paths";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
+import { requestSidebarProjectRevealAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import { pluginListQueryOptions } from "@/hooks/queries/plugin-settings-queries";
 import {
   buildPluginSettingsEntries,
@@ -111,6 +113,9 @@ export interface CommandPaletteProps {
 export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
   const navigate = useNavigate();
   const setRootComposeProjectId = useSetRootComposeProjectId();
+  const requestSidebarProjectReveal = useSetAtom(
+    requestSidebarProjectRevealAtom,
+  );
   const runner = useAppCommandRunner();
   const shortcuts = useAppCommandShortcuts(PALETTE_COMMAND_IDS);
   const listId = useId();
@@ -345,6 +350,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
           // Open the composer directly. The legacy /projects/:id route
           // redirects and flashes a loading frame first.
           setRootComposeProjectId(item.projectId);
+          requestSidebarProjectReveal(item.projectId);
           void navigate(getRootComposeRoutePath(), {
             state: { focusPrompt: true },
           });
@@ -367,7 +373,7 @@ export function CommandPalette({ threadId, projectId }: CommandPaletteProps) {
       };
       setOpen(false);
     },
-    [navigate, setRootComposeProjectId],
+    [navigate, requestSidebarProjectReveal, setRootComposeProjectId],
   );
 
   const handleAfterCloseAutoFocus = useCallback(() => {

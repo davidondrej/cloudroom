@@ -67,6 +67,104 @@ fi
 if grep -qs '^PROFILES = profile_dirs()$' "$py"; then
   sed 's|^PROFILES = profile_dirs()$|PROFILES = sorted(profile_dirs(), key=lambda p, pref=os.environ.get("BH_CLOUDROOM_PREFER_PROFILE"): not (pref and p.as_posix().endswith("/" + pref)))|' "$py" > "$py.$$" 2>/dev/null && mv -f "$py.$$" "$py" 2>/dev/null || rm -f "$py.$$"
 fi
+# 0.1.13 leaves hidden Local tabs unfocused, so Chromium pauses frames and times out screenshots/input behind the
+# user's active tab or window (#1962 in Cloud; browser-harness #882). Turn on focus emulation on each active session
+# and turn it off on the previous session when switching tabs, without raising the window. Swapped in by rename.
+if [ -f "$py" ] && ! grep -qsF 'Cloudroom (focus emulation)' "$py"; then
+  "$venv/bin/python" -I - "$py" <<'PY' 2>/dev/null || true
+import os, sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+enable_old = '        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))'
+enable_new = '''        # Cloudroom (focus emulation): keep hidden tabs painting and taking input without raising the window.
+        await asyncio.gather(
+            *(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")),
+            _silent(asyncio.wait_for(
+                self.cdp.send_raw("Emulation.setFocusEmulationEnabled", {"enabled": True}, session_id=session_id),
+                timeout=4,
+            )),
+        )'''
+old_tab = '                tasks.append(disable_old())'
+old_tab_new = '''                tasks.append(disable_old())
+                tasks.append(_silent(asyncio.wait_for(
+                    self.cdp.send_raw("Emulation.setFocusEmulationEnabled", {"enabled": False}, session_id=old_session),
+                    timeout=2,
+                )))'''
+if src.count(enable_old) == 1 and src.count(old_tab) == 1:
+    tmp = f"{path}.tmp{os.getpid()}"
+    open(tmp, "w", encoding="utf-8").write(src.replace(enable_old, enable_new, 1).replace(old_tab, old_tab_new, 1))
+    os.replace(tmp, path)
+PY
+fi
+# 0.1.13 lets a macOS TCC PermissionError on one browser's DevToolsActivePort crash before checking other profiles
+# or probing ports 9222/9223 (browser-harness #867). Skip locked folders, keep probing fallbacks, and re-raise the
+# saved PermissionError only if nothing connected and the preferred browser or every browser was locked, so the
+# Full Disk Access hint (#1115) still fires. Swapped in by rename; skips itself once upstream fixes it.
+if [ -f "$py" ] && ! grep -qsF 'Cloudroom (TCC PermissionError)' "$py"; then
+  "$venv/bin/python" -I - "$py" <<'PY' 2>/dev/null || true
+import os, sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+ws_old = '''        except (FileNotFoundError, NotADirectoryError):
+            continue
+        port = active[0].strip() if active else ""'''
+ws_new = '''        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            continue
+        port = active[0].strip() if active else ""'''
+loop_old = '''    deadline = time.time() + 30
+    next_liveness_check = 0.0
+    while time.time() < deadline:
+        for base in PROFILES:
+            try:
+                active = (base / "DevToolsActivePort").read_text(encoding="utf-8", errors="replace").splitlines()
+            except (FileNotFoundError, NotADirectoryError):
+                continue'''
+loop_new = '''    # Cloudroom (TCC PermissionError): skip locked browser folders, keep probing others and 9222/9223.
+    perm_error = None
+    preferred_locked = False
+    pref = os.environ.get("BH_CLOUDROOM_PREFER_PROFILE")
+    deadline = time.time() + 30
+    next_liveness_check = 0.0
+    while time.time() < deadline:
+        for base in PROFILES:
+            try:
+                active = (base / "DevToolsActivePort").read_text(encoding="utf-8", errors="replace").splitlines()
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except PermissionError as e:
+                if pref and base.as_posix().endswith("/" + pref):
+                    perm_error = e
+                    preferred_locked = True
+                elif perm_error is None:
+                    perm_error = e
+                continue'''
+live_old = '''        if now >= next_liveness_check:
+            if not supported_browser_running():
+                raise RuntimeError(
+                    "chrome-not-running: no supported Chromium-family browser is running -- start Chrome, then retry"
+                )
+            next_liveness_check = now + 2'''
+live_new = '''        if now >= next_liveness_check:
+            if not supported_browser_running():
+                if perm_error is not None:
+                    break
+                raise RuntimeError(
+                    "chrome-not-running: no supported Chromium-family browser is running -- start Chrome, then retry"
+                )
+            next_liveness_check = now + 2'''
+err_old = '    if remote_debugging_user_enabled() is False:'
+err_new = '''    if perm_error is not None and (preferred_locked or not supported_browser_running()):
+        raise perm_error
+    if remote_debugging_user_enabled() is False:'''
+pairs = ((ws_old, ws_new), (loop_old, loop_new), (live_old, live_new), (err_old, err_new))
+if all(src.count(a) == 1 for a, _ in pairs):
+    for a, b in pairs:
+        src = src.replace(a, b, 1)
+    tmp = f"{path}.tmp{os.getpid()}"
+    open(tmp, "w", encoding="utf-8").write(src)
+    os.replace(tmp, path)
+PY
+fi
 # 0.1.13 reads each request with asyncio's 64 KiB line limit, so bigger ones failed with a broken pipe
 # (upstream PR 377). Raise it to 64 MiB. Skips itself once a release changes the line.
 ipc="$venv/lib/python3.12/site-packages/browser_harness/_ipc.py"

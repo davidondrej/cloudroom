@@ -52,6 +52,7 @@ Use `room-cli thread wait --children` only if you must block inside one turn (it
 ```sh
 room-cli thread tell THREAD "Continue with this task"
 room-cli thread tell THREAD --message-file notes.md   # a long message
+room-cli thread tell --parent "Done: see my branch"   # the thread that started this one
 room-cli thread stop THREAD
 room-cli thread queue list THREAD                     # messages still waiting (app CLI only)
 ```

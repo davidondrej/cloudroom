@@ -1,6 +1,7 @@
-import type {
-  SidebarChronologicalSort,
-  SidebarOrganizationMode,
+import {
+  PERSONAL_PROJECT_ID,
+  type SidebarChronologicalSort,
+  type SidebarOrganizationMode,
 } from "@cloudroom/domain";
 import { atom } from "jotai";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
@@ -22,6 +23,10 @@ export const collapsedThreadIdsAtom = createSyncedPreferenceAtom(
 
 export const collapseChildThreadsAtom = createSyncedPreferenceAtom(
   "sidebar.collapseChildThreads",
+);
+
+export const showSubagentBarAtom = createSyncedPreferenceAtom(
+  "appearance.showSubagentBar",
 );
 
 export const expandedThreadIdsAtom = createSyncedPreferenceAtom(
@@ -77,3 +82,54 @@ export const sidebarCollapsedHarnessesAtom = createSyncedPreferenceAtom(
 );
 
 export const revealedSelectedThreadKeyAtom = atom<string | null>(null);
+
+export interface SidebarProjectRevealRequest {
+  id: number;
+  projectId: string;
+}
+
+export const sidebarProjectRevealRequestAtom =
+  atom<SidebarProjectRevealRequest | null>(null);
+
+let nextSidebarProjectRevealId = 0;
+
+export const requestSidebarProjectRevealAtom = atom(
+  null,
+  (_get, set, projectId: string) => {
+    nextSidebarProjectRevealId += 1;
+    set(sidebarProjectRevealRequestAtom, {
+      id: nextSidebarProjectRevealId,
+      projectId,
+    });
+  },
+);
+
+export type SidebarProjectRevealState =
+  | { status: "idle" }
+  | { status: "waiting-expand" }
+  | { status: "skip"; id: number }
+  | { status: "ready"; id: number; projectId: string };
+
+const IDLE_SIDEBAR_PROJECT_REVEAL_STATE: SidebarProjectRevealState = {
+  status: "idle",
+};
+
+const WAITING_EXPAND_SIDEBAR_PROJECT_REVEAL_STATE: SidebarProjectRevealState = {
+  status: "waiting-expand",
+};
+
+export const sidebarProjectRevealStateAtom = atom<SidebarProjectRevealState>(
+  (get) => {
+    const request = get(sidebarProjectRevealRequestAtom);
+    if (request === null) return IDLE_SIDEBAR_PROJECT_REVEAL_STATE;
+    if (get(sidebarOrganizationModeAtom) !== "project") {
+      return { status: "skip", id: request.id };
+    }
+    const isCollapsed =
+      request.projectId === PERSONAL_PROJECT_ID
+        ? get(collapsedSidebarSectionIdsAtom).includes("threads")
+        : get(collapsedProjectIdsAtom).includes(request.projectId);
+    if (isCollapsed) return WAITING_EXPAND_SIDEBAR_PROJECT_REVEAL_STATE;
+    return { status: "ready", id: request.id, projectId: request.projectId };
+  },
+);

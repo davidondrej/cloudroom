@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
+import { useBbNavigate, useRpc, useSdk } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Switch } from "@cloudroom/shared-ui/switch";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -103,6 +103,30 @@ export async function replaceWebhookUrl(
   }
 }
 
+/** Run now puts the user in the run (2026-11-18): asks every 2 s, for up to 3 minutes (a Cloud sandbox can take a
+ *  minute to start), for the thread the run started, and opens it once it shows. `find` gives null to keep asking and
+ *  false when the run ended with no thread (a quiet script check). A newer Run now, or `stopRunThread` when the page
+ *  closes, stops it, so it never pulls the user out of a thread they moved to. */
+let polling: AbortController | null = null;
+export async function openRunThread(
+  find: () => Promise<string | null | false>,
+  open: (threadId: string) => void,
+): Promise<void> {
+  polling?.abort();
+  const { signal } = (polling = new AbortController());
+  for (const end = Date.now() + 180_000; Date.now() < end; ) {
+    const thread = await find().catch(() => null);
+    if (signal.aborted || thread === false) return;
+    if (thread) return open(thread);
+    await new Promise((resolve) => setTimeout(resolve, 2_000));
+    if (signal.aborted) return;
+  }
+}
+export function stopRunThread(): void {
+  polling?.abort();
+  polling = null;
+}
+
 const BILLING_URL = /(?: at)?\s*(?:https?:\/\/)?(?:www\.)?cloudroom\.dev\/billing\b/gi;
 
 /** Shows a toast error, turning any website billing URL into a one-click Upgrade action button. */
@@ -128,6 +152,7 @@ export function useCloudAutomations(): {
   reload: () => Promise<void>;
 } {
   const rpc = useRpc<typeof automationRpcContract>();
+  const sdk = useSdk();
   const navigate = useBbNavigate();
   const [rows, setRows] = useState(() => lastLoaded.rows ?? []);
   // True once the last list request succeeded, so an empty list means no Cloud loops.
@@ -157,17 +182,19 @@ export function useCloudAutomations(): {
     void load();
   }, [load]);
   useCloudLoginFixed(() => void load());
+  useEffect(() => stopRunThread, []);
   usePlanLoopsChanged(() => void load());
   const onUpgrade = useCallback(
     () => navigate.openUrl("https://www.cloudroom.dev/billing"),
     [navigate],
   );
   const act = useCallback(
-    async (request: Request, done: string) => {
+    async (request: Request, done: string, then?: (value: unknown) => void) => {
       try {
-        await call(request);
+        const value = await call(request);
         if (request.action !== "run") loopsChanged();
         toast.success(done);
+        then?.(value);
       } catch (error: unknown) {
         showLoopError(error instanceof Error ? error.message : String(error), onUpgrade);
       }
@@ -180,7 +207,15 @@ export function useCloudAutomations(): {
       // A project loop (no thread hosts it) opens its project.
       onOpen: (a) => a.thread_id.startsWith("proj_") ? navigate.toProject(a.thread_id) : navigate.toThread(a.thread_id),
       onRun: (a) =>
-        void act({ action: "run", id: a.id }, "Starting now"),
+        void act({ action: "run", id: a.id }, "Starting now", (value) => {
+          // The thread the run prompts; missing from websites before 2026-11-18.
+          const thread = (value as { thread?: unknown }).thread;
+          if (typeof thread !== "string") return;
+          void openRunThread(
+            () => sdk.threads.get({ threadId: thread }).then(() => thread),
+            navigate.toThread,
+          );
+        }),
       onNewUrl: (a) =>
         void replaceWebhookUrl(
           async () =>
@@ -217,7 +252,7 @@ export function useCloudAutomations(): {
         }
       },
     }),
-    [act, call, load, navigate, onUpgrade],
+    [act, call, load, navigate, onUpgrade, sdk],
   );
   return { rows, loaded, actions, reload: load };
 }

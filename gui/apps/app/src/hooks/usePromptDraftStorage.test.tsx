@@ -4,9 +4,12 @@ import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getPromptDraftAccessor,
+  useFailedPromptMessages,
   usePromptDraftInputThreadIds,
+  type FailedSend,
   usePromptDraftStorage,
 } from "./usePromptDraftStorage";
+import { FailedMessageNotice } from "@/components/promptbox/banner/FailedMessageNotice";
 
 const NEW_THREAD_DRAFT_KEY = "bb.promptbox.contents-draft-3";
 const LEGACY_PROJECT_DRAFT_KEY = "bb.promptbox.contents-proj_prompt-draft-3";
@@ -293,6 +296,102 @@ describe("usePromptDraftStorage", () => {
     expect(result.current.storageKey).toBe(
       "bb.promptbox.contents-automation-edit-auto_watchdog-3",
     );
+  });
+});
+
+describe("usePromptDraftStorage restoreFailedSend", () => {
+  const image = { type: "localImage" as const, path: "/a.png", name: "a.png", sizeBytes: 1 };
+  const sent = { text: "Look at this", mentions: [], attachments: [image] };
+  function failWhileTyping(typed: string, failure: FailedSend) {
+    const scope = uniqueScope();
+    const { result } = renderHook(() => {
+      const draft = usePromptDraftStorage(scope);
+      return { draft, failed: useFailedPromptMessages(draft.storageKey) };
+    });
+    act(() => result.current.draft.setDraft(sent));
+    act(() => void result.current.draft.clearIfCurrentMatches(sent));
+    act(() => result.current.draft.setTextAndMentions(typed, []));
+    act(() => result.current.draft.restoreFailedSend(sent, failure));
+    return result;
+  }
+  const original = Storage.prototype.setItem;
+  const failedKeys = () =>
+    Object.keys(window.localStorage).filter((key) => key.startsWith("bb.failed-messages:"));
+
+  it("keeps a failed send aside while the user typed; restore merges, dismiss drops", () => {
+    const result = failWhileTyping("Look at this too", { cleared: true, refused: true });
+    expect(result.current.draft.getCurrent().text).toBe("Look at this too");
+    expect(result.current.failed.message?.draft).toEqual(sent);
+    act(() => void result.current.failed.restore());
+    expect(result.current.draft.getCurrent().text).toBe("Look at this\n\nLook at this too");
+    expect(result.current.draft.getCurrent().attachments).toHaveLength(1);
+    expect(result.current.failed.message).toBeNull();
+    const again = failWhileTyping("next", { cleared: true, refused: false });
+    act(() => again.current.failed.dismiss());
+    expect(again.current.failed.message).toBeNull();
+    expect(again.current.draft.getCurrent().text).toBe("next");
+  });
+
+  it("restores a surely refused send straight into an empty composer", () => {
+    const result = failWhileTyping("", { cleared: true, refused: true });
+    expect(result.current.draft.getCurrent()).toEqual(sent);
+    expect(result.current.failed.message).toBeNull();
+  });
+
+  it("gives an uncertain send back its own request ID on an unchanged restore", () => {
+    const request = { key: "cloudroom-request:thr-1", value: "fp-a:id-a" };
+    const result = failWhileTyping("", { cleared: true, refused: false, request });
+    expect(result.current.failed.message?.uncertain).toBe(true);
+    window.localStorage.setItem(request.key, "fp-b:id-b"); // A later send B took the slot.
+    act(() => void result.current.failed.restore());
+    expect(result.current.draft.getCurrent()).toEqual(sent);
+    expect(window.localStorage.getItem(request.key)).toBe("fp-a:id-a");
+  });
+
+  it("keeps another tab's failed message", () => {
+    const result = failWhileTyping("x", { cleared: true, refused: false });
+    const key = `bb.failed-messages:${result.current.draft.storageKey}:zz`;
+    window.localStorage.setItem(key, JSON.stringify({ text: "other tab", attachments: [], uncertain: true }));
+    act(() => void window.dispatchEvent(new StorageEvent("storage", { key })));
+    expect(result.current.failed.count).toBe(2);
+    expect(failedKeys()).toHaveLength(2);
+    act(() => void result.current.failed.dismiss());
+    expect(result.current.failed.message?.draft.text).toBe("other tab");
+  });
+
+  it("keeps the notice and the request ID when storage is full during restore; sending it clears the notice", () => {
+    const request = { key: "cloudroom-request:thr-2", value: "fp-a:id-a" };
+    const result = failWhileTyping("", { cleared: true, refused: false, request });
+    window.localStorage.setItem(request.key, "fp-b:id-b");
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key.startsWith("bb.promptbox")) throw new DOMException("full", "QuotaExceededError");
+      return void Reflect.apply(original, this, [key, value]);
+    });
+    act(() => void result.current.failed.restore());
+    setItem.mockRestore();
+    expect(failedKeys()).toHaveLength(1);
+    expect(window.localStorage.getItem(request.key)).toBe("fp-a:id-a");
+    act(() => void result.current.draft.clearIfCurrentMatches(sent));
+    expect(result.current.failed.message).toBeNull();
+    expect(failedKeys()).toHaveLength(0);
+  });
+
+  it("falls back to main's composer restore when the failed record can't be stored", () => {
+    const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (this: Storage, key, value) {
+      if (key.startsWith("bb.failed-messages:")) throw new DOMException("full", "QuotaExceededError");
+      return void Reflect.apply(original, this, [key, value]);
+    });
+    const result = failWhileTyping("", { cleared: true, refused: false });
+    setItem.mockRestore();
+    expect(result.current.failed.message).toBeNull();
+    expect(window.localStorage.getItem(result.current.draft.storageKey)).toContain("Look at this");
+  });
+
+  it("warns that delivery is unknown when any waiting message is uncertain", () => {
+    const result = failWhileTyping("typed", { cleared: true, refused: true });
+    act(() => result.current.draft.restoreFailedSend({ ...sent, text: "second" }, { cleared: true, refused: false }));
+    render(<FailedMessageNotice storageKey={result.current.draft.storageKey} />);
+    expect(document.body.textContent).toContain("2 messages may not have been sent");
   });
 });
 

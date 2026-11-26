@@ -869,31 +869,6 @@
 
 /* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
-/* A ```draft field: a blinking caret after the last letter says "you can type here". The real caret takes over on focus. */
-.draft-caret:not(:focus)::after {
-  content: "";
-  display: inline-block;
-  width: 1.5px;
-  height: 1.2em;
-  margin-left: 1px;
-  vertical-align: -0.22em;
-  background: var(--foreground);
-  pointer-events: none;
-  animation: draft-caret-blink 1.06s step-end infinite;
-}
-
-@keyframes draft-caret-blink {
-  50% {
-    opacity: 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .draft-caret:not(:focus)::after {
-    animation: none;
-  }
-}
-
 @keyframes bb-search-flash {
   from {
     background-color: color-mix(in oklch, var(--ring) 22%, transparent);
@@ -930,6 +905,10 @@
   animation-timing-function: steps(8) !important;
 }
 [data-window-blurred] .animate-shine-icon {
+  animation-timing-function: steps(10) !important;
+}
+/* 10 steps divide every strip's frame count (60, 80), so each step lands on a whole frame. */
+[data-window-blurred] .harness-spinner {
   animation-timing-function: steps(10) !important;
 }
 [data-window-blurred] .working-grid i::after,
@@ -976,6 +955,54 @@
   .bb-teleport-up,
   .bb-teleport-down {
     animation: none;
+  }
+}
+
+/* Loops orbit header: a comet circles the rings every 6s and each tick lights up
+ * as it passes. `--loop-orbit-at` is the tick's place in the lap, 0 to 1. */
+@keyframes loop-orbit-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes loop-orbit-hit {
+  0% {
+    stroke: var(--loop-orbit-lit-stroke);
+    stroke-opacity: var(--loop-orbit-lit);
+    stroke-width: 8.5;
+  }
+  28%,
+  100% {
+    stroke: var(--loop-orbit-rest-stroke);
+    stroke-opacity: var(--loop-orbit-rest);
+    stroke-width: 6;
+  }
+}
+
+/* A tick whose run just finished pops in this colour. */
+.loop-orbit {
+  --loop-orbit-pop: var(--foreground);
+}
+
+.dark .loop-orbit {
+  --loop-orbit-pop: #fff;
+}
+
+.loop-orbit-tail {
+  display: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .loop-orbit-comet {
+    animation: loop-orbit-spin 6s linear infinite;
+  }
+  .loop-orbit-tail {
+    display: inline;
+  }
+  .loop-orbit-tick {
+    animation: loop-orbit-hit 6s linear infinite;
+    animation-delay: calc((var(--loop-orbit-at) - 1) * 6s);
   }
 }
 

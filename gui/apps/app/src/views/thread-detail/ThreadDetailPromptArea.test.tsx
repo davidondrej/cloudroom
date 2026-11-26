@@ -73,6 +73,7 @@ const mocks = vi.hoisted(() => ({
     getCurrent: vi.fn(),
     mentions: [] as PromptTextMention[],
     removeAttachment: vi.fn(),
+    restoreFailedSend: vi.fn(),
     restoreIfEmpty: vi.fn(),
     setDraft: vi.fn(),
     setTextAndMentions: vi.fn(),
@@ -582,6 +583,7 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
 vi.mock("@/hooks/usePromptDraftStorage", () => ({
   flushPromptDraftNotifies: () => false,
   usePromptDraftStorage: () => mocks.promptDraft,
+  useFailedPromptMessages: () => ({ message: null, count: 0, restore: vi.fn(), dismiss: vi.fn() }),
 }));
 
 vi.mock("@/hooks/usePromptMentions", () => ({

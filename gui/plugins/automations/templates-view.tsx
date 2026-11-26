@@ -46,6 +46,8 @@ export interface LoopTemplatesState {
   freePlan?: boolean;
   /** Each template's rough share of the weekly Claude or Codex limit, by template ID. Templates it can't price are missing. */
   usage?: TemplateUsage;
+  /** Opens the app's Add project flow, the sidebar's New project. */
+  onAddProject: () => void;
 }
 
 /** "~6%" or "<1%": a rough share of a weekly limit. */
@@ -115,12 +117,14 @@ function TemplateRepoPicker({
   activeIds,
   freePlan,
   onAdd,
+  onAddProject,
 }: {
   template: LoopTemplate;
   projects: readonly TemplateProject[] | null;
   activeIds: ReadonlySet<string>;
   freePlan?: boolean;
   onAdd: LoopTemplatesState["onAdd"];
+  onAddProject: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -152,6 +156,51 @@ function TemplateRepoPicker({
     });
   };
 
+  const trigger = (
+    <PopoverTrigger asChild>
+      <button
+        type="button"
+        aria-label={`Add ${template.name} to repos`}
+        className={cn(
+          "flex h-9 min-w-21 cursor-pointer items-center justify-center gap-1.5 border-t border-l px-3 text-sm font-medium transition-colors",
+          on
+            ? "border-primary bg-primary font-semibold text-primary-foreground hover:bg-primary/90"
+            : "border-border bg-foreground/8 text-foreground hover:bg-foreground/14",
+        )}
+      >
+        <Icon name={on ? "Check" : "Plus"} className="size-3.5" aria-hidden />
+        {on ? "On" : "Add"}
+        <Icon name="ChevronDown" className="size-3 opacity-75" aria-hidden />
+      </button>
+    </PopoverTrigger>
+  );
+
+  // Personal is never a target, so with no other project offer Add project, not an empty search.
+  if (projects?.length === 0)
+    return (
+      <Popover open={open} onOpenChange={setOpen}>
+        {trigger}
+        <PopoverContent align="end" className="w-72 border-foreground/10 p-3">
+          <p className="text-sm leading-snug text-muted-foreground">
+            Templates run on a project&apos;s repo. Add a project first, then
+            add this template.
+          </p>
+          <Button
+            type="button"
+            size="sm"
+            className="mt-3 h-7 gap-1 px-3 text-xs"
+            onClick={() => {
+              setOpen(false);
+              onAddProject();
+            }}
+          >
+            <Icon name="Plus" className="size-3.5" aria-hidden />
+            Add project
+          </Button>
+        </PopoverContent>
+      </Popover>
+    );
+
   return (
     <Popover
       open={open}
@@ -160,22 +209,7 @@ function TemplateRepoPicker({
         if (!next) setQuery("");
       }}
     >
-      <PopoverTrigger asChild>
-        <button
-          type="button"
-          aria-label={`Add ${template.name} to repos`}
-          className={cn(
-            "flex h-9 min-w-21 cursor-pointer items-center justify-center gap-1.5 border-t border-l px-3 text-sm font-medium transition-colors",
-            on
-              ? "border-primary bg-primary font-semibold text-primary-foreground hover:bg-primary/90"
-              : "border-border bg-foreground/8 text-foreground hover:bg-foreground/14",
-          )}
-        >
-          <Icon name={on ? "Check" : "Plus"} className="size-3.5" aria-hidden />
-          {on ? "On" : "Add"}
-          <Icon name="ChevronDown" className="size-3 opacity-75" aria-hidden />
-        </button>
-      </PopoverTrigger>
+      {trigger}
       <PopoverContent align="end" className="w-80 border-foreground/10 p-0">
         <div className="relative border-b border-foreground/10">
           <Icon
@@ -435,6 +469,7 @@ function TemplateCard({
   freePlan,
   renderAgent,
   onAdd,
+  onAddProject,
 }: {
   template: LoopTemplate;
   repos: readonly { name: string; github: string | null }[];
@@ -444,6 +479,7 @@ function TemplateCard({
   freePlan?: boolean;
   renderAgent: (agent: AutomationAgentSummary) => ReactNode;
   onAdd: LoopTemplatesState["onAdd"];
+  onAddProject: () => void;
 }) {
   const on = repos.length > 0;
   const action = templateAction(template);
@@ -549,6 +585,7 @@ function TemplateCard({
           activeIds={activeIds}
           freePlan={freePlan}
           onAdd={onAdd}
+          onAddProject={onAddProject}
         />
       </div>
     </div>
@@ -700,6 +737,7 @@ export function LoopTemplatesView({
                       freePlan={templates.freePlan}
                       renderAgent={renderAgent}
                       onAdd={templates.onAdd}
+                      onAddProject={templates.onAddProject}
                     />
                   );
                 })}

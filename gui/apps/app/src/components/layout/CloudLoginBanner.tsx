@@ -4,7 +4,7 @@ import { useNavigate } from "react-router";
 import { cloudLoginTitle, type CloudLoginProvider } from "@cloudroom/domain";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { publishBannerHeight } from "./DesktopUpdateBanner";
+import { BANNER_CLASS, publishBannerHeight } from "./DesktopUpdateBanner";
 import { useCloudLogins, useCloudroomAccount, useCloudroomThread } from "@/hooks/queries/cloudroom-queries";
 import { DeviceCode } from "@/components/thread/timeline/CloudLoginRow";
 import { CLOUD_LOGIN_FIXED_EVENT, RECONNECT_EVENT, reconnectCloud, useCloudReconnect } from "@/lib/cloud-reconnect";
@@ -41,7 +41,7 @@ export function CloudLoginBanner({ threadId, onLoops }: { threadId: string | nul
   }, [navigate, queryClient]);
   if (hidden || threadWaiting || onLoops || issues.length === 0) return null;
   return (
-    <div ref={publishBannerHeight} role="alert" className="flex shrink-0 flex-col border-b border-destructive/30 bg-destructive/10">
+    <div ref={publishBannerHeight} role="alert" className={`flex shrink-0 flex-col ${BANNER_CLASS} [--banner-color:var(--destructive)]`}>
       {issues.map((issue) => (
         <IssueLine key={issue.provider} issue={issue} onDismiss={() => { dismissed = true; setHidden(true); }} />
       ))}

@@ -52,6 +52,8 @@ export interface ExecutionPermissionConfig {
   options: readonly PickerOption<PermissionMode>[];
   onChange: (value: PermissionMode) => void;
   supported: boolean;
+  /** Shown instead of the value while the user must still choose a mode. */
+  displayOverride?: { label: string; compactLabel?: string; title?: string };
 }
 
 export interface ExecutionControlsProps {

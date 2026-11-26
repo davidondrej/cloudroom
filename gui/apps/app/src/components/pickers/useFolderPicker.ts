@@ -1,7 +1,8 @@
 import { getProjectPathValidationMessage } from "@cloudroom/domain";
-import { useHostDirectory, useHostFolderSearch } from "@/hooks/queries/host-queries";
+import { useHostDirectory, useHostFolderSearch, useHosts } from "@/hooks/queries/host-queries";
 import {
   cleanPathQuery,
+  isDrivePath,
   isPathQuery,
   matchFolders,
   resolveFolder,
@@ -13,16 +14,21 @@ const SEARCH_MIN_CHARS = 2;
 const NO_FOLDERS: FolderEntry[] = [];
 
 /** Folders for the project picker's search on `hostId`.
- *  A `~/…` or `/…` query lists the typed folder (path mode); other text searches folders anywhere under home. */
+ *  A `~/…` or `/…` query (`C:\…` on Windows) lists the typed folder (path mode); other text searches folders anywhere under home. */
 export function useFolderPicker({ hostId, query, open }: { hostId: string | null; query: string; open: boolean }) {
-  const text = cleanPathQuery(query);
-  const wantsPath = open && hostId !== null && isPathQuery(text);
+  // Drive paths (`C:\…`) only on a Windows host. Elsewhere `C:\ Repo` stays a name search, as before.
+  const platform = useHosts().data?.find((host) => host.id === hostId)?.platform;
+  const text = cleanPathQuery(query, platform === "win32");
+  const drive = platform === "win32" && isDrivePath(text);
+  const wantsPath = open && hostId !== null && (isPathQuery(text) || drive);
   // Plain text also completes against home, as if the search started in `~/`: `co` + Tab gives `~/code/`.
   const plainName = !wantsPath && text.trim() !== "" && !text.includes("/");
   const homeListing = useHostDirectory(open && hostId !== null && (wantsPath || plainName) ? hostId : null, null, { retry: false });
   const home = homeListing.data?.directory ?? null;
-  // Windows homes use drive paths, which path typing doesn't cover yet; those keep the plain search.
-  const pathMode = wantsPath && (home === null || home.startsWith("/"));
+  // Windows homes use drive paths: there only a typed or pasted drive path lists folders; `~/` isn't covered yet.
+  // The host's platform says so before (or without) its home listing.
+  const windows = platform && platform !== "unknown" ? platform === "win32" : home !== null && !home.startsWith("/");
+  const pathMode = wantsPath && (drive || !windows);
   const { folder, leaf } = splitPathQuery(text);
   const folderPath = pathMode ? resolveFolder(folder, home) : null;
   const folderListing = useHostDirectory(folderPath !== null && folderPath !== home ? hostId : null, folderPath, { retry: false });
@@ -42,19 +48,30 @@ export function useFolderPicker({ hostId, query, open }: { hostId: string | null
       )
     : NO_FOLDERS;
 
+  const canAddHere = listing !== undefined && getProjectPathValidationMessage(listing.directory) === null;
+  const matches = listing ? matchFolders(listing.entries, leaf) : NO_FOLDERS;
+  // A drive path names one folder: only that one can be added. Other rows just show what is there.
+  const exact = drive && leaf ? matches.find((entry) => entry.name.toLowerCase() === leaf.toLowerCase()) : undefined;
+
   return {
     pathMode,
     folder,
     leaf,
     listing,
     /** The listed folder itself can be a project: not `/` or a drive root. */
-    canAddHere: listing !== undefined && getProjectPathValidationMessage(listing.directory) === null,
+    canAddHere,
     loading: pathMode && listing === undefined && !current.isError,
     missing: pathMode && current.isError,
-    matches: listing ? matchFolders(listing.entries, leaf) : NO_FOLDERS,
+    matches,
+    /** For a drive path, the folder it names: the only row that can be added, never a name that starts like it. */
+    exact,
     results,
     /** The home subfolder plain text completes to. */
     homeMatch: plainName && home?.startsWith("/") && homeListing.data ? matchFolders(homeListing.data.entries, text.trim())[0] : undefined,
     home: home ?? search.data?.directory ?? null,
+    windows,
+    drive,
+    /** What Tab adds after a folder name. */
+    separator: drive && !folder.endsWith("/") ? "\\" : "/",
   };
 }

@@ -345,7 +345,9 @@ describe("SkillsOverview", () => {
     expect(screen.getByText("automations")).toBeTruthy();
     const typeTrigger = screen.getByRole("button", { name: /^Filters/ });
     focusWithKeyboard(typeTrigger);
-    expect((await screen.findByRole("tooltip")).textContent).toBe("Filters: All");
+    expect((await screen.findByRole("tooltip")).textContent).toBe(
+      "Filters: All",
+    );
     fireEvent.blur(typeTrigger);
     fireEvent.pointerDown(typeTrigger);
     expect(screen.getByText("Type")).toBeTruthy();
@@ -426,6 +428,58 @@ describe("SkillsOverview", () => {
     fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "User" }));
     expect(await screen.findByText("claude-authored")).toBeTruthy();
     expect(screen.queryByText("codex-authored")).toBeNull();
+  });
+
+  it("shows a skill copied for several agents once and opens the filtered agent's copy", async () => {
+    const claudeCopy = makeSkill({ name: "shared-skill" });
+    const codexCopy = makeSkill({
+      id: `skill_${"b".repeat(64)}`,
+      name: "shared-skill",
+      provider: "codex",
+      filePath: "/home/u/.codex/skills/shared-skill/SKILL.md",
+    });
+    const onSelectSkill = vi.fn();
+    renderDom(
+      <SkillsOverview
+        providerRoster={DEFAULT_PROVIDER_ROSTER}
+        skills={[claudeCopy, codexCopy]}
+        isLoading={false}
+        hasError={false}
+        onCreateSkill={() => {}}
+        onSelectSkill={onSelectSkill}
+      />,
+    );
+
+    expect(screen.getAllByText("shared-skill")).toHaveLength(1);
+    fireEvent.pointerDown(screen.getByRole("button", { name: /^Filters/ }));
+    fireEvent.click(screen.getByRole("menuitemcheckbox", { name: "Codex" }));
+    fireEvent.click(await screen.findByText("shared-skill"));
+    expect(onSelectSkill).toHaveBeenLastCalledWith(codexCopy);
+  });
+
+  it("opens the copy that matched the search", () => {
+    const claudeCopy = makeSkill({ name: "shared-skill" });
+    const codexCopy = makeSkill({
+      id: `skill_${"b".repeat(64)}`,
+      name: "shared-skill",
+      provider: "codex",
+      filePath: "/home/u/.codex/skills/shared-skill/SKILL.md",
+    });
+    const onSelectSkill = vi.fn();
+    renderDom(
+      <SkillsOverview
+        providerRoster={DEFAULT_PROVIDER_ROSTER}
+        skills={[claudeCopy, codexCopy]}
+        isLoading={false}
+        hasError={false}
+        query="codex"
+        onCreateSkill={() => {}}
+        onSelectSkill={onSelectSkill}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("shared-skill"));
+    expect(onSelectSkill).toHaveBeenLastCalledWith(codexCopy);
   });
 
   it("toggles Cloudroom Official independently from Included in plugin", async () => {
@@ -668,7 +722,9 @@ describe("SkillsOverview", () => {
     fireEvent.pointerDown(providerTrigger);
     expect(screen.getByText("Provider")).toBeTruthy();
     expect(
-      screen.getByRole("menuitemcheckbox", { name: "Cloudroom" }).querySelector("img"),
+      screen
+        .getByRole("menuitemcheckbox", { name: "Cloudroom" })
+        .querySelector("img"),
     ).not.toBeNull();
   });
 
@@ -693,7 +749,9 @@ describe("SkillsOverview", () => {
     expect(await screen.findByText("codex-skill")).toBeTruthy();
 
     fireEvent.pointerDown(screen.getByRole("button", { name: /^Filters/ }));
-    const roomFilter = screen.getByRole("menuitemcheckbox", { name: "Cloudroom" });
+    const roomFilter = screen.getByRole("menuitemcheckbox", {
+      name: "Cloudroom",
+    });
     expect(roomFilter.getAttribute("aria-checked")).toBe("false");
   });
 
@@ -1583,7 +1641,9 @@ describe("SkillDetailDialogView", () => {
       name: "Copy skill path: /home/u/.bb/skills/bb-skill",
     });
     expect(screen.getByText("~/.bb/skills/bb-skill")).toBeTruthy();
-    expect(screen.queryByText("Cloudroom Official", { exact: true })).toBeNull();
+    expect(
+      screen.queryByText("Cloudroom Official", { exact: true }),
+    ).toBeNull();
     expect(screen.queryByText("Included", { exact: true })).toBeNull();
     expect(screen.queryByText("Imported", { exact: true })).toBeNull();
     expect(screen.queryByText("Editable", { exact: true })).toBeNull();

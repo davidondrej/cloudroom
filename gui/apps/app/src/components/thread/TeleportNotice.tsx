@@ -96,9 +96,12 @@ export function TeleportNotice({
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const progress = thread.teleport;
   const complete = progress?.phase === "complete";
+  // A transfer that ended on its own, like one too big to capture, says why until dismissed (#2280).
+  const ended = progress?.phase === "cancelled" && Boolean(progress.error);
   const dismissKey = `cloudroom.teleport.dismissed.${progress?.id}`;
   // Older versions stored 1 for dismissed, which also works as an expired timestamp.
-  const dismissAt = complete ? Number(window.localStorage.getItem(dismissKey)) : 0;
+  const dismissAt =
+    complete || ended ? Number(window.localStorage.getItem(dismissKey)) : 0;
   const dismissed = dismissAt > 0 && dismissAt <= Date.now();
   const dismiss = useCallback(() => {
     window.localStorage.setItem(dismissKey, "1");
@@ -114,13 +117,13 @@ export function TeleportNotice({
     return () => window.clearTimeout(timer);
   }, [settled, dismissed, dismissAt, dismissKey, dismiss]);
   useEffect(() => {
-    if (handedOff && sending) dismiss();
-  }, [handedOff, sending, dismiss]);
-  if (!progress || progress.phase === "cancelled") return null;
+    if ((handedOff || ended) && sending) dismiss();
+  }, [handedOff, ended, sending, dismiss]);
+  if (!progress || (progress.phase === "cancelled" && !ended)) return null;
   const owner = progress.owner === thread.id;
-  if (complete && dismissed) return null;
+  if ((complete || ended) && dismissed) return null;
   const failed =
-    progress.phase === "error" || Boolean(action.error || stop.error);
+    progress.phase === "error" || ended || Boolean(action.error || stop.error);
   const error = action.error?.message ?? stop.error?.message ?? progress.error;
   const files = `${progress.completed} of ${progress.total} files`;
   // Megabytes, not files: one big chat file would sit at 0 until it lands. The server sends bytes for this stage.
@@ -140,7 +143,11 @@ export function TeleportNotice({
             : "Checking delivery…",
         ]
       : failed
-        ? ["AlertCircle", "Teleport paused", error ? plainError(error) : "Your chat is safe."]
+        ? [
+            "AlertCircle",
+            ended ? "Teleport stopped" : "Teleport paused",
+            error ? plainError(error) : "Your chat is safe.",
+          ]
         : progress.phase === "cancelling"
           ? ["Spinner", "Cancelling", "Keep your laptop online."]
           : progress.phase === "checking"
@@ -217,7 +224,7 @@ export function TeleportNotice({
               Open parent
             </RouteAnchor>
           )}
-          {owner && failed && (
+          {owner && failed && !ended && (
             <PromptBannerActionButton
               disabled={action.isPending}
               onClick={() => action.mutate("start")}
@@ -233,7 +240,7 @@ export function TeleportNotice({
               Stop
             </PromptBannerActionButton>
           )}
-          {owner && !complete && !progress.cloudStarted && (
+          {owner && !complete && !ended && !progress.cloudStarted && (
             <PromptBannerActionButton
               disabled={action.isPending || progress.phase === "cancelling"}
               onClick={() => action.mutate("cancel")}
@@ -241,10 +248,10 @@ export function TeleportNotice({
               Cancel
             </PromptBannerActionButton>
           )}
-          {owner && failed && (
+          {owner && failed && !ended && (
             <FixPrompt iconOnly prompt={projectFilesFixPrompt(thread.id, error)} />
           )}
-          {complete && (
+          {(complete || ended) && (
             <button
               type="button"
               aria-label="Dismiss"

@@ -2,10 +2,12 @@ The Director keeps your other agents moving. It is a normal thread that wakes on
 
 ## What you get
 
-- A **Director** row at the top of the sidebar, above Pinned. It opens the Director's thread.
-- An automatic ping, once an hour by default. Each ping checks one thread that stopped since the Director last looked.
+- A **Director** row at the top of the sidebar, above Pinned. It opens the Director's thread. Hover it for three dots that open its settings.
+- An automatic ping you turn on yourself, once an hour by default. Each ping checks one thread that stopped since the Director last looked.
 - No model turn when nothing has stopped.
+- A learning mode. For its first 50 turns the Director asks before it acts, and it remembers each correction you give it. A meter shows how far along it is. Lessons are saved with your Cloudroom account, so they follow you to every computer.
 - Settings for the interval, both prompts, the harness, model and effort, which projects it watches, and its icon and color.
+- The same settings from the terminal: `room-cli director`, `room-cli director set <setting> <value>`.
 
 ## How it works
 

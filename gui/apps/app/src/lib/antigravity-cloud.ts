@@ -53,6 +53,18 @@ export function useAntigravityCloud(enabled: boolean) {
   });
 }
 
+/** Offer sign-in only when the latest check succeeded with `connected: false`; a pending, failed or unclear check (e.g. the host slept) is not a sign-out. */
+export function antigravityCloudState(
+  cloud: { data?: { selfHosted?: boolean }; isError: boolean },
+  status: { data?: { connected?: boolean }; isError: boolean; isFetching: boolean },
+): "ready" | "checking" | "unavailable" | "signed_out" {
+  if (cloud.data?.selfHosted || status.data?.connected) return "ready";
+  if (status.isFetching) return "checking";
+  if (!cloud.data) return cloud.isError ? "unavailable" : "checking";
+  if (status.isError || (status.data && status.data.connected !== false)) return "unavailable";
+  return status.data ? "signed_out" : "checking";
+}
+
 /** The login sandbox reads these choices from agy's ACP session, including the default after each model switch. */
 export function antigravityCloudModels(catalog: string): AvailableModel[] {
   return catalog.split("\n").flatMap((line, index) => {

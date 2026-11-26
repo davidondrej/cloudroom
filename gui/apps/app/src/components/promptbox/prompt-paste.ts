@@ -34,9 +34,50 @@ const byPosition = (left: PromptTextMention, right: PromptTextMention) =>
 const unixNewlines = (text: string) => text.replace(/\r\n?/gu, "\n");
 
 export function clipboardFiles(clipboard: DataTransfer | null): File[] {
-  return Array.from(clipboard?.items ?? [])
-    .map((item) => (item.kind === "file" ? item.getAsFile() : null))
-    .filter((file): file is File => file !== null);
+  return withPastedFileNames(
+    Array.from(clipboard?.items ?? [])
+      .map((item) => (item.kind === "file" ? item.getAsFile() : null))
+      .filter((file): file is File => file !== null),
+  );
+}
+
+/** Android keyboards paste images with an empty name, which the upload rejects. */
+function withPastedFileNames(files: File[]): File[] {
+  let unnamed = 0;
+  return files.map((file) => {
+    if (file.name.trim().length > 0) return file;
+    unnamed += 1;
+    const number = unnamed > 1 ? `-${unnamed}` : "";
+    const subtype = /^image\/([a-z0-9]+)/iu.exec(file.type)?.[1]?.toLowerCase();
+    const name = subtype
+      ? `pasted-image${number}.${subtype === "jpeg" ? "jpg" : subtype}`
+      : `pasted-file${number}`;
+    return new File([file], name, {
+      type: file.type,
+      lastModified: file.lastModified,
+    });
+  });
+}
+
+/** False where the browser cannot hand the page a copied image. */
+export function canReadClipboardImages(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.read === "function"
+  );
+}
+
+/**
+ * Reads copied images straight from the clipboard. Phone keyboards cannot paste
+ * an image into a web page, so the plus menu offers this instead.
+ */
+export async function readClipboardImages(): Promise<File[]> {
+  const files: File[] = [];
+  for (const item of await navigator.clipboard.read()) {
+    const type = item.types.find((candidate) => candidate.startsWith("image/"));
+    if (type) files.push(new File([await item.getType(type)], "", { type }));
+  }
+  return withPastedFileNames(files);
 }
 
 export function trimTrailingPromptNewlines(
@@ -67,12 +108,9 @@ export function readPromptPaste({
     const quoted = promptEditorValueFromSlice(slice, schema);
     return { kind: "quote", value: trimTrailingPromptNewlines(quoted) };
   }
-  if (hasQuoteLine(plain)) {
-    const quoted = valueFromPlainText(plain, actions);
-    return { kind: "quote", value: trimTrailingPromptNewlines(quoted) };
-  }
 
-  // Rich text wins only when it carries our own mention pills.
+  // Rich text wins only when it carries our own mention pills, even if the
+  // plain-text fallback (such as a thread title) starts with "> ".
   const html = clipboard?.getData("text/html") ?? "";
   const rich = html.trim().length > 0 ? valueFromHtml(html) : null;
   if (rich?.hasPills) {
@@ -80,6 +118,10 @@ export function readPromptPaste({
       kind: "inline",
       value: withActionCommandPills(rich.value, actions),
     };
+  }
+  if (hasQuoteLine(plain)) {
+    const quoted = valueFromPlainText(plain, actions);
+    return { kind: "quote", value: trimTrailingPromptNewlines(quoted) };
   }
   if (plain.length > 0) {
     return { kind: "inline", value: valueFromPlainText(plain, actions) };

@@ -5,7 +5,7 @@ Reads local agent chats (Claude Code, Codex, Pi, OpenCode, Hermes), keeps only t
 (trimmed, secrets masked), flags automated chats, and writes small text files for cloud readers.
 
   extract.py index OUT [--days 90]                      -> OUT/index.jsonl, OUT/stats.json
-  extract.py slices OUT [--n 30] [--chars 900]          -> OUT/slices/slice-NN.txt (all kept chats, at most 100 KB each)
+  extract.py slices OUT [--max-readers N] [--chars 900] -> OUT/slices/slice-NN.txt (~100 KB each; with N, the newest chats that fit)
   extract.py groups OUT [--top 12] [--per 15] [--chars 2500] -> OUT/groups/group-NN.txt + OUT/groups/overview.txt
   extract.py sessions OUT --ids c-1a2b3c4d,x-... [--chars 6000]  -> prints those chats
   extract.py reduce OUT [--top 25]                       -> counts the tags in OUT/reports/*.txt, prints a compact digest
@@ -315,19 +315,32 @@ def day_index(ts, days=91):
     return index if 0 <= index < days else None
 
 
-def cmd_slices(out, n=30, chars=900, max_bytes=100_000):
-    keep = sorted(kept(load(out)), key=lambda c: (c["repo"], c["ts"]))
+def cmd_slices(out, chars=900, max_bytes=100_000, max_readers=0):
+    """Slices of about max_bytes (~110 chats, what reader.md expects), as few as fit: a small history needs 1-2 readers,
+    not 30 (#2645). With max_readers (Free plans), the newest chats that fit in that many slices; older ones are skipped."""
+    keep = sorted(kept(load(out)), key=lambda c: c["ts"], reverse=True)
     os.makedirs(os.path.join(out, "slices"), exist_ok=True)
-    blocks = [(c, chat_block(c, chars).encode()) for c in keep]
-    target = min(max_bytes, -(-sum(len(b) for _, b in blocks) // n))
-    slices, current, chats = [], b"", []
+    for old in glob.glob(os.path.join(out, "slices", "slice-*.txt")):  # a re-run with fewer slices: readers.py starts one per file
+        os.remove(old)
+    blocks, total = [], 0
+    for c in keep:
+        block = chat_block(c, chars).encode()
+        if max_readers and blocks and total + len(block) > max_readers * max_bytes:
+            break
+        blocks.append((c, block))
+        total += len(block)
+    skipped = len(keep) - len(blocks)
+    blocks.sort(key=lambda b: (b[0]["repo"], b[0]["ts"]))
+    # n even slices in (repo, date) order: each is total/n plus at most one chat, so never more than n readers
+    n, pos = max(1, -(-total // max_bytes)), 0
+    parts = [([], []) for _ in range(n)]
     for c, block in blocks:
-        if current and len(current) + len(block) > target:
-            slices.append((current, chats))
-            current, chats = b"", []
-        current += block
+        data, chats = parts[min(n - 1, pos * n // max(total, 1))]
+        data.append(block)
         chats.append(c)
-    slices += [(current, chats)] if current else []
+        pos += len(block)
+    slices = [(b"".join(data), chats) for data, chats in parts if chats]
+    keep = [c for c, _ in blocks]
     days, per_slice = [0] * 91, {}
     for i, (data, part) in enumerate(slices, 1):
         with open(os.path.join(out, "slices", f"slice-{i:02d}.txt"), "wb") as f:
@@ -339,7 +352,8 @@ def cmd_slices(out, n=30, chars=900, max_bytes=100_000):
     progress = {"chats": len(keep), "days": days, "secrets": sum(data.count(b"[masked]") for data, _ in slices), "slices": per_slice}
     json.dump(progress, open(os.path.join(out, "slices", "progress.json"), "w"))
     sizes = [len(data) for data, _ in slices]
-    print(f"{len(slices)} slices, {len(keep)} chats, {sum(sizes)} bytes, largest {max(sizes, default=0)}")
+    print(f"{len(slices)} slices, {len(keep)} chats, {sum(sizes)} bytes, largest {max(sizes, default=0)}"
+          + (f", {skipped} older chats skipped (Free plan reads the newest)" if skipped else ""))
 
 
 STOP = set("""the and for that this with you your are was have from not but all can will just what when how then they them there
@@ -438,13 +452,13 @@ def cmd_reduce(out, top=25):
 if __name__ == "__main__":
     if sys.platform == "win32":  # a redirected Windows stdout uses the ANSI code page (cp1252), which can't print most chat text
         sys.stdout.reconfigure(encoding="utf-8")
-    a = sys.argv[1:]
+    a = [x for arg in sys.argv[1:] for x in (arg.split("=", 1) if arg.startswith("--") and "=" in arg else [arg])]  # --flag=value too
     opts = {a[i][2:]: a[i + 1] for i in range(2, len(a) - 1, 2) if a[i].startswith("--")}
     num = lambda k, d: int(opts.get(k, d))
     if a[0] == "index":
         cmd_index(a[1], num("days", 90))
     elif a[0] == "slices":
-        cmd_slices(a[1], num("n", 30), num("chars", 900))
+        cmd_slices(a[1], num("chars", 900), max_readers=num("max-readers", 0))
     elif a[0] == "groups":
         cmd_groups(a[1], num("top", 12), num("per", 15), num("chars", 2500))
     elif a[0] == "sessions":

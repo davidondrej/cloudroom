@@ -34,6 +34,8 @@ experimental_openFilePreview(options), experimental_openFileExternally(options) 
   `openUrl` owns HTTP(S) only and returns false for schemes Cloudroom
   leaves to normal anchor behavior. The two file methods accept an
   `ExperimentalFileOpenOptions` live-file target.
+  `experimental_openAddProject()` opens the sidebar's New project flow and
+  returns false when no machine can add a project.
 - `useComposer()` → programmatic access to the chat composer draft (the
   same one the built-in "Add to chat" affordances write to):
   `text` is the current plain text; `setText(next)` replaces it;

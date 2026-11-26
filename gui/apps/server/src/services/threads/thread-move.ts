@@ -30,6 +30,7 @@ import { teleportBlocked } from "../cloudroom/store.js";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { requirePrimaryHostId } from "../hosts/primary-host.js";
+import { copyThreadAttachmentsToProject } from "../projects/attachments.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import {
   detachEnvironmentWithoutOpenThreads,
@@ -332,6 +333,11 @@ async function moveRecord(
   environmentId: string | null,
   seeded = true,
 ): Promise<(tx: DbTransaction) => void> {
+  await copyThreadAttachmentsToProject(deps, {
+    threadId: thread.id,
+    sourceProjectId: thread.projectId,
+    targetProjectId: project.id,
+  });
   const from = getProject(deps.db, thread.projectId)?.name ?? "previous";
   const folder = path
     ? `Your working folder is now ${path}.`

@@ -48,7 +48,6 @@ export default function plugin(room: BbPluginApi): void {
       signInHint: "Sign in to Cloudroom to use Cloudroom Agent.",
       expiredHint: "Sign in to Cloudroom again to use Cloudroom Agent.",
       installUrl: "https://cloudroom.dev",
-      iconTint: { light: "#5C7A00", dark: "#BFFF00" },
     },
     experimental_modelDiscoveryRestart: true,
     maintenance: { health: true, usage: false, installation: true },
@@ -59,7 +58,7 @@ export default function plugin(room: BbPluginApi): void {
       fallback: [{
         id: "cloudroom/cloudroom-agent",
         displayName: "Cloudroom Agent",
-        description: "Frontier open source models",
+        description: "A mix of frontier models",
         supportedReasoningEfforts: [
           { reasoningEffort: "low", description: "Fast" },
           { reasoningEffort: "medium", description: "Balanced" },

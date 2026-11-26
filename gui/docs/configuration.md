@@ -696,6 +696,7 @@ client wrote first, so a stale window cannot silently clobber a newer value.
 | `sidebar.navigationProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `sidebar.threadListProvider`      | Plugin key, `__automatic__`, or `__builtin__`       |
 | `appearance.theme`                | `light`, `dark`, or `system` (default)              |
+| `appearance.showSubagentBar`     | `false` hides the subagent bar under thread titles  |
 | `defaults.startingMachine`        | `last` (default: Cloud, except a project where Local was picked in the last 24 hours) or `cloud` |
 | `defaults.showUltraEfforts`       | `true` adds Claude Ultracode and Codex Ultra to the effort menu (default `false`) |
 

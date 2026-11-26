@@ -899,6 +899,7 @@ function GithubStep({ progress, next, stay }: { progress: ReturnType<typeof useS
       </div>
       {!connected && error && <p role="alert" className="mt-3 text-sm text-(--ob-error)">{error}</p>}
       {offline && <CloudOffline />}
+      {!connected && !onServer && <div className="mt-3.5"><Note>Connecting pushes nothing to your repos.</Note></div>}
       <div className="mt-8 flex items-center gap-5">
         {connected || onServer ? (
           <Cta onClick={() => { track("github", "done", repos ? "repos" : null); next(); }}>Continue <Icon name="ArrowRight" aria-hidden /></Cta>

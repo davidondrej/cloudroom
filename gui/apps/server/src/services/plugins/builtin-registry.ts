@@ -257,6 +257,9 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "director",
     pluginId: "director",
     defaultEnabled: false,
+    // Another computer can't steer this one's Director; the phone can (a session, not a machine).
+    relayRefusedRpcs: { save: "machine", open: "machine", pingNow: "machine", fresh: "machine", forget: "machine", skip: "machine" },
+    refuseMachineCli: true,
   },
 ];
 

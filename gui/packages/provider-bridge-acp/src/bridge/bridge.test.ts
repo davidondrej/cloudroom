@@ -3640,6 +3640,51 @@ describe("acp bridge", () => {
     startedProviderThreadIds.push(first.providerThreadId);
   });
 
+  it("Stop ends a reopen whose session/load never answers, for any agent", async () => {
+    const first = await startThread({
+      envVars: { FAKE_ACP_LOAD_SESSION: "1" },
+    });
+    await stopThread(first.providerThreadId);
+    startedProviderThreadIds.pop();
+    const requestLog = join(workspaceDir, "requests.log");
+
+    const resumeId = sendRequest("thread/resume", {
+      threadId: first.bbThreadId,
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: executionOptions({
+        providerOptions: {
+          acpLaunchSpec: acpLaunchSpec({
+            envVars: {
+              FAKE_ACP_LOAD_SESSION: "1",
+              FAKE_ACP_HANG_LOAD: "1",
+              FAKE_ACP_REQUEST_LOG: requestLog,
+            },
+          }),
+        },
+      }),
+      providerThreadId: first.providerThreadId,
+    });
+    await waitFor(
+      () =>
+        existsSync(requestLog) &&
+        readFileSync(requestLog, "utf8").includes('"session/load"')
+          ? true
+          : undefined,
+      "the agent to get session/load",
+    );
+    handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        method: "thread/stopRequested",
+        params: { threadId: first.bbThreadId },
+      }),
+    );
+
+    const response = await waitForResponse(resumeId);
+    expect(response.error).toBeDefined();
+  });
+
   it("emits session.reset after identity at every construction (start, resume, fork)", async () => {
     const resetIndexesFor = (threadId: string): number[] =>
       output.messages.flatMap((message, index) => {

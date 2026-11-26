@@ -149,6 +149,8 @@ interface UseThreadCreationOptionsResult<TExecutionInputSources> {
   serviceTierSupportByProvider: Record<string, boolean>;
   serviceTierFastLabel: string;
   executionInputSources: TExecutionInputSources;
+  /** The user picked an access mode, unlike a source forced explicit by another field (#2166). */
+  permissionModePicked: boolean;
 }
 
 interface ResolveThreadCreationProviderRoutingArgs {
@@ -271,6 +273,8 @@ export function useThreadCreationOptions(
   const [localProvidersUsingDefaults, setLocalProvidersUsingDefaults] =
     useState<ReadonlySet<string>>(() => new Set());
   const touchedThreadFieldsRef = useRef<Set<ThreadPromptField>>(new Set());
+  // Re-derives sources after a pick that changes no shown value, like Full over a stale Manual (#2166).
+  const [permissionPickCount, setPermissionPickCount] = useState(0);
   const threadResetKeyRef = useRef<string | number | null | undefined>(
     resetKey,
   );
@@ -648,11 +652,13 @@ export function useThreadCreationOptions(
           ? new Set<ThreadPromptField>()
           : touchedThreadFieldsRef.current,
       }),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- permissionPickCount re-reads the touched-fields ref
     [
       effectiveProviderId,
       effectiveInitialProviderSource,
       isUnavailableModelRecovery,
       permissionMode,
+      permissionPickCount,
       reasoningLevel,
       scope,
       selectedModel,
@@ -664,6 +670,14 @@ export function useThreadCreationOptions(
       storedServiceTier,
       touchedFieldsPendingReset,
     ],
+  );
+
+  const permissionModePicked = useMemo(
+    () =>
+      !touchedFieldsPendingReset &&
+      touchedThreadFieldsRef.current.has("permissionMode"),
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- permissionPickCount re-reads the touched-fields ref
+    [permissionPickCount, touchedFieldsPendingReset],
   );
 
   useLayoutEffect(() => {
@@ -948,6 +962,7 @@ export function useThreadCreationOptions(
   const setPermissionMode = useCallback(
     (value: PermissionMode) => {
       touchedThreadFieldsRef.current.add("permissionMode");
+      setPermissionPickCount((count) => count + 1);
       if (usesStoredCreateSelections) {
         setStoredPermissionMode(value);
         return;
@@ -1028,5 +1043,6 @@ export function useThreadCreationOptions(
     serviceTierSupportByProvider,
     serviceTierFastLabel,
     executionInputSources,
+    permissionModePicked,
   };
 }

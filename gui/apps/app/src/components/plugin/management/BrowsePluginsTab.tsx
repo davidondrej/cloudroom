@@ -7,8 +7,12 @@ import {
   ResourceListState,
   ResourceToolbar,
 } from "@cloudroom/shared-ui/resource-list";
+import { Icon } from "@cloudroom/shared-ui/icon";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { ToggleGroup, ToggleGroupItem } from "@cloudroom/shared-ui/toggle-group";
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@cloudroom/shared-ui/toggle-group";
 import {
   PluginSafeModeBanner,
   PluginSafeModeButton,
@@ -33,18 +37,26 @@ import {
   pluginListFilter,
   pluginListRows,
   pluginRowHasUpdate,
+  popularPluginRows,
   type PluginListFilter,
   type PluginListGroup,
   type PluginListRow,
 } from "./plugin-browse-discovery";
 import { pluginRowSignal } from "./plugin-status";
-import { CatalogEntryIconChip, PluginLogoChip } from "./plugin-ui";
+import {
+  CatalogEntryIconChip,
+  PluginLogoChip,
+  pluginInstallCountPresentation,
+} from "./plugin-ui";
 
 /** Plugins Cloudroom makes itself (docs/scopes/cloudroom-agent.md): its logo in color, and a "By Cloudroom" badge. */
 const BY_CLOUDROOM = new Set(["provider-cloudroom-agent"]);
+/** Our own plugins with a solid lime icon chip, like the agent's logo (Snippets: scissors, David 2026-11-26). */
+const LIME_CHIP = new Set(["snippets"]);
 import { PluginsFeatured } from "./PluginsFeatured";
+import { PluginIcon } from "@/components/plugin/PluginIcon";
 
-// As wide as the Skills page: the featured bento needs the room.
+// As wide as the Skills page: the Made by Cloudroom cards need the room.
 export const PLUGINS_LIST_BAND_CLASSES =
   "mx-auto w-full max-w-5xl px-4 md:px-5";
 export const PLUGINS_LIST_SCROLL_CONTENT_CLASS = "[&>div]:block!";
@@ -55,6 +67,7 @@ const EMPTY_MESSAGES: Record<PluginListFilter, string> = {
   all: "No plugins match this search.",
   installed: "No installed plugins match this search.",
   updates: "All plugins are up to date.",
+  cloudroom: "No Cloudroom plugins match this search.",
 };
 
 export function BrowsePluginsTab({
@@ -71,6 +84,9 @@ export function BrowsePluginsTab({
   const [searchParams, setSearchParams] = useSearchParams();
   const query = searchParams.get("query") ?? "";
   const filter = pluginListFilter(searchParams.get("view"));
+  const category = searchParams.get("category");
+  // The front page: our own plugins on top, then every plugin by popularity.
+  const front = filter === "all" && query === "";
   const catalogQuery = usePluginCatalogSearch("", { enabled: true });
   const listQuery = usePluginList({ enabled: true });
   const rows = useMemo(
@@ -111,6 +127,17 @@ export function BrowsePluginsTab({
     content = (
       <ResourceListState state="empty" message={EMPTY_MESSAGES[filter]} />
     );
+  } else if (front) {
+    content = (
+      <PopularPlugins
+        groups={groups}
+        category={category}
+        onCategoryChange={(next) => setParam("category", next)}
+        selectedPluginId={selectedPluginId}
+        onInstall={onInstall}
+        onOpenPlugin={onOpenPlugin}
+      />
+    );
   } else {
     content = (
       <PluginRowGroups
@@ -148,20 +175,41 @@ export function BrowsePluginsTab({
         />
       }
     >
-      <div className={cn("space-y-3 pb-8", PLUGINS_LIST_BAND_CLASSES)}>
+      <div
+        className={cn(
+          "pb-8",
+          front ? "space-y-6" : "space-y-3",
+          PLUGINS_LIST_BAND_CLASSES,
+        )}
+      >
         <PluginSafeModeBanner />
         {catalogQuery.isError && rows.length > 0 ? (
           <p className="px-3 text-xs text-warning-text" role="status">
             The plugin catalog is not available. Showing installed plugins.
           </p>
         ) : null}
-        {filter === "all" && query === "" ? (
+        {front ? (
           <PluginsFeatured
             rows={rows}
-            groups={groups}
             onInstall={onInstall}
             onOpenPlugin={onOpenPlugin}
+            onSeeAll={() => setParam("view", "cloudroom")}
           />
+        ) : null}
+        {filter === "cloudroom" ? (
+          <div className="flex items-center justify-between px-1">
+            <h2 className="text-sm font-medium text-foreground">
+              Made by Cloudroom
+            </h2>
+            <button
+              type="button"
+              onClick={() => setParam("view", null)}
+              className="flex items-center gap-0.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <Icon name="ChevronLeft" className="size-3.5" aria-hidden />
+              All plugins
+            </button>
+          </div>
         ) : null}
         {content}
       </div>
@@ -236,13 +284,9 @@ export function PluginRowGroups({
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 }) {
-  const [updateTargetId, setUpdateTargetId] = useState<string | null>(null);
-  const updateTarget =
-    updateTargetId === null
-      ? null
-      : (groups
-          .flatMap((group) => group.rows)
-          .find((row) => row.plugin?.id === updateTargetId)?.plugin ?? null);
+  const [setUpdateTargetId, updateDialog] = useUpdateDialog(
+    groups.flatMap((group) => group.rows),
+  );
   return (
     <>
       <div className="space-y-5" data-testid="plugin-list">
@@ -270,32 +314,164 @@ export function PluginRowGroups({
           </section>
         ))}
       </div>
-      {updateTarget !== null ? (
-        <UpdatePluginDialog
-          plugin={updateTarget}
-          open
-          onOpenChange={(open) => {
-            if (!open) setUpdateTargetId(null);
-          }}
-        />
-      ) : null}
+      {updateDialog}
     </>
+  );
+}
+
+/** The Update dialog of a list: call the setter with a plugin id, and render the node. */
+function useUpdateDialog(rows: readonly PluginListRow[]) {
+  const [targetId, setTargetId] = useState<string | null>(null);
+  const target =
+    targetId === null
+      ? null
+      : (rows.find((row) => row.plugin?.id === targetId)?.plugin ?? null);
+  const dialog =
+    target !== null ? (
+      <UpdatePluginDialog
+        plugin={target}
+        open
+        onOpenChange={(open) => {
+          if (!open) setTargetId(null);
+        }}
+      />
+    ) : null;
+  return [setTargetId, dialog] as const;
+}
+
+const CATEGORY_PILL_CLASSES =
+  "shrink-0 rounded-full border px-3 py-1 text-xs transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+function CategoryPill({
+  label,
+  count,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  count?: number;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      aria-label={
+        count === undefined
+          ? label
+          : `${label}, ${count} ${count === 1 ? "plugin" : "plugins"}`
+      }
+      onClick={onSelect}
+      className={cn(
+        CATEGORY_PILL_CLASSES,
+        selected
+          ? "border-transparent bg-state-active font-medium text-foreground"
+          : "border-border text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {label}
+      {count === undefined ? null : (
+        <span className="ml-1 text-subtle-foreground">{count}</span>
+      )}
+    </button>
+  );
+}
+
+/** Every plugin, most installed first. A category pill narrows the list to that category. */
+function PopularPlugins({
+  groups,
+  category,
+  onCategoryChange,
+  selectedPluginId,
+  onInstall,
+  onOpenPlugin,
+}: {
+  groups: readonly PluginListGroup[];
+  category: string | null;
+  onCategoryChange: (category: string | null) => void;
+  selectedPluginId: string | null;
+  onInstall: (initial: AddPluginInitial) => void;
+  onOpenPlugin: OpenPlugin;
+}) {
+  const selectedGroup = groups.find((group) => group.key === category);
+  const rows = useMemo(
+    () =>
+      popularPluginRows(
+        selectedGroup?.rows ?? groups.flatMap((group) => group.rows),
+      ),
+    [groups, selectedGroup],
+  );
+  const [setUpdateTargetId, updateDialog] = useUpdateDialog(rows);
+  return (
+    <section aria-label="Most popular" className="@container">
+      <h2 className="px-1 pb-2 text-sm font-medium text-foreground">
+        Most popular
+      </h2>
+      <div className="relative pb-3">
+        <div
+          role="group"
+          aria-label="Plugin categories"
+          className="flex gap-1.5 overflow-x-auto pr-16 [scrollbar-width:none]"
+        >
+          <CategoryPill
+            label="All"
+            selected={selectedGroup === undefined}
+            onSelect={() => onCategoryChange(null)}
+          />
+          {groups.map((group) => (
+            <CategoryPill
+              key={group.key}
+              label={group.label}
+              count={group.rows.length}
+              selected={group === selectedGroup}
+              onSelect={() => onCategoryChange(group.key)}
+            />
+          ))}
+        </div>
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-background to-transparent" />
+      </div>
+      <div
+        className="grid grid-cols-1 gap-x-4 gap-y-0.5 @3xl:grid-cols-2"
+        data-testid="plugin-list"
+      >
+        {rows.map((row, index) => (
+          <PluginRow
+            key={row.key}
+            row={row}
+            rank={index + 1}
+            selected={row.pluginId === selectedPluginId}
+            onInstall={onInstall}
+            onOpenPlugin={onOpenPlugin}
+            onUpdate={setUpdateTargetId}
+          />
+        ))}
+      </div>
+      {updateDialog}
+    </section>
   );
 }
 
 function PluginRow({
   row,
+  rank,
   selected,
   onInstall,
   onOpenPlugin,
   onUpdate,
 }: {
   row: PluginListRow;
+  /** Its place in the popularity list, which also shows the install count. */
+  rank?: number;
   selected: boolean;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
   onUpdate: (pluginId: string) => void;
 }) {
+  const installs =
+    rank === undefined
+      ? undefined
+      : pluginInstallCountPresentation(row.entry?.installs ?? null);
   const openButtonRef = useRef<HTMLButtonElement>(null);
   const open = () => {
     if (openButtonRef.current !== null) {
@@ -318,6 +494,14 @@ function PluginRow({
         open();
       }}
     >
+      {rank === undefined ? null : (
+        <span
+          aria-hidden="true"
+          className="w-5 shrink-0 text-right text-xs tabular-nums text-subtle-foreground"
+        >
+          {rank}
+        </span>
+      )}
       <PluginRowIcon row={row} onStatusClick={open} />
       <div className="min-w-0 flex-1">
         <button
@@ -341,6 +525,15 @@ function PluginRow({
           </p>
         )}
       </div>
+      {installs === undefined ? null : (
+        <span
+          aria-label={installs.accessibleLabel}
+          className="flex shrink-0 items-center gap-1 text-xs tabular-nums text-subtle-foreground"
+        >
+          <Icon name="Download" className="size-3" aria-hidden />
+          {installs.display}
+        </span>
+      )}
       <div
         data-row-action
         className="flex shrink-0 cursor-default items-center gap-1.5"
@@ -382,6 +575,18 @@ function PluginRowIcon({
           aria-hidden="true"
           className="size-8 rounded-[22%] object-cover"
         />
+      ) : LIME_CHIP.has(row.pluginId) ? (
+        <span
+          aria-hidden="true"
+          className="grid size-8 place-items-center rounded-[22%] bg-primary text-primary-foreground"
+        >
+          <PluginIcon
+            pluginId={row.pluginId}
+            icon={row.plugin?.icon ?? null}
+            compactIconUrl={row.entry?.iconUrl ?? undefined}
+            className="size-4.5"
+          />
+        </span>
       ) : row.entry !== null ? (
         <CatalogEntryIconChip
           entry={row.entry}

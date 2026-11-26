@@ -29,6 +29,7 @@ import { enablePlanLoops, planLoops, planLoopsEnableInputSchema, planLoopsEnable
 import { agentSessions, agentSessionsSchema } from "./agent-sessions.js";
 import {
   forgetCloud,
+  loopThreads,
   newestLoopAt,
   pausedCloud,
   pausedLocal,
@@ -143,8 +144,23 @@ export const automationRpcContract = defineRpcContract({
   },
   // Loops their own failures paused, local and Cloud, for the sidebar's paused label (ADR 20261101-191413).
   paused_loops: {
-    input: z.object({ fresh: z.literal(true) }).strict().nullable(),
-    output: z.object({ loops: z.array(pausedLoopSchema) }).strict(),
+    input: z
+      .object({
+        fresh: z.literal(true).optional(),
+        // The open threads the sidebar shows: only they are looked up for the loop icon (#1136).
+        threads: z.array(z.string()).optional(),
+        // Only the icons, when those threads changed: the paused loops aren't read again (no `loops` back).
+        iconsOnly: z.literal(true).optional(),
+      })
+      .strict()
+      .nullable(),
+    output: z
+      .object({
+        loops: z.array(pausedLoopSchema).optional(),
+        // Hover text for the sidebar's loop icon, per thread (#1136).
+        threads: z.record(z.string(), z.string()),
+      })
+      .strict(),
   },
   // Usage estimates (docs/scopes/loops.md): each schedule's rough share of the weekly Claude or Codex limit.
   automations_usage: {
@@ -266,6 +282,8 @@ const connected = (auth: { state: string } | null) =>
 
 type Kv = BbPluginApi["storage"]["kv"];
 const SCAN_TITLE = "Workflow scan";
+/** Cloud readers a Free plan's scan may start: about 300 chats, leaving most of its 10 threads a month (#2645). */
+const FREE_SCAN_READERS = 3;
 const LAST_SCAN_KEY = "scans.lastStartedAt";
 /** The top-right Scan card wants to show when no scan started on this computer for this long (docs/scopes/corner-cards.md). */
 const SCAN_CARD_DAYS = 45;
@@ -342,15 +360,19 @@ export function createRpcHandlers(
       const { variables } = await sdk.cloudroom.environment();
       return { names: variables.map((variable) => variable.name) };
     },
-    async paused_loops(input: { fresh: true } | null) {
+    async paused_loops(
+      input: { fresh?: true; threads?: string[]; iconsOnly?: true } | null,
+    ) {
       // Right after a reconnect the website retried its paused loops: read it again, not the 15-minute copy.
       if (input?.fresh) forgetCloud();
       const now = Date.now();
-      const loops = [
-        ...(db ? pausedLocal(db, now) : []),
-        ...(sdk ? await pausedCloud(sdk.cloudroom, now) : []),
-      ];
-      return { loops: loops.sort((a, b) => b.at - a.at) };
+      const cloud = sdk
+        ? await pausedCloud(sdk.cloudroom, now)
+        : { loops: [], woken: [] };
+      const threads = loopThreads(db, cloud.woken, input?.threads ?? [], now);
+      if (input?.iconsOnly) return { threads };
+      const loops = [...(db ? pausedLocal(db, now) : []), ...cloud.loops];
+      return { loops: loops.sort((a, b) => b.at - a.at), threads };
     },
     async cloud_template_add(
       input: z.output<typeof cloudTemplateInputSchema>,
@@ -418,6 +440,19 @@ export function createRpcHandlers(
           "Scans need Cloud threads, which aren't available in your region yet. Nothing was used up, so try again once Cloud reaches your region.",
         );
       }
+      // Free: each reader is one of the month's 10 new Cloud threads (ADR 20261124-160120), so a scan reads what fits in
+      // at most 3, and its loops are Local, since a Cloud loop run is a new thread too (#2645). Uncapped on the user's VPS.
+      // Free's month and rolling hour both cap new threads (threadCap); credits lift only the month.
+      const usage = status?.planUsage, month = status?.cloudLimit ? 0 : usage?.threadsLeft ?? FREE_SCAN_READERS;
+      const readers = plan === "free" && !(await vps()) ? Math.min(FREE_SCAN_READERS, month, usage?.threadsHourLeft ?? FREE_SCAN_READERS) : null;
+      if (!cyber && readers === 0) {
+        trackScan("start_failed", { reason: month === 0 ? "threads" : "threads_hour", kind, ...source });
+        const reset = Date.parse(usage?.resetsAt ?? "");
+        const when = month > 0 ? "in about an hour (Free starts 5 Cloud threads an hour)"
+          : Number.isFinite(reset) ? `after ${new Date(reset).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "when they reset";
+        throw new Error(`Your free Workflow scan needs Cloud threads, and none are left right now. Your free scan is still unused: try again ${when}, or upgrade at https://www.cloudroom.dev/billing`);
+      }
+      const free = readers === null ? "" : ` Free plan: at most ${readers} readers, and Local loops.`;
       const [claude, codex] = await Promise.all([
         sdk.cloudroom.claudeAuth().catch(() => null),
         sdk.cloudroom.codexAuth().catch(() => null),
@@ -433,11 +468,12 @@ export function createRpcHandlers(
           ...lead,
           reasoningLevel: "xhigh",
           title: cyber ? "Cyber scan" : SCAN_TITLE,
-          prompt: cyber
+          prompt: (cyber
             ? "Run a cyber scan of my computer and active repos. Follow the cyber-scan skill."
-            : "Scan my workflow. Follow the workflow-scan skill.",
+            : "Scan my workflow. Follow the workflow-scan skill.") + free,
           // Both scans share the progress card's metadata; `kind` picks the Cyber scan's labels.
-          pluginMetadata: { workflowScan: cyber ? { stage: "finding", kind } : { stage: "finding" } },
+          // `maxReaders`: readers.py starts no more than this (#2645), whatever the lead passes to the slicers.
+          pluginMetadata: { workflowScan: { stage: "finding", ...(cyber ? { kind } : {}), ...(readers === null ? {} : { maxReaders: readers }) } },
         }).catch((error: unknown) => {
           trackScan("start_failed", { reason: "spawn", kind, ...source });
           throw error;

@@ -490,3 +490,289 @@ it.skipIf(!supported)(
     expect(result.stdout.trim().split("\n")).toEqual(rows.map((row) => row[3]));
   },
 );
+
+it.skipIf(!supported)(
+  "Local daemon toggles focus emulation on active and previous sessions",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
+    roots.push(root);
+    const bin = await installBrowserHarnessShim(root);
+    const venv = join(root, "browser-harness", "0.1.13");
+    const pkg = join(
+      venv,
+      "lib",
+      "python3.12",
+      "site-packages",
+      "browser_harness",
+    );
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(venv, ".ready"), "");
+    writeFileSync(
+      join(venv, "bin", "python"),
+      '#!/bin/sh\nexec python3 "$@"\n',
+    );
+    writeFileSync(join(venv, "bin", "browser-harness"), "#!/bin/sh\n");
+    chmodSync(join(venv, "bin", "python"), 0o755);
+    chmodSync(join(venv, "bin", "browser-harness"), 0o755);
+    // 0.1.13's _enable_default_domains() and set_session branch, verbatim.
+    writeFileSync(
+      join(pkg, "daemon.py"),
+      [
+        "import asyncio",
+        "def log(_msg): pass",
+        "async def _silent(coro):",
+        "    try: await coro",
+        "    except Exception: pass",
+        "class Daemon:",
+        "    def __init__(self, cdp):",
+        "        self.cdp = cdp",
+        '        self.session = "S1"',
+        '        self.target_id = "T1"',
+        "        self._session_state_lock = asyncio.Lock()",
+        "    def _schedule_tab_marker(self, _sid): pass",
+        "    async def _enable_default_domains(self, session_id):",
+        "        async def enable_one(d):",
+        "            try:",
+        "                await asyncio.wait_for(",
+        '                    self.cdp.send_raw(f"{d}.enable", session_id=session_id),',
+        "                    timeout=4,",
+        "                )",
+        "            except Exception as e:",
+        '                log(f"enable {d} on {session_id}: {e}")',
+        '        await asyncio.gather(*(enable_one(d) for d in ("Page", "DOM", "Runtime", "Network")))',
+        "    async def handle(self, req):",
+        '        meta = req.get("meta")',
+        '        if meta == "set_session":',
+        "            async with self._session_state_lock:",
+        "                old_session = self.session",
+        '                self.session = req.get("session_id")',
+        '                self.target_id = req.get("target_id") or self.target_id',
+        "                new_session = self.session",
+        "            tasks = []",
+        "            if old_session and old_session != new_session:",
+        "                async def disable_old():",
+        "                    try:",
+        "                        await asyncio.wait_for(",
+        '                            self.cdp.send_raw("Network.disable", session_id=old_session),',
+        "                            timeout=2,",
+        "                        )",
+        "                    except Exception: pass",
+        "                tasks.append(disable_old())",
+        "            tasks.append(self._enable_default_domains(new_session))",
+        "            await asyncio.gather(*tasks)",
+        "            self._schedule_tab_marker(new_session)",
+        '            return {"session_id": new_session}',
+        "",
+      ].join("\n"),
+    );
+    for (const _ of [1, 2]) {
+      const run = spawnSync(join(bin ?? "", "browser-harness"), [], {
+        env: { ...process.env, BU_NAME: "test" },
+      });
+      expect(run.status).toBe(0);
+    }
+
+    const driver = [
+      "import asyncio, importlib.util, json, sys",
+      'spec = importlib.util.spec_from_file_location("d", sys.argv[1])',
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "calls = []",
+      "class FakeCDP:",
+      "    async def send_raw(self, method, params=None, session_id=None):",
+      '        if method == "Emulation.setFocusEmulationEnabled":',
+      "            calls.append((session_id, params))",
+      "async def run():",
+      "    d = m.Daemon(FakeCDP())",
+      '    await d.handle({"meta": "set_session", "session_id": "S2", "target_id": "T2"})',
+      '    await d.handle({"meta": "set_session", "session_id": "S2", "target_id": "T2"})',
+      "asyncio.run(run())",
+      "print(json.dumps(calls))",
+    ];
+    const result = spawnSync(
+      "python3",
+      ["-c", driver.join("\n"), join(pkg, "daemon.py")],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual([
+      ["S1", { enabled: false }],
+      ["S2", { enabled: true }],
+      ["S2", { enabled: true }],
+    ]);
+  },
+);
+
+it.skipIf(!supported)(
+  "Local daemon skips TCC-locked folders and preserves the Full Disk Access hint",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
+    roots.push(root);
+    const bin = await installBrowserHarnessShim(root);
+    const venv = join(root, "browser-harness", "0.1.13");
+    const pkg = join(
+      venv,
+      "lib",
+      "python3.12",
+      "site-packages",
+      "browser_harness",
+    );
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(venv, ".ready"), "");
+    writeFileSync(
+      join(venv, "bin", "python"),
+      '#!/bin/sh\nexec python3 "$@"\n',
+    );
+    writeFileSync(join(venv, "bin", "browser-harness"), "#!/bin/sh\n");
+    chmodSync(join(venv, "bin", "python"), 0o755);
+    chmodSync(join(venv, "bin", "browser-harness"), 0o755);
+    // 0.1.13's _ws_from_devtools_active_port() and get_ws_url() profile scan, verbatim.
+    writeFileSync(
+      join(pkg, "daemon.py"),
+      [
+        "import json, os, time, urllib.error, urllib.request",
+        "from urllib.parse import urlparse",
+        "PROFILES = []",
+        "NO_TOGGLE_GRACE = 0",
+        "TOGGLE_BOOT_GRACE = 0",
+        "def supported_browser_running(): return False",
+        "def remote_debugging_toggle_profiles(): return []",
+        "def remote_debugging_user_enabled(): return None",
+        "def _ws_from_devtools_active_port(http_url: str) -> str | None:",
+        "    p = urlparse(http_url)",
+        '    want_port = str(p.port) if p.port else ""',
+        "    if not want_port:",
+        "        return None",
+        '    host = p.hostname or "127.0.0.1"',
+        '    if ":" in host:',
+        '        host = f"[{host}]"',
+        "    for base in PROFILES:",
+        "        try:",
+        '            active = (base / "DevToolsActivePort").read_text(encoding="utf-8", errors="replace").splitlines()',
+        "        except (FileNotFoundError, NotADirectoryError):",
+        "            continue",
+        '        port = active[0].strip() if active else ""',
+        '        ws_path = active[1].strip() if len(active) > 1 else ""',
+        "        if port == want_port and ws_path:",
+        '            return f"ws://{host}:{port}{ws_path}"',
+        "    return None",
+        "def get_ws_url():",
+        "    deadline = time.time() + 30",
+        "    next_liveness_check = 0.0",
+        "    while time.time() < deadline:",
+        "        for base in PROFILES:",
+        "            try:",
+        '                active = (base / "DevToolsActivePort").read_text(encoding="utf-8", errors="replace").splitlines()',
+        "            except (FileNotFoundError, NotADirectoryError):",
+        "                continue",
+        '            port = active[0].strip() if active else ""',
+        '            ws_path = active[1].strip() if len(active) > 1 else ""',
+        "            if not port:",
+        "                continue",
+        "            try:",
+        '                return json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1).read())["webSocketDebuggerUrl"]',
+        "            except urllib.error.HTTPError as e:",
+        "                if e.code == 403:",
+        '                    raise RuntimeError("permission-blocked")',
+        "                if e.code == 404 and ws_path:",
+        '                    return f"ws://127.0.0.1:{port}{ws_path}"',
+        "            except (OSError, KeyError, ValueError):",
+        "                pass",
+        "        now = time.time()",
+        "        if now >= next_liveness_check:",
+        "            if not supported_browser_running():",
+        "                raise RuntimeError(",
+        '                    "chrome-not-running: no supported Chromium-family browser is running -- start Chrome, then retry"',
+        "                )",
+        "            next_liveness_check = now + 2",
+        "        grace = TOGGLE_BOOT_GRACE if remote_debugging_toggle_profiles() else NO_TOGGLE_GRACE",
+        "        if now > deadline - 30 + grace:",
+        "            break",
+        "        time.sleep(0.2)",
+        "    for probe_port in (9222, 9223):",
+        "        try:",
+        '            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=1) as r:',
+        '                return json.loads(r.read())["webSocketDebuggerUrl"]',
+        "        except urllib.error.HTTPError as e:",
+        "            if e.code == 403:",
+        '                raise RuntimeError("permission-blocked")',
+        "        except (OSError, KeyError, ValueError):",
+        "            continue",
+        "    if remote_debugging_user_enabled() is False:",
+        '        raise RuntimeError("remote debugging is turned off")',
+        '    raise RuntimeError("DevToolsActivePort not found")',
+        "",
+      ].join("\n"),
+    );
+    for (const _ of [1, 2]) {
+      const run = spawnSync(join(bin ?? "", "browser-harness"), [], {
+        env: { ...process.env, BU_NAME: "test" },
+      });
+      expect(run.status).toBe(0);
+    }
+
+    const driver = [
+      "import importlib.util, io, json, os, sys",
+      'spec = importlib.util.spec_from_file_location("d", sys.argv[1])',
+      "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)",
+      "class FakeFile:",
+      "    def __init__(self, path, mode): self.path, self.mode = path, mode",
+      "    def read_text(self, **_kw):",
+      '        if self.mode == "perm": raise PermissionError(1, "Operation not permitted", self.path)',
+      '        if self.mode == "missing": raise FileNotFoundError(self.path)',
+      "        return self.mode",
+      "class FakeProfile:",
+      "    def __init__(self, path, mode): self.path, self.mode = path, mode",
+      "    def as_posix(self): return self.path",
+      '    def __truediv__(self, name): return FakeFile(f"{self.path}/{name}", self.mode)',
+      "def fake_open(ports):",
+      "    def _open(url, timeout=1):",
+      "        for port, ws in ports.items():",
+      '            if f":{port}/" in url:',
+      '                return io.BytesIO(json.dumps({"webSocketDebuggerUrl": ws}).encode())',
+      '        raise OSError("refused")',
+      "    return _open",
+      "out = []",
+      "def case(profiles, ports, running, pref=''):",
+      "    os.environ['BH_CLOUDROOM_PREFER_PROFILE'] = pref",
+      "    m.PROFILES = [FakeProfile(p, mode) for p, mode in profiles]",
+      "    m.urllib.request.urlopen = fake_open(ports)",
+      "    m.supported_browser_running = lambda: running",
+      "    try: out.append(m.get_ws_url())",
+      "    except Exception as e: out.append(f'{type(e).__name__}:{e}')",
+      'chrome = "/Users/u/Library/Application Support/Google/Chrome"',
+      'brave = "/Users/u/Library/Application Support/BraveSoftware/Brave-Browser"',
+      // 1. Chrome locked, Brave unlocked -> connects to Brave
+      'case([(chrome, "perm"), (brave, "9333\\n/ws/b")], {9333: "ws://brave"}, True, "BraveSoftware/Brave-Browser")',
+      // 2. All locked, fallback port 9222 live -> connects to 9222
+      'case([(brave, "perm"), (chrome, "perm")], {9222: "ws://9222"}, False, "BraveSoftware/Brave-Browser")',
+      // 3. All locked, nothing on 9222/9223 -> preserves PermissionError (FDA hint)
+      'case([(brave, "perm"), (chrome, "perm")], {}, False, "BraveSoftware/Brave-Browser")',
+      // 4. Preferred Brave readable & running (no port), Chrome locked -> remote debugging error, not Chrome FDA
+      'case([(brave, "missing"), (chrome, "perm")], {}, True, "BraveSoftware/Brave-Browser")',
+      // 5. Preferred Brave locked, Chrome readable & running (no port) -> Brave PermissionError (FDA hint)
+      'case([(brave, "perm"), (chrome, "missing")], {}, True, "BraveSoftware/Brave-Browser")',
+      // 6. _ws_from_devtools_active_port skips locked Chrome and matches Brave
+      'm.PROFILES = [FakeProfile(chrome, "perm"), FakeProfile(brave, "9444\\n/devtools/browser/ok")]',
+      'out.append(m._ws_from_devtools_active_port("http://127.0.0.1:9444"))',
+      "print(json.dumps(out))",
+    ];
+    const result = spawnSync(
+      "python3",
+      ["-c", driver.join("\n"), join(pkg, "daemon.py")],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(0);
+    const out = JSON.parse(result.stdout) as string[];
+    expect(out[0]).toBe("ws://brave");
+    expect(out[1]).toBe("ws://9222");
+    expect(out[2]).toContain("PermissionError");
+    expect(out[2]).toContain("Operation not permitted");
+    expect(out[2]).toContain("DevToolsActivePort");
+    expect(out[3]).toBe("RuntimeError:DevToolsActivePort not found");
+    expect(out[4]).toContain("PermissionError");
+    expect(out[4]).toContain("Brave-Browser/DevToolsActivePort");
+    expect(out[5]).toBe("ws://127.0.0.1:9444/devtools/browser/ok");
+  },
+);

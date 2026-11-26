@@ -35,7 +35,13 @@ import {
   type LoopDialogRun,
   type Priority,
 } from "./loop-dialog";
-import { replaceWebhookUrl, showLoopError, useCloudAutomations } from "./cloud-view";
+import {
+  openRunThread,
+  replaceWebhookUrl,
+  showLoopError,
+  stopRunThread,
+  useCloudAutomations,
+} from "./cloud-view";
 import {
   AutomationOverviewView,
   automationProjectLabel,
@@ -588,11 +594,19 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     },
     [navigate, providers, rpc, sdk, onAdded],
   );
+  const onAddProject = useCallback(() => {
+    // Older apps (SDK < 0.6.55) lack this method.
+    if (typeof navigate.experimental_openAddProject !== "function")
+      toast.error("Use New project in the sidebar to add a project.");
+    else if (!navigate.experimental_openAddProject())
+      toast.error("Can't add a project: no machine is connected.");
+  }, [navigate]);
   return {
     projects,
     onAdd,
     freePlan: plan === "free",
     usage,
+    onAddProject,
   };
 }
 
@@ -768,6 +782,7 @@ function LocalLoopDialog({
   onClose: () => void;
 }) {
   const rpc = useRpc<typeof automationRpcContract>();
+  const navigate = useBbNavigate();
   const { automation, error, refetch } = useAutomation(route);
   const ownRuns = useRuns(route);
   const mutations = useMutations();
@@ -780,10 +795,30 @@ function LocalLoopDialog({
     [readable],
   );
 
+  useEffect(() => stopRunThread, []);
+
   const runAction = (method: "pause" | "resume" | "run") =>
     mutations[method](route).then(
-      () => {
-        if (method === "run") toast.success("Run started");
+      (result) => {
+        if (method !== "run") return;
+        toast.success("Run started");
+        // Run now puts the user in the run's thread once it has one.
+        const runId = (result as { run?: { id?: string } }).run?.id;
+        if (runId)
+          void openRunThread(
+            () =>
+              rpc
+                .call("automations_runs", route)
+                .then((value) => {
+                  const run = (value as AutomationRunListResponse).runs.find(
+                    (each) => each.id === runId,
+                  );
+                  // A run that ended with no thread opens nothing.
+                  if (run?.threadId) return run.threadId;
+                  return run && run.status !== "running" ? false : null;
+                }),
+            navigate.toThread,
+          );
       },
       (rpcError: unknown) =>
         toast.error(`Failed to ${method} loop: ${errorText(rpcError)}`),

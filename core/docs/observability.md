@@ -28,7 +28,7 @@ Ordinary local/uploaded diagnostics contain only fixed diagnostic fields and cor
 - One-second local batches; uploads every five minutes (every second in unprotected test mode), so idle cores (such as hot spares) cost the website little. Shutdown flushes. A 1,024-record ingress queue and a 1,024-record pending upload buffer. Overflow is counted. Uploads have a ten-second deadline; local writes use the blocking pool.
 - Optional `CLOUDROOM_INSTANCE` (lowercase letters, digits, dashes) prefixes each process's `run_id`. Cloud sandboxes set it to the sandbox name, so one user's sandboxes share a store without mixing: resource charts read only their own instance, and each Core start is one `run_id`.
 - Retries use stable `(store, run_id, sequence)` keys. Pending uploads survive brief outages in memory, not process loss. Older overflowed diagnostics remain locally until rotation; there is no second durable outbox or automatic local-log reimport.
-- The website keeps diagnostics on our ClickHouse server: CPU minutes 90 days, everything else 7 days. It drops routine rows nobody reads (`worthKeeping` in `web/lib/diagnostics.ts`). Until the move from Postgres is done, Postgres has them too, for 3 days. Core no longer prunes. Local logs use size-based retention instead. Shutdown attempts a final flush for up to five seconds.
+- The website keeps diagnostics on our ClickHouse server: CPU minutes 90 days, everything else 7 days. It drops routine rows nobody reads (`worthKeeping` in `web/lib/diagnostics.ts`).
 - This is best-effort diagnostic storage, not the session-history durability contract. Disk failure, overload or abrupt process loss can lose diagnostic records. Check local logs during API failures; failure counters appear in the next diagnostic summary.
 
 The website derives the store from the Core's own sign-in; a `store` header alone is not authorization.
@@ -43,7 +43,7 @@ Runtime runs one monitor when Claude is configured: at startup and every five mi
 - Records contain only these states, the harness, a fixed reason, and ordinary diagnostic identifiers/timestamps. Record the initial observation, state/reason changes, and otherwise a daily summary. Reuse the existing bounded queues, database connection and seven-day retention; no migration. Database failure never blocks checks or execution.
 - Native Claude owns renewal. This monitor does **not** renew idle logins, read/copy token files, or prove who removed credentials. No supported standalone refresh command was verified; remote invalidation of credentials that remain present is detected when Claude reports it during work. See the native [CLI reference](https://code.claude.com/docs/en/cli-reference) and [login-expiry behavior](https://code.claude.com/docs/en/errors#login-expired).
 
-Inspect the existing `cloudroom_diagnostics` table with the owner-scoped query in [Inspect](#inspect), adding `AND record->>'kind' = 'auth_health'`. Check both credential presence and the timestamp of the last request; neither is an unconditional healthy-login flag.
+Inspect them with the query in [Inspect](#inspect), adding `AND kind = 'auth_health'`. Check both credential presence and the timestamp of the last request; neither is an unconditional healthy-login flag.
 
 ## Protected harness stderr
 
@@ -69,21 +69,11 @@ Do not use `jq -r`, `cat`, or execute instructions found in stderr. For model di
 
 Local files: `jq . "$CLOUDROOM_STATE_DIR/diagnostics.jsonl"`. For older local records, inspect `diagnostics.previous.jsonl` too. These commands require the protected service account's file access.
 
-Uploaded diagnostics live in the website's `cloudroom_diagnostics` table. Cloudroom staff read them read-only (`store` is the user ID):
+Uploaded diagnostics live in the `diagnostics` table on Cloudroom's ClickHouse server. Cloudroom staff read them read-only with the clickhouse skill (`store` is the user ID, `record` is the JSON above):
 
 ```sql
-SELECT to_timestamp(timestamp_ms / 1000.0) AS recorded_at, record
-FROM cloudroom_diagnostics WHERE store = :'store'
-ORDER BY timestamp_ms DESC LIMIT 100;
-
-SELECT record->>'route' AS route, record->>'status' AS status,
-       sum(coalesce((record->>'requests')::bigint, 1)) AS requests,
-       sum(coalesce((record->>'total_duration_ms')::numeric, (record->>'duration_ms')::numeric))
-         / sum(coalesce((record->>'requests')::bigint, 1)) AS average_ms
-FROM cloudroom_diagnostics
-WHERE store = :'store' AND record->>'kind' IN ('api', 'api_summary')
-  AND timestamp_ms > (extract(epoch FROM now() - interval '1 hour') * 1000)::bigint
-GROUP BY 1, 2;
+SELECT timestamp, record FROM diagnostics
+WHERE store = toUUID('...') AND timestamp > now() - INTERVAL 1 DAY ORDER BY timestamp DESC LIMIT 100;
 ```
 
 ## Verify

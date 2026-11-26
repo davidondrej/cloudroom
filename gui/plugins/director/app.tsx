@@ -1,76 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import {
-  definePluginApp,
-  experimental_ProviderModelPicker as AgentPicker,
-  useBbNavigate,
-  useRealtime,
-  useRpc,
-  type StandardSchemaV1InferOutput,
-} from "@get-bb/plugin-sdk/app";
+import { definePluginApp, experimental_ProviderModelPicker as AgentPicker, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { Textarea } from "@cloudroom/shared-ui/textarea";
-import type { CHANGED as ChangedChannel, directorRpc } from "./server.js";
-
-type View = StandardSchemaV1InferOutput<(typeof directorRpc)["get"]["output"]>;
-type Config = View["config"];
-
-const CHANGED: typeof ChangedChannel = "changed";
-/** The app marks where the row goes; the plugin never targets the sidebar's own classes. */
-const SLOT = "[data-sidebar-top-slot]";
-const ICONS = ["Target", "Zap", "Star", "Brain", "Eye", "Explore", "Workflow", "Terminal", "Globe", "Puzzle", "Coffee", "Play"];
-const COLORS = ["", "#7dd3fc", "#c4b5fd", "#fdba74", "#f9a8d4", "#fca5a5", "#ffffff"];
-const INTERVALS: ReadonlyArray<[label: string, minutes: number]> = [["5 min", 5], ["15 min", 15], ["1 hour", 60], ["6 hours", 360]];
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
-function useDirector() {
-  const rpc = useRpc<typeof directorRpc>();
-  const [view, setView] = useState<View | null>(null);
-  const refresh = useCallback(() => void rpc.call("get", null).then(setView, () => {}), [rpc]);
-  useEffect(refresh, [refresh]);
-  useRealtime(CHANGED, refresh);
-  return { rpc, view, setView, refresh };
-}
-
-/** "42m", "2h", or "now". */
-function timeLeft(at: number): string {
-  const minutes = Math.ceil((at - Date.now()) / 60_000);
-  if (minutes <= 0) return "now";
-  return minutes < 60 ? `${minutes}m` : `${Math.round(minutes / 60)}h`;
-}
-
-const darkness = new Map<string, boolean>();
-/** True when a CSS color is dark, so the icon on it has to be light. */
-function isDark(color: string): boolean {
-  const known = darkness.get(color);
-  if (known !== undefined) return known;
-  const paint = document.createElement("canvas").getContext("2d");
-  if (paint === null) return false;
-  paint.fillStyle = color;
-  paint.fillRect(0, 0, 1, 1);
-  const [red = 0, green = 0, blue = 0] = paint.getImageData(0, 0, 1, 1).data;
-  const dark = 0.299 * red + 0.587 * green + 0.114 * blue < 140;
-  darkness.set(color, dark);
-  return dark;
-}
-
-/** The Director's icon in its small solid tile. */
-function Tile({ icon, color, size = 20 }: { icon: string; color: string; size?: number }) {
-  const ink = color ? (isDark(color) ? "#ffffff" : "#141414") : "var(--primary-foreground)";
-  return (
-    <span
-      className="flex shrink-0 items-center justify-center rounded-[6px]"
-      style={{ width: size, height: size, background: color || "var(--primary)", color: ink, fontSize: size * 0.6 }}
-      aria-hidden="true"
-    >
-      {ICONS.includes(icon) ? <Icon name={icon} style={{ width: size * 0.65, height: size * 0.65 }} /> : icon}
-    </span>
-  );
-}
+import { COLORS, ICONS, INTERVALS, Meter, Minutes, Prompt, SLOT, Tile, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
+import { DirectorModal } from "./src/modal.js";
 
 /** The sidebar row above Pinned. It opens the Director's thread. */
 function Row() {
@@ -80,6 +17,7 @@ function Row() {
   const [, redraw] = useState(0);
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [settings, setSettings] = useState(false);
 
   // The sidebar mounts and unmounts on its own; the same pass keeps the countdown fresh.
   useEffect(() => {
@@ -101,6 +39,8 @@ function Row() {
 
   if (slot === null || view === null) return null;
   const { config } = view;
+  // While it is being taught, the row shows how far along it is instead of the countdown.
+  const learning = taught(view);
   const open = () => {
     setOpening(true);
     setError(null);
@@ -110,32 +50,47 @@ function Row() {
       .finally(() => setOpening(false));
   };
 
-  return createPortal(
-    <div className="mb-2">
-      <button
-        type="button"
-        onClick={open}
-        disabled={opening}
-        aria-label="Open the Director"
-        className={`flex h-[var(--room-sidebar-row-height)] w-full cursor-pointer items-center gap-2 rounded-md pl-2 pr-2.5 text-sm text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:pointer-coarse:h-[var(--room-sidebar-row-height-coarse)] ${active ? "bg-sidebar-accent" : ""}`}
-      >
-        <Tile icon={config.icon} color={config.color} />
-        <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">Director</span>
-        {view.unread && !active ? (
-          <span className="size-1.5 shrink-0 rounded-full bg-primary" aria-label="New from the Director" />
-        ) : (
-          <span className="shrink-0 font-mono text-[11px] tabular-nums text-subtle-foreground">
-            {opening ? "…" : config.ping ? timeLeft(view.nextAt) : "off"}
-          </span>
-        )}
-      </button>
-      {error ? (
-        <p className="px-2 pt-1 text-xs leading-snug text-destructive" role="alert">
-          The Director could not start: {error}
-        </p>
-      ) : null}
-    </div>,
-    slot,
+  return (
+    <>
+      {createPortal(
+        // The mark puts the row inside the plugin's own stylesheet scope.
+        <div className="mb-2" data-room-plugin="director">
+          <div
+            className={`bb-sidebar-hover-actions-row group/director relative flex h-[var(--room-sidebar-row-height)] items-center rounded-md text-sm text-sidebar-foreground hover:bg-sidebar-accent max-md:pointer-coarse:h-[var(--room-sidebar-row-height-coarse)] ${active || settings ? "bg-sidebar-accent" : ""}`}
+          >
+            <button type="button" onClick={open} disabled={opening} aria-label="Open the Director" className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 pr-2.5">
+              <Tile icon={config.icon} color={config.color} />
+              <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">Director</span>
+              <span className={`flex shrink-0 items-center group-hover/director:opacity-0 max-md:pointer-coarse:mr-9 ${settings ? "opacity-0" : ""}`}>
+                {view.unread && !active ? (
+                  <span className="size-1.5 rounded-full bg-primary" aria-label="New from the Director" />
+                ) : (
+                  <span className="font-mono text-[11px] tabular-nums text-subtle-foreground">{opening ? "…" : learning.on && learning.done < learning.goal ? `${learning.done}/${learning.goal}` : config.ping ? timeLeft(view.nextAt) : "off"}</span>
+                )}
+              </span>
+            </button>
+            {/* The same three dots a thread row shows on hover; here they open the settings. */}
+            <span className="bb-sidebar-hover-actions absolute inset-y-0 right-0.5 flex items-center" data-sidebar-hover-actions-open={settings ? "true" : undefined} data-sidebar-hover-actions-mobile="always">
+              <button
+                type="button"
+                aria-label="Director settings"
+                onClick={() => setSettings(true)}
+                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md text-subtle-foreground outline-none hover:bg-state-hover hover:text-muted-foreground active:bg-state-active max-md:pointer-coarse:h-9 max-md:pointer-coarse:w-9"
+              >
+                <Icon name="MoreHorizontal" className="size-4" />
+              </button>
+            </span>
+          </div>
+          {error ? (
+            <p className="px-2 pt-1 text-xs leading-snug text-destructive" role="alert">
+              The Director could not start: {error}
+            </p>
+          ) : null}
+        </div>,
+        slot,
+      )}
+      {settings ? <DirectorModal onClose={() => setSettings(false)} /> : null}
+    </>
   );
 }
 
@@ -149,92 +104,10 @@ function Field({ title, hint, children }: { title: string; hint?: string; childr
   );
 }
 
-/** A text box that saves when the user leaves it. Its `key` is the saved text, so a save or reset redraws it. */
-function Prompt({ value, fallback, rows, max, onSave }: { value: string; fallback: string; rows: number; max: number; onSave(next: string): void }) {
-  const [draft, setDraft] = useState(value);
-  const commit = (next: string) => {
-    const text = next.trim() || fallback;
-    setDraft(text);
-    if (text !== value) onSave(text);
-  };
-  return (
-    <div className="space-y-1.5">
-      <Textarea rows={rows} maxLength={max} value={draft} onChange={(event) => setDraft(event.target.value)} onBlur={() => commit(draft)} className="font-mono text-xs" />
-      {value !== fallback ? (
-        <Button variant="outline" size="sm" onClick={() => commit(fallback)}>
-          Reset to default
-        </Button>
-      ) : null}
-    </div>
-  );
-}
-
-/** Minutes between pings. Typed freely, saved on leaving the box or on Enter. Its `key` is the saved number. */
-function Minutes({ value, onSave }: { value: number; onSave(next: number): void }) {
-  const [draft, setDraft] = useState(String(value));
-  const commit = () => {
-    const typed = Math.round(Number(draft));
-    const minutes = draft.trim() === "" || Number.isNaN(typed) ? value : Math.min(1440, Math.max(5, typed));
-    setDraft(String(minutes));
-    if (minutes !== value) onSave(minutes);
-  };
-  return (
-    <Input
-      type="number"
-      min={5}
-      max={1440}
-      aria-label="Minutes between pings"
-      className="h-8 w-20"
-      value={draft}
-      onChange={(event) => setDraft(event.target.value)}
-      onBlur={commit}
-      onKeyDown={(event) => {
-        if (event.key === "Enter") commit();
-      }}
-    />
-  );
-}
-
 function Settings() {
-  const { rpc, view, setView, refresh } = useDirector();
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  /** Saves run one at a time, so an older answer never lands on a newer change. */
-  const saves = useRef<Promise<void>>(Promise.resolve());
-  /** The newest unsaved settings, so two quick changes build on each other. */
-  const unsaved = useRef<Config | null>(null);
-
+  const { view, save, run, forget, busy, error } = useSettings();
   if (view === null) return <p className="text-sm text-muted-foreground">Loading…</p>;
   const { config } = view;
-
-  const save = (change: Partial<Config>) => {
-    const next = { ...(unsaved.current ?? config), ...change };
-    unsaved.current = next;
-    setView({ ...view, config: next });
-    setError(null);
-    saves.current = saves.current
-      .then(() => rpc.call("save", next))
-      .then(
-        (saved) => {
-          if (unsaved.current === next) unsaved.current = null;
-          setView(saved);
-        },
-        (cause: unknown) => {
-          // A refused save must not stay in the form, or every later save would carry it.
-          unsaved.current = null;
-          setError(message(cause));
-          refresh();
-        },
-      );
-  };
-  const run = (method: "pingNow" | "fresh") => {
-    setBusy(true);
-    setError(null);
-    rpc
-      .call(method, null)
-      .then(setView, (cause: unknown) => setError(message(cause)))
-      .finally(() => setBusy(false));
-  };
   const watched = config.projectIds;
   const toggleProject = (id: string, on: boolean) => {
     const ids = watched ?? view.projects.map((project) => project.id);
@@ -287,6 +160,32 @@ function Settings() {
           <Checkbox checked={config.watchLoops} onCheckedChange={(on) => save({ watchLoops: on === true })} />
           Also threads that loops started
         </label>
+      </Field>
+
+      <Field title="Learning" hint="Until it is taught, the Director asks before it acts. It remembers each correction with the place it applies to. Lessons are saved with your Cloudroom account, so they work on every computer and from your phone.">
+        <label className="mb-3 flex items-center gap-3 text-sm">
+          <Switch checked={config.learning} onCheckedChange={(learning) => save({ learning })} aria-label="Learn from my corrections" />
+          Learn from my corrections
+        </label>
+        <Meter view={view} onSkip={() => run("skip")} />
+        {view.learned?.lessons.length ? (
+          <ul className="mt-3 space-y-2">
+            {[...view.learned.lessons].reverse().map((lesson) => (
+              <li key={lesson.id} className="flex items-start gap-3 text-sm">
+                <div className="min-w-0 flex-1">
+                  <p className="text-foreground">“{lesson.words}”</p>
+                  <p className="text-xs text-muted-foreground">
+                    {lesson.scope === "general" ? "Always" : lesson.scope === "project" ? `Project ${lesson.target}` : "One thread"}
+                    {lesson.meaning ? ` · ${lesson.meaning}` : ""}
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => forget(lesson.id)}>
+                  Forget
+                </Button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
       </Field>
 
       <Field title="Role" hint="The Director's standing instructions. An edit reaches it with its next ping.">

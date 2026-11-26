@@ -294,6 +294,7 @@ describe("AutomationOverviewView", () => {
             { id: "proj_2", name: "notes", path: null, github: null },
           ],
           onAdd: async () => {},
+          onAddProject: () => {},
         }}
       />,
     );
@@ -619,6 +620,7 @@ describe("AutomationOverviewView", () => {
             { id: "proj_1", name: "Repo one", path: "/repo-one", github: null },
           ],
           onAdd,
+          onAddProject: () => {},
         }}
       />,
     );
@@ -655,6 +657,7 @@ describe("AutomationOverviewView", () => {
           ],
           freePlan: true,
           onAdd,
+          onAddProject: () => {},
         }}
       />,
     );
@@ -690,6 +693,38 @@ describe("AutomationOverviewView", () => {
         "cloud",
       ),
     );
+  });
+
+  it("offers Add project instead of an empty search when there are no projects (#997)", async () => {
+    const onAddProject = vi.fn();
+    render(
+      <AutomationOverviewView
+        entries={[]}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={() => {}}
+        onEnabledChange={async () => {}}
+        onPriorityChange={async () => {}}
+        onCreateViaChat={() => {}}
+        activeMode="templates"
+        onModeChange={() => {}}
+        templates={{
+          projects: [],
+          onAdd: async () => {},
+          onAddProject,
+        }}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    const addProject = await screen.findByRole("button", {
+      name: "Add project",
+    });
+    expect(screen.queryByLabelText("Search repos")).toBeNull();
+    expect(screen.queryByText("No repos match.")).toBeNull();
+    fireEvent.click(addProject);
+    expect(onAddProject).toHaveBeenCalledOnce();
   });
 
   it("tags loops whose last run failed", () => {

@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
@@ -106,6 +106,37 @@ it("sends the GUI history with an Antigravity chat, since the server needs it to
     } as never, { threadStorageRootPath: join(root, "storage"), runtimeManager: { getShellEnv: () => process.env } } as never) as { nativeId: string; files: { kind: string; path: string }[] };
     expect(captured.nativeId).toBe(nativeId);
     expect(captured.files.map((file) => [file.kind, file.path])).toEqual([["native", `${nativeId}.db`], ["context", "gui-history.json"], ["attachment", "gui-history-image-0.png"]]);
+  } finally {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  }
+});
+
+it("sizes saved conversations before anything stops, Antigravity included (#2280)", async () => {
+  const home = join(root, "home");
+  const conversations = join(home, ".gemini", "antigravity-cli", "conversations");
+  await mkdir(conversations, { recursive: true });
+  const big = 256 * 1024 * 1024 + 1;
+  // Sparse: no real disk use.
+  await writeFile(join(conversations, `${nativeId}.db`), "");
+  await truncate(join(conversations, `${nativeId}.db`), big);
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    const sized = await captureTeleport({
+      type: "thread.teleport", threadId: "thr_source", transferId: "check", action: "size",
+      workspaceContext: { workspacePath: state.workspace },
+      sessions: [
+        { threadId: "thr_source", nativeId, harness: "claude-code" },
+        { threadId: "thr_child", nativeId, harness: "antigravity" },
+      ],
+    } as never, { threadStorageRootPath: join(root, "storage"), runtimeManager: { getShellEnv: () => process.env } } as never) as { files: { path: string; size: number; kind: string }[] };
+    expect(sized.files).toMatchObject([
+      { path: "thr_source", kind: "native" },
+      { path: "thr_child", kind: "context", size: big },
+    ]);
   } finally {
     for (const [key, value] of Object.entries(previous))
       if (value === undefined) delete process.env[key];

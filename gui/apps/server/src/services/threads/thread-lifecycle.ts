@@ -122,6 +122,7 @@ import {
   clearThreadProvisionSchedule,
   getThreadProvisionContext,
 } from "./thread-startup-store.js";
+import { MISSING_SESSION_ERROR } from "./thread-transcript.js";
 import { cancelAbandonedProviderCreations } from "./thread-environment-providers.js";
 import {
   emitPluginMessageQueued,
@@ -908,6 +909,10 @@ function settleThreadCommandFailure(
     detail: errorMessage,
     scope: getThreadFailureCommandErrorScope(args.command),
   });
+  // Stop ended the send: the notice says the message was not sent, and the Stop settles the thread, not a failure.
+  if (args.report.errorCode === "stopped_before_send") {
+    return { postCommitActions };
+  }
   const outcome = applyLoggedThreadLifecycleEventInTransaction(args.deps, {
     event: { type: "run.failed" },
     threadId: thread.id,
@@ -1059,11 +1064,30 @@ export function settleTurnSubmitCommandResult(
   args: SettleTurnSubmitCommandResultArgs,
 ): CommandResultSideEffectsResult {
   if (!args.report.ok) {
-    return settleThreadCommandFailure({
+    const result = settleThreadCommandFailure({
       command: args.command,
       deps: args.deps,
       report: args.report,
     });
+    // Codex can't resume a session it never saved (#335). When the thread can't continue by itself, the error stays,
+    // with its "Start fresh with the history" action.
+    if (MISSING_SESSION_ERROR.test(args.report.errorMessage)) {
+      const { requestId, resumeContext, threadId } = args.command;
+      result.postCommitActions.push({
+        run: async (deps) => {
+          const { continueInFreshSession } =
+            await import("./thread-harness-switch.js");
+          await continueInFreshSession(
+            deps,
+            threadId,
+            resumeContext.providerThreadId,
+            { turnRequestId: requestId, sendAt: null, reason: "New session" },
+            true,
+          ).catch(() => {});
+        },
+      });
+    }
+    return result;
   }
   return emptyCommandResultSideEffects();
 }

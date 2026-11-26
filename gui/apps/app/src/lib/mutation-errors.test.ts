@@ -2,6 +2,7 @@ import { isValidElement, type ReactElement, type ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "./api";
 import {
+  isDefiniteRejection,
   getMutationErrorMessage,
   getMutationErrorMeta,
   shouldShowMutationErrorToast,
@@ -76,6 +77,18 @@ afterEach(() => {
   mutationToastState.invocations.splice(0);
   mutationToastState.custom.mockClear();
   mutationToastState.dismiss.mockClear();
+});
+
+describe("isDefiniteRejection", () => {
+  it.each([
+    [new HttpError({ status: 400, message: "bad" }), true],
+    [new HttpError({ status: 408, message: "timeout" }), false],
+    [new HttpError({ status: 409, message: "uncertain", code: "cloudroom_command_failed" }), false],
+    [new HttpError({ status: 502, message: "gateway" }), false],
+    [new TypeError("Failed to fetch"), false],
+  ])("%s -> %s", (error, expected) => {
+    expect(isDefiniteRejection(error)).toBe(expected);
+  });
 });
 
 describe("getMutationErrorMeta", () => {

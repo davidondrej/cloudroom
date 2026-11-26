@@ -352,7 +352,7 @@ export function DraftEditor({
           onInput={onInput}
           onKeyDown={onKeyDown}
           onDrop={(event) => event.preventDefault()}
-          className="draft-caret min-w-0 flex-1 cursor-text whitespace-pre-wrap break-words py-1.5 text-foreground outline-none selection:bg-timeline-accent/40"
+          className="min-w-0 flex-1 cursor-text whitespace-pre-wrap break-words py-1.5 text-foreground outline-none selection:bg-timeline-accent/40"
         />
       )}
       <div className="flex shrink-0 items-center gap-0.5 pt-0.5">

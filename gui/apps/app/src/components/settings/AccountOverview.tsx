@@ -10,7 +10,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useClaudeConnection } from "@/components/ClaudeConnection";
 import { useCloudLogin } from "@/components/CodexConnectionPanel";
 import { CreditsBar, refillText } from "@/components/CloudQueue";
-import { PARTNER_URL } from "@/components/PartnerCard";
+import { formatReferralDollars, useReferrals } from "@/components/settings/ReferralsSettingsSection";
 import { RoomLogo } from "@/components/ui/cloudroom-logo";
 import { SETTINGS_CARD_CLASS, SETTINGS_CARD_ROW_CLASS } from "@/components/ui/settings-section";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
@@ -124,18 +124,27 @@ function ActionRow({ icon, title, detail, external, onClick }: { icon: IconName;
   </button>;
 }
 
-/** The affiliate program, as a cheque made out to the member (David, 2026-11-16). Always shown, to every account: it
- *  is the program's home in the app. The button opens the page where people apply. */
+/** The affiliate program, as a cheque made out to the member (David, 2026-11-16). Opens the in-app Referrals tab. */
 function PartnerCheque({ email }: { email: string }) {
+  const navigate = useNavigate();
+  const referrals = useReferrals().data;
+  const earning = Boolean(referrals && referrals.monthlyCents > 0);
   return <div data-testid="account-partner-cheque" className="flex overflow-hidden rounded-2xl text-[#1c1a15]" style={PAPER}>
     <div className="flex min-w-0 flex-1 flex-col px-5 py-4">
-      <p className="font-mono text-[10px] font-semibold tracking-[0.2em] text-[#7d735f] uppercase">Partner program · Pay to</p>
-      <p className="mt-3 truncate border-b-[1.5px] border-[#1c1a15]/35 pb-2 font-serif text-[22px] leading-none tracking-[-0.02em]">{email}</p>
-      <p className="mt-2 text-[13px] text-[#6f6655]">of every plan payment your link brings.</p>
+      <p className="font-mono text-[10px] font-semibold tracking-[0.2em] text-[#7d735f] uppercase">{earning ? "Referrals · 40% for life" : "Referrals · Pay to"}</p>
+      {earning && referrals ? (
+        <div className="mt-3 flex items-baseline justify-between gap-2 border-b-[1.5px] border-[#1c1a15]/35 pb-2">
+          <p className="font-serif text-[30px] leading-none font-semibold tracking-[-0.03em] tabular-nums">{formatReferralDollars(referrals.monthlyCents)}<span className="text-[15px] font-normal text-[#6f6655]">/mo</span></p>
+          <p className="truncate text-xs text-[#6f6655] tabular-nums">{referrals.payingCount} paying · {referrals.signupsCount} signed up</p>
+        </div>
+      ) : (
+        <p className="mt-3 truncate border-b-[1.5px] border-[#1c1a15]/35 pb-2 font-serif text-[22px] leading-none tracking-[-0.02em]">{email}</p>
+      )}
+      <p className="mt-2 text-[13px] text-[#6f6655]">1 Pro friend = $20/mo. Paid every month they stay.</p>
       <div className="mt-auto flex pt-3">
-        <button type="button" onClick={() => openUrlInExternalBrowser(PARTNER_URL)}
+        <button type="button" onClick={() => navigate(getSettingsSectionRoutePath("referrals"))}
           className="flex h-8 items-center gap-1.5 rounded-md bg-[#1c1a15] px-3 text-xs font-semibold text-[#f3ecdb] hover:brightness-125">
-          Become a partner<Icon name="ArrowUpRight" className="size-3.5" aria-hidden />
+          {referrals?.joined ? "Open referrals" : "Get your link"}<Icon name="ArrowRight" className="size-3.5" aria-hidden />
         </button>
       </div>
     </div>
