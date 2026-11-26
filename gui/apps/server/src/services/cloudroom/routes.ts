@@ -342,8 +342,9 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     return context.json({ ok: true });
   });
   app.post("/api/v1/cloudroom/bug-reports", async (context) => {
-    const input = z.object({ message: z.string().trim().min(1).max(4000), threadId: z.string().min(1).max(200).optional() }).strict().parse(await context.req.json());
-    return context.json(await reportBug(deps, input));
+    const parsed = z.object({ message: z.string().trim().min(1).max(4000), threadId: z.string().min(1).max(200).optional() }).strict().safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) throw new ApiError(400, "invalid_request", "Feedback must be 1 to 4,000 characters. Send a longer report as several messages.");
+    return context.json(await reportBug(deps, parsed.data));
   });
   app.get("/api/v1/cloudroom/account/invites", async (context) => context.json(await cloudroom(deps).sandboxes.invites("list")));
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));

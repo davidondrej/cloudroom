@@ -1,17 +1,17 @@
 import type {
-  BbDesktopApi,
+  RoomDesktopApi,
   RoomDesktopBrowserApi,
   RoomDesktopWindowState,
 } from "@cloudroom/desktop-contract";
 
-// Elements that read --bb-desktop-zoom carry `bb-zoom`. The zoom value is set
+// Elements that read --room-desktop-zoom carry `room-zoom`. The zoom value is set
 // only on them, so a zoom step restyles a few chrome rows, not the whole page.
 export const MACOS_COLLAPSED_TOP_LEFT_RESERVE_CLASS =
-  "bb-zoom pl-[calc(206px/var(--bb-desktop-zoom,1)-1rem)]";
+  "room-zoom pl-[calc(206px/var(--room-desktop-zoom,1)-1rem)]";
 export const MACOS_SIDEBAR_MIN_WIDTH =
-  "calc(206px / var(--bb-desktop-zoom, 1))";
+  "calc(206px / var(--room-desktop-zoom, 1))";
 export const MACOS_UNZOOMED_CHROME_CLASS =
-  "bb-zoom [zoom:calc(1/var(--bb-desktop-zoom,1))]";
+  "room-zoom [zoom:calc(1/var(--room-desktop-zoom,1))]";
 
 export const BROWSER_SIDEBAR_TRIGGER_INSET_CLASS = "pl-[12px]";
 export const BROWSER_COLLAPSED_HEADER_RESERVE_CLASS =
@@ -23,14 +23,14 @@ export const MACOS_APP_REGION_NO_DRAG_CLASS =
 export const MACOS_WINDOW_NO_DRAG_CLASS = `relative z-50 ${MACOS_APP_REGION_NO_DRAG_CLASS}`;
 
 export const CHROME_ROW_HEIGHT_CLASS =
-  "bb-zoom h-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1))]";
+  "room-zoom h-[calc(var(--room-app-chrome-row-height)/var(--room-desktop-zoom,1))]";
 export const CHROME_ROW_CLASS = `flex ${CHROME_ROW_HEIGHT_CLASS} items-center`;
 
 export const MACOS_CHROME_CONTROL_AXIS_CLASS =
-  "bb-zoom [--bb-macos-chrome-control-y:calc(2px/var(--bb-desktop-zoom,1))] [transform:translateY(var(--bb-macos-chrome-control-y))]";
+  "room-zoom [--room-macos-chrome-control-y:calc(2px/var(--room-desktop-zoom,1))] [transform:translateY(var(--room-macos-chrome-control-y))]";
 export const MACOS_CHROME_CONTROL_NO_DRAG_CLASS = `${MACOS_WINDOW_NO_DRAG_CLASS} ${MACOS_CHROME_CONTROL_AXIS_CLASS}`;
 
-type RoomDesktopInfoResult = BbDesktopApi | null;
+type RoomDesktopInfoResult = RoomDesktopApi | null;
 export const DEFAULT_DESKTOP_WINDOW_STATE: RoomDesktopWindowState = {
   isFullScreen: false,
 };
@@ -39,7 +39,7 @@ export function getRoomDesktopInfo(): RoomDesktopInfoResult {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.bbDesktop ?? null;
+  return window.roomDesktop ?? window.bbDesktop ?? null;
 }
 
 export function shouldUseMacosDesktopChrome(
@@ -67,7 +67,7 @@ export function watchMacosDesktopZoom(): () => void {
   document.head.append(style);
   const sync = () => {
     const zoom = desktopApi.getZoomFactor?.() ?? 1;
-    const rule = `.bb-zoom{--bb-desktop-zoom:${zoom}}`;
+    const rule = `.room-zoom{--room-desktop-zoom:${zoom}}`;
     if (style.textContent !== rule) style.textContent = rule;
   };
   sync();

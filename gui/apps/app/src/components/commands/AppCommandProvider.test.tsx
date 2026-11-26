@@ -10,7 +10,7 @@ import {
 import { MemoryRouter } from "react-router";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BbDesktopApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopApi } from "@cloudroom/desktop-contract";
 import { defaultAppSettings, type AppCommandId } from "@cloudroom/domain";
 import {
   AppCommandProvider,
@@ -22,7 +22,7 @@ import {
 
 const testState = vi.hoisted(() => ({
   calls: [] as string[],
-  desktop: null as Pick<BbDesktopApi, "onAppCommand"> | null,
+  desktop: null as Pick<RoomDesktopApi, "onAppCommand"> | null,
   showKeyboardHints: true,
   keybindings: [
     {
@@ -723,7 +723,7 @@ describe("AppCommandProvider", () => {
   });
 
   it("resolves shortcuts forwarded from a browser page with the renderer's context", () => {
-    let forward: Parameters<BbDesktopApi["onAppCommand"] & {}>[0] | undefined;
+    let forward: Parameters<RoomDesktopApi["onAppCommand"] & {}>[0] | undefined;
     testState.desktop = {
       onAppCommand: (listener) => {
         forward = listener;

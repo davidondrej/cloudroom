@@ -555,7 +555,7 @@ export function AppLayout({ children }: AppLayoutProps) {
         appToast.message("New remote connection", { description: body });
         // Electron's main process delivers native OS alerts even with no local window open; only use web Notification in browser mode.
         if (
-          window.bbDesktop === undefined &&
+          getRoomDesktopInfo() === null &&
           typeof Notification !== "undefined" &&
           Notification.permission === "granted"
         ) {
@@ -905,7 +905,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                 <div
                   ref={contentShellRef}
                   data-testid="app-layout-content-shell"
-                  className="relative flex h-full min-h-0 min-w-0 w-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--bb-safe-area-bottom,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)]"
+                  className="relative flex h-full min-h-0 min-w-0 w-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--room-safe-area-bottom,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)]"
                 >
                   {showHeader ? (
                     <AppHeader

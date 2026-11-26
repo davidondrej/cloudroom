@@ -549,8 +549,11 @@ fd,out=tempfile.mkstemp(prefix="cloudroom-agy-",suffix=".db"); os.close(fd)
 dst=sqlite3.connect(out); src.backup(dst); dst.close(); src.close(); print(out)`;
     return `python3 -I -c ${quote(script)} ${quote(nativeId)}`;
   }
+  // OpenCode 2 moved export under `session` (#2686); `--standalone` leaves no background service running. An unreadable
+  // version runs OpenCode 1's.
   if (harness === "acp-opencode")
-    return `mkdir -p ~/.cache/cloudroom && f=~/.cache/cloudroom/opencode-${nativeId}.json && OPENCODE_DISABLE_AUTOUPDATE=1 opencode export ${nativeId} > "$f" </dev/null && echo "$f"`;
+    return `export OPENCODE_DISABLE_AUTOUPDATE=1; v=$(opencode --version 2>/dev/null </dev/null | grep -oE '[0-9]+\\.[0-9]+\\.[0-9]+' | head -1); c=export; [ "\${v%%.*}" -ge 2 ] 2>/dev/null && c="session export --standalone"
+mkdir -p ~/.cache/cloudroom && f=~/.cache/cloudroom/opencode-${nativeId}.json && opencode $c ${nativeId} > "$f" </dev/null && echo "$f"`;
   // A Cursor chat is a folder (meta.json plus a SQLite store), so it travels as one archive.
   if (harness === "acp-cursor")
     return `d=$(ls -d "${VM_SESSIONS[harness]}"/*/${nativeId} 2>/dev/null | head -n1); [ -f "$d/meta.json" ] || exit 0

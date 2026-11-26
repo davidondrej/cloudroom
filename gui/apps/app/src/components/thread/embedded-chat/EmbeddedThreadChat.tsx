@@ -106,6 +106,7 @@ import { appToast } from "@/components/ui/app-toast";
 import {
   buildSideChatSubmitMode,
   canSubmitFollowUpShortcut,
+  promptDraftToInput,
   shouldQueueFollowUpMessage,
 } from "@cloudroom/client-core";
 import { useActiveComposerDraft } from "./useActiveComposerDraft";
@@ -742,38 +743,37 @@ function EmbeddedThreadChatWithComposer({
     threadId,
     promptDraft.clearIfCurrentMatches,
   );
-  const handleSubmit = useCallback(() => {
-    const submittedDraft = currentPromptDraft;
-    const submittedInput = currentPromptDraftInput;
-    if (runCopyCommand(submittedDraft)) return;
+  // Reads the stored draft, not this render's copy: a voice message can send after the chat closes.
+  // Resolves true once the message is sent or queued.
+  const handleSubmit = useCallback(async (): Promise<boolean> => {
+    const submittedDraft = promptDraft.getCurrent();
+    const submittedInput = promptDraftToInput(submittedDraft);
+    if (runCopyCommand(submittedDraft)) return false;
     if (submittedInput.length === 0 || isTurnSubmitting) {
-      return;
+      return false;
     }
     promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
-    void defaultSendOrQueueInput(submittedInput)
-      .catch((error) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        promptDraft.restoreIfEmpty(submittedDraft);
-        showMutationErrorToast({
-          error,
-          fallbackMessage: "Failed to send message",
-          lifecycleOperation: shouldQueueFollowUpMessage(displayStatus)
-            ? "queue_message"
-            : "send_message",
-        });
-      })
-      .finally(() => {
-        if (isMountedRef.current) {
-          setIsTurnSubmitting(false);
-        }
+    try {
+      await defaultSendOrQueueInput(submittedInput);
+      return true;
+    } catch (error) {
+      promptDraft.restoreIfEmpty(submittedDraft);
+      showMutationErrorToast({
+        error,
+        fallbackMessage: "Failed to send message",
+        lifecycleOperation: shouldQueueFollowUpMessage(displayStatus)
+          ? "queue_message"
+          : "send_message",
       });
+      return false;
+    } finally {
+      if (isMountedRef.current) {
+        setIsTurnSubmitting(false);
+      }
+    }
   }, [
-    currentPromptDraft,
-    currentPromptDraftInput,
     defaultSendOrQueueInput,
     displayStatus,
     isTurnSubmitting,
@@ -1050,6 +1050,10 @@ function EmbeddedThreadChatWithComposer({
       ? "Provisioning thread..."
       : "Reply…";
 
+  const voiceTarget = useMemo(
+    () => ({ draftScope: composer.draftScope, send: handleSubmit }),
+    [composer.draftScope, handleSubmit],
+  );
   const bottomComposerConfig = useMemo<FollowUpComposerProps>(
     () => ({
       history: {
@@ -1069,6 +1073,7 @@ function EmbeddedThreadChatWithComposer({
       steerActiveThreadOnEnter,
       submitMode,
       threadRuntimeDisplayStatus: displayStatus,
+      voiceTarget,
     }),
     [
       canSubmitModifierShortcut,
@@ -1082,6 +1087,7 @@ function EmbeddedThreadChatWithComposer({
       promptDraft.setTextAndMentions,
       steerActiveThreadOnEnter,
       submitMode,
+      voiceTarget,
     ],
   );
   const inlineComposerConfig = useMemo<FollowUpComposerProps | null>(

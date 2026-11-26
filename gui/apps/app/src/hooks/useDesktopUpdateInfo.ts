@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { BbDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { getRoomDesktopInfo } from "@/lib/room-desktop";
 
 interface DesktopUpdateInfo {
-  desktopApi: BbDesktopApi | null;
+  desktopApi: RoomDesktopApi | null;
   desktopInfo: RoomDesktopInfo | null;
   isDesktop: boolean;
 }
@@ -42,7 +42,7 @@ async function fetchLatestDesktopVersion(
 }
 
 export function useDesktopUpdateInfo(): DesktopUpdateInfo {
-  const [desktopApi] = useState<BbDesktopApi | null>(() => getRoomDesktopInfo());
+  const [desktopApi] = useState<RoomDesktopApi | null>(() => getRoomDesktopInfo());
   const [desktopInfo, setDesktopInfo] = useState<RoomDesktopInfo | null>(null);
   const latestQuery = useQuery({
     queryKey: LATEST_DESKTOP_RELEASE_QUERY_KEY,

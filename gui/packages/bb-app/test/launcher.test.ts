@@ -1002,7 +1002,7 @@ describe("bb-app launcher", () => {
 
     expect(metadata.engines.node).toBe("^22.19.0 || ^24.0.0 || ^26.0.0");
     expect(metadata.files).toContain(
-      "host-daemon/dist/bb-plugin-host-worker.mjs",
+      "host-daemon/dist/room-plugin-host-worker.mjs",
     );
     expect(metadata.files).toContain("host-daemon/dist/room-cli");
     expect(metadata.files).toContain("host-daemon/dist/room-cli.cmd");
@@ -1018,9 +1018,9 @@ describe("bb-app launcher", () => {
         context.serverEntry,
         context.daemonEntry,
         join(context.daemonBundleDir, "room-cli"),
-        join(context.daemonBundleDir, "bb-provider-bridge-worker.mjs"),
-        join(context.daemonBundleDir, "bb-parcel-watcher-child.mjs"),
-        join(context.daemonBundleDir, "bb-plugin-host-worker.mjs"),
+        join(context.daemonBundleDir, "room-provider-bridge-worker.mjs"),
+        join(context.daemonBundleDir, "room-parcel-watcher-child.mjs"),
+        join(context.daemonBundleDir, "room-plugin-host-worker.mjs"),
         join(context.appDistDir, "index.html"),
       ]) {
         mkdirSync(dirname(artifact), { recursive: true });

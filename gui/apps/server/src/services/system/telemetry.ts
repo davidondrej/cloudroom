@@ -374,12 +374,16 @@ export async function createTelemetryService(
   if (!args.enabled || args.appVersion === DEFAULTS.appVersion) {
     return noopTelemetryService;
   }
-  const distinctId = await readOrCreateSecretFile({
+  let distinctId: Promise<string> | null = null;
+  const readDistinctId = () => (distinctId ??= readOrCreateSecretFile({
     bytes: 16,
     dataDir: args.dataDir,
     encoding: "hex",
     fileName: TELEMETRY_ID_FILE_NAME,
-  });
+  }).catch((error: unknown) => {
+    distinctId = null;
+    throw error;
+  }));
   let telemetryEnabled = args.telemetryEnabled;
   let planSource: () => string | null = () => null;
   let privacyFilter: TelemetryPrivacyFilter | null = null;
@@ -393,8 +397,10 @@ export async function createTelemetryService(
       const batch = queue.slice(0, BATCH_SIZE);
       const { website, authorization } = await targetSource();
       if (optOuts !== startedAt) return; // Turned off during that wait: this copy of the batch must not leave.
+      const installId = await readDistinctId();
+      if (optOuts !== startedAt) return;
       const response = await fetch(`${website}/api/desktop/events`, {
-        body: JSON.stringify({ install_id: distinctId, events: batch }),
+        body: JSON.stringify({ install_id: installId, events: batch }),
         headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
         method: "POST",
         redirect: "error",

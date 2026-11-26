@@ -45,7 +45,10 @@ import {
   type TypeaheadConfig,
 } from "@/components/promptbox/PromptBoxInternal";
 import { usePromptModePermissionDisplay } from "@/components/promptbox/usePromptModePermissionDisplay";
-import { usePromptVoice } from "@/components/promptbox/usePromptVoice";
+import {
+  usePromptVoice,
+  type PromptVoiceTarget,
+} from "@/components/promptbox/usePromptVoice";
 import { PermissionModePicker } from "@/components/pickers/PermissionModePicker";
 import {
   ExecutionControls,
@@ -144,6 +147,8 @@ export interface FollowUpComposerProps {
   steerActiveThreadOnEnter: boolean;
   submitMode: FollowUpSubmitMode;
   threadRuntimeDisplayStatus: ThreadRuntimeDisplayStatus;
+  /** Where voice text lands, and how it is sent, if the user leaves before transcription finishes. */
+  voiceTarget?: PromptVoiceTarget;
 }
 
 type ContextWindowUsage = ComponentProps<
@@ -295,7 +300,7 @@ function FollowUpPromptBoxWithComposer({
   const attachFiles = useCallback((files: File[]) => {
     promptBoxRef.current?.attachFiles(files);
   }, []);
-  const voice = usePromptVoice(promptBoxRef);
+  const voice = usePromptVoice(promptBoxRef, composer.voiceTarget);
   const isCompactViewport = useIsCompactViewport();
   const isPointerCoarse = usePointerCoarse();
   const composerInteractionRef = useRef<HTMLDivElement>(null);

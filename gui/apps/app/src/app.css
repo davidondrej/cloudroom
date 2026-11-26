@@ -1,8 +1,8 @@
 @import "@fontsource-variable/inter";
 @import "@/components/ui/theme.css";
 
-/* Set per element by watchMacosDesktopZoom; non-inherited so zoom steps restyle only `.bb-zoom` elements. */
-@property --bb-desktop-zoom {
+/* Set per element by watchMacosDesktopZoom; non-inherited so zoom steps restyle only `.room-zoom` elements. */
+@property --room-desktop-zoom {
   syntax: "<number>";
   inherits: false;
   initial-value: 1;
@@ -34,13 +34,13 @@
    * variable is the single switch both they and the shell root read.
    */
   :root {
-    --bb-app-chrome-row-height: 3rem;
-    --bb-shell-height: 100dvh;
+    --room-app-chrome-row-height: 3rem;
+    --room-shell-height: 100dvh;
     --secondary-panel-width-mobile: min(76vw, 320px);
   }
 
   html.bb-app-shell-root {
-    height: var(--bb-shell-height);
+    height: var(--room-shell-height);
   }
 
   body.bb-app-shell,
@@ -50,12 +50,12 @@
 
   @media (display-mode: standalone) {
     :root {
-      --bb-shell-height: 100lvh;
+      --room-shell-height: 100lvh;
     }
   }
 
   html[data-firefox-android] {
-    --bb-shell-height: 100svh;
+    --room-shell-height: 100svh;
   }
 
   html.bb-app-shell-root,
@@ -995,9 +995,9 @@
 }
 
 .bb-hero-chip {
-  animation: bb-hero-drift var(--bb-hero-drift-duration, 6s) ease-in-out
+  animation: bb-hero-drift var(--room-hero-drift-duration, 6s) ease-in-out
     infinite;
-  animation-delay: var(--bb-hero-drift-delay, 0s);
+  animation-delay: var(--room-hero-drift-delay, 0s);
 }
 
 /* Autoplay progress for the active slide segment. The element is keyed by slide
@@ -1014,7 +1014,7 @@
 
 .bb-hero-progress-fill {
   transform-origin: left center;
-  animation: bb-hero-progress var(--bb-hero-slide-duration, 5s) linear forwards;
+  animation: bb-hero-progress var(--room-hero-slide-duration, 5s) linear forwards;
 }
 
 .bb-hero-progress-fill[data-paused="true"] {
@@ -1117,7 +1117,7 @@
 /* First-run call to action: a soft light runs once around the border, then
  * rests for a few seconds. The ring sits just outside the button, so it reads
  * on filled buttons too. */
-@property --bb-beam-angle {
+@property --room-beam-angle {
   syntax: "<angle>";
   initial-value: 0deg;
   inherits: false;
@@ -1125,7 +1125,7 @@
 
 @keyframes bb-beam {
   0% {
-    --bb-beam-angle: 0deg;
+    --room-beam-angle: 0deg;
     opacity: 0;
   }
   6%,
@@ -1134,7 +1134,7 @@
   }
   48%,
   100% {
-    --bb-beam-angle: 360deg;
+    --room-beam-angle: 360deg;
     opacity: 0;
   }
 }
@@ -1165,7 +1165,7 @@
 
 .bb-beam::after {
   background: conic-gradient(
-    from var(--bb-beam-angle),
+    from var(--room-beam-angle),
     transparent 0deg 250deg,
     color-mix(in oklch, var(--primary) 70%, transparent) 320deg,
     #fff 352deg,

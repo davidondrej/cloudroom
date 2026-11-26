@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 169
+
+Full Access stops interrupting (2026-11-26)
+
+### Changes
+
+- Claude Code in Full Access no longer stops to ask about shell commands it can't fully read.
+- A voice message now goes to the thread you recorded it in, even if you switch threads while it transcribes.
+- Teleport moves Antigravity and OpenCode 2 chats to the Cloud again, with their history.
+- The rename dialog, the sidebar resize handle, and images you send got a cleaner look.
+- Security fixes.
+
 ## 168
 
 Sign out any connected device (2026-11-25)

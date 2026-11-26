@@ -67,7 +67,7 @@ export function decideGate(args: {
   | { kind: "error"; message: string } {
   const { tool, input } = args;
   if (BLOCKED_TOOLS.has(tool))
-    return { kind: "error", message: `${tool} changes Cua Driver itself and is not available to agents.` };
+    return { kind: "error", message: `${tool} is not available to agents in Cloudroom.` };
   if (tool === "launch_app") {
     const name = input.bundle_id ?? input.name;
     return typeof name === "string" && name

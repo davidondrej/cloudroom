@@ -17,8 +17,14 @@ import {
   DialogTitle,
 } from "@cloudroom/shared-ui/dialog";
 import { Input } from "@cloudroom/shared-ui/input";
+import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useNameValidation } from "./useNameValidation.js";
 import { useRenameDialogAutoFocus } from "./useRenameDialogAutoFocus.js";
+
+// Dark mode: a lighter neutral card with a black drop shadow instead of the
+// lime-tinted theme border, so the dialog's edge reads without an outline.
+const RENAME_DIALOG_DARK_SHELL_CLASS =
+  "dark:border-transparent dark:bg-[color-mix(in_oklab,var(--ink)_10.5%,var(--canvas))] dark:shadow-[0_24px_60px_-12px_rgb(0_0_0/0.7)]";
 
 interface RenameDialogProps {
   open: boolean;
@@ -66,7 +72,7 @@ export function RenameDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className={shellClassName}
+        className={cn(RENAME_DIALOG_DARK_SHELL_CLASS, shellClassName)}
         hideCloseButton
         onOpenAutoFocus={handleOpenAutoFocus}
         onAfterCloseAutoFocus={handleAfterCloseAutoFocus}

@@ -214,7 +214,7 @@ function buildDecorations(
             {
               className: rule.className,
               ...(source.pluginId
-                ? { "data-bb-plugin-decoration": source.pluginId }
+                ? { "data-room-plugin-decoration": source.pluginId }
                 : {}),
               ruleId: rule.id,
               sourceId: source.id,

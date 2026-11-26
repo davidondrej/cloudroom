@@ -144,10 +144,10 @@ export function ConversationAttachments({
               type="button"
               key={`${imageItem.src}-${index}`}
               className={cn(
-                "cursor-zoom-in overflow-hidden rounded-md border",
+                "cursor-zoom-in overflow-hidden",
                 align === "end"
-                  ? "border-surface-selected-border bg-surface-raised"
-                  : "border-border bg-surface-recessed",
+                  ? "rounded-lg bg-surface-raised"
+                  : "rounded-md border border-border bg-surface-recessed",
               )}
               onClick={() => setExpandedImageIndex(index)}
               title={imageItem.alt}

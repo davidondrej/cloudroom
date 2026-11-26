@@ -195,6 +195,9 @@ export function PluginSlotMount({
         {...(onCrash ? { onCrash } : {})}
       >
         <div
+          data-room-plugin-root=""
+          data-room-plugin={pluginId}
+          // Compat: third-party BB plugins scope their CSS to [data-bb-plugin*].
           data-bb-plugin-root=""
           data-bb-plugin={pluginId}
           className="contents"

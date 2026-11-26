@@ -1,19 +1,19 @@
 export const DRIVER = {
-  version: "0.55.0",
-  releaseUrl: "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.55.0",
+  version: "0.59.5",
+  releaseUrl: "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.59.5",
   macTeamId: "YCK386LBJ7",
   assets: {
     darwin: {
-      file: "cua-driver-rs-0.55.0-darwin-universal-binary.tar.gz",
-      sha256: "e6246d3da20abe019e2660e8b5f77e0c12cf9b386597a76393116994a36db6ce",
+      file: "cua-driver-rs-0.59.5-darwin-universal-binary.tar.gz",
+      sha256: "e2d2f673d39785a9df7c68cc7463f9b2f59fa8a05b688956eb06142b2d9e03d1",
     },
     "linux-x64": {
-      file: "cua-driver-rs-0.55.0-linux-x86_64-binary.tar.gz",
-      sha256: "1cb8aa6d30e5cdf5bf4d222cb3693a50af2c178073a49dc59e88737c5f7807e6",
+      file: "cua-driver-rs-0.59.5-linux-x86_64-binary.tar.gz",
+      sha256: "4066a10d380ae8852a2405c41e79569ae756e7eac90154dd891f6712f051c2ec",
     },
     "linux-arm64": {
-      file: "cua-driver-rs-0.55.0-linux-arm64-binary.tar.gz",
-      sha256: "401f7f4a9ad276dbcdb324f1b00e152987a46985b68c9e625ac01101f5e6af77",
+      file: "cua-driver-rs-0.59.5-linux-arm64-binary.tar.gz",
+      sha256: "40e6ed50359745f0189ac7fd6f36cf09ae87ff02bcb633c6203416e140f7f7e0",
     },
   },
 } as const;
@@ -46,9 +46,10 @@ export const PID_REQUIRED_TOOLS = new Set([
 ]);
 
 // run_script and run_steps can target apps by name inside one call, which would skip the per-app approval.
+// agent_display can list and remove any thread's virtual display, since threads share one driver.
 export const BLOCKED_TOOLS = new Set([
   "set_config", "install_extension", "install_ffmpeg", "check_for_update", "replay_trajectory",
-  "run_script", "run_steps",
+  "run_script", "run_steps", "agent_display",
 ]);
 
 export const LIME_CURSOR_SUFFIX = "-8";

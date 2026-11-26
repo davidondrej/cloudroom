@@ -3,7 +3,7 @@ import { execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, chmod, constants, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, sep } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
@@ -180,6 +180,8 @@ const CONFIG_LIMIT = 45 * 1024 * 1024;
 const CONFIG_TAR_LIMIT = 4 * CONFIG_LIMIT;
 const CONFIG_TAR_BUDGET = CONFIG_TAR_LIMIT - 1024 * 1024;
 const CONFIG_TAR_TIMEOUT_MS = 60_000;
+// Mac-built dependency and cache folders: useless on Linux, and tens of thousands of files that made tar time out (#214).
+const CONFIG_SKIP_DIRS = new Set([".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".next", ".turbo"]);
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
 /** Zero-process check for a local `gh` login on github.com; returns the handle when present in hosts.yml, never tokens. */
@@ -780,6 +782,7 @@ async function configFiles(home: string, paths: string[]): Promise<ConfigPathFil
         bytes += 512 + Math.ceil(info.size / 512) * 512;
         return;
       }
+      if (entry !== path && CONFIG_SKIP_DIRS.has(basename(entry))) return;
       const names = await readdir(full).catch(() => null);
       if (!names) { skipped += 1; return; }
       if (fitsUstarPath(tarPath)) {
@@ -813,10 +816,12 @@ function formatConfigTarError(error: unknown, fileCount: number, elapsedMs: numb
   const stderr = (Buffer.isBuffer(err.stderr) ? err.stderr.toString("utf8") : typeof err.stderr === "string" ? err.stderr : "").trim();
   const detail = stderr ? stderr.split(/\r?\n/).filter(Boolean).slice(-3).join(" | ").slice(0, 300) : "";
   if (err.killed && err.signal) {
-    const why = elapsedMs >= CONFIG_TAR_TIMEOUT_MS - 1_000
+    const timedOut = elapsedMs >= CONFIG_TAR_TIMEOUT_MS - 1_000;
+    const why = timedOut
       ? `Packing skills timed out after ${Math.round(CONFIG_TAR_TIMEOUT_MS / 1000)} s (${err.signal}, ${fileCount} files)`
       : `Packing skills was killed (${err.signal}, ${fileCount} files)`;
-    return new ConfigTarError(detail ? `${why}: ${detail}` : `${why}.`, true);
+    // A timeout repeats every minute, so after one retry it falls back to instructions only instead of blocking them (#214).
+    return new ConfigTarError(detail ? `${why}: ${detail}` : `${why}.`, !timedOut);
   }
   if (err.signal) {
     const why = `Packing skills stopped on ${err.signal} (${fileCount} files)`;

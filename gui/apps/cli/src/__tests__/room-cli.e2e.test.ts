@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -222,4 +223,44 @@ describe("Cloudroom CLI isolation and message delivery", () => {
       stderr: expect.stringContaining("forced exit"),
     });
   });
+
+  // A loop's script (#2656): Cloudroom refusing or never answering leaves the loop's file; the hang waits out the
+  // caller proof (spawn, 50 s) and the read timeout (tell, 75 s).
+  it("marks a loop's run unavailable when spawn or tell get no answer from Cloudroom", async () => {
+    const hung = createServer(() => {});
+    await new Promise<void>((resolve) => hung.listen(0, "127.0.0.1", resolve));
+    const hungUrl = `http://127.0.0.1:${(hung.address() as { port: number }).port}`;
+    const closed = createServer();
+    await new Promise<void>((resolve) => closed.listen(0, "127.0.0.1", resolve));
+    const refusedUrl = `http://127.0.0.1:${(closed.address() as { port: number }).port}`;
+    await new Promise((resolve) => closed.close(resolve));
+    const commands = {
+      spawn: "thread spawn --project proj_fixture --provider codex --prompt hi".split(" "),
+      tell: "thread tell thr_local hi".split(" "),
+    };
+    try {
+      const runs = Object.entries(commands).flatMap(([name, args]) =>
+        [refusedUrl, hungUrl].map(async (url) => {
+          const file = join(
+            directory,
+            `unavailable-${name}-${url === hungUrl ? "hung" : "refused"}`,
+          );
+          await run(args, {
+            ROOM_SERVER_URL: url,
+            ROOM_LOOP_UNAVAILABLE_FILE: file,
+          }).catch(() => {});
+          return [file, existsSync(file)];
+        }),
+      );
+      for (const [file, marked] of await Promise.all(runs))
+        expect({ file, marked }).toEqual({ file, marked: true });
+      // Cloudroom answered: no file.
+      const answered = join(directory, "unavailable-answered");
+      await run(commands.tell, { ROOM_LOOP_UNAVAILABLE_FILE: answered });
+      expect(existsSync(answered)).toBe(false);
+    } finally {
+      hung.closeAllConnections();
+      hung.close();
+    }
+  }, 120_000);
 });

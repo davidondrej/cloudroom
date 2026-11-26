@@ -57,8 +57,10 @@ export function SidebarResizeHandle({
       data-testid={testId}
       className={cn(
         "absolute -right-1.5 top-0 z-30 hidden h-full w-3 cursor-col-resize md:block",
-        "before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-transparent before:transition-colors hover:before:bg-sidebar-border",
-        isResizing && "before:bg-sidebar-border",
+        // Neutral gray, not the brand-tinted border. The mask fades the line out before the card's 14px corners.
+        "before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-transparent before:transition-colors hover:before:bg-sidebar-foreground/50",
+        "before:[mask-image:linear-gradient(to_bottom,transparent_14px,black_72px,black_calc(100%-72px),transparent_calc(100%-14px))]",
+        isResizing && "before:bg-sidebar-foreground/50",
       )}
       onMouseDown={onMouseDown}
     />

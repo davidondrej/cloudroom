@@ -68,7 +68,7 @@ export function tailwindcss(): Plugin {
   };
 
   return {
-    name: "bb:tailwind",
+    name: "room:tailwind",
     enforce: "pre",
     configResolved(resolved) {
       config = resolved;

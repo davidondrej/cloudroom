@@ -24,7 +24,7 @@ Automations above run on this computer, only while it is awake and Cloudroom is 
 
 The project's repo follows its template, and each Cloud thread started from this computer refreshes the loop's `.env` files. Projects not on GitHub need a Cloud thread: create the loop inside it. A same-thread loop pauses when its thread is archived.
 
-A cloud `--script`/`--script-file` runs first, as the agent in the project folder, for up to 60 seconds, with bash unless its `#!` line names another program (say, `python3`): in the automation's own sandbox with fresh threads (set up once, asleep between checks), else in the thread's sandbox. Empty output skips the run with no agent turn; any output is added to the prompt; a non-zero exit is a failed run. The script keeps its own state (say, a cursor file) in that sandbox and needs its logins there too.
+A cloud `--script`/`--script-file` runs first, as the agent in the project folder, for up to 60 seconds, with bash unless its `#!` line names another program (say, `python3`): in the automation's own sandbox with fresh threads (set up once, asleep between checks), else in the thread's sandbox. Empty output skips the run with no agent turn; any output is added to the prompt; a non-zero exit is a failed run. The script keeps its own state (say, a cursor file) in that sandbox, in the folder `$ROOM_LOOP_STATE` (exit 2 if it is unset), and needs its logins there too. Never keep state in `~/.cache` or `/tmp`: a sandbox rebuilt from its saved copy loses them.
 
 ```bash
 room-cli loop create --cloud --project <id> --name "..." --prompt "..." --provider <id> --model <model> [--reasoning <level>] (--cron "<expr>" --timezone <tz> | --at <datetime> | --in <duration> | --webhook) [--script-file <path>]

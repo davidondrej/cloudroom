@@ -21,7 +21,7 @@ const desktopInfo: RoomDesktopInfo = {
 describe("desktop chrome geometry", () => {
   it("sizes chrome rows from the shared token, zoom-locked in their own scope", () => {
     expect(CHROME_ROW_HEIGHT_CLASS).toBe(
-      "bb-zoom h-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1))]",
+      "room-zoom h-[calc(var(--room-app-chrome-row-height)/var(--room-desktop-zoom,1))]",
     );
   });
 
@@ -50,7 +50,7 @@ describe("desktop chrome geometry", () => {
 
   it("clears the same window-controls width for the title and the sidebar", () => {
     const controlsWidth = (value: string): number => {
-      const match = /calc\((\d+)px ?\/ ?var\(--bb-desktop-zoom, ?1\)/.exec(
+      const match = /calc\((\d+)px ?\/ ?var\(--room-desktop-zoom, ?1\)/.exec(
         value,
       );
       if (match === null) {

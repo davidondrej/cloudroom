@@ -728,8 +728,8 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           className={cn(
             // Pushes the page to the card's right edge (6px short of the slot), so the chat centers in the free space.
             // The width snaps so the page re-lays out once; animating it re-wrapped every chat on every frame.
-            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
-            "bb-zoom relative hidden h-full w-[calc(var(--sidebar-width)-0.375rem)] md:block",
+            // Keep room-zoom: --sidebar-width reads the macOS zoom value, which only `.room-zoom` elements get.
+            "room-zoom relative hidden h-full w-[calc(var(--sidebar-width)-0.375rem)] md:block",
             "group-data-[collapsible=offcanvas]:w-0",
           )}
         />
@@ -738,8 +738,8 @@ const Sidebar = React.forwardRef<HTMLDivElement, React.ComponentProps<"div">>(
           className={cn(
             // A floating card, inset from the window edge. It sits above the page (z-40) so its popups spill over the chat.
             // Slide and fade with translate and opacity only: the GPU animates them without layout or paint.
-            // Keep bb-zoom: --sidebar-width reads the macOS zoom value, which only `.bb-zoom` elements get.
-            "bb-zoom fixed top-2 left-2 z-40 flex h-[calc(var(--bb-shell-height)-1rem)] w-[calc(var(--sidebar-width)-0.875rem)] select-none flex-col rounded-[14px] bg-sidebar text-sidebar-foreground shadow-message [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_0s] motion-reduce:transition-none!",
+            // Keep room-zoom: --sidebar-width reads the macOS zoom value, which only `.room-zoom` elements get.
+            "room-zoom fixed top-2 left-2 z-40 flex h-[calc(var(--room-shell-height)-1rem)] w-[calc(var(--sidebar-width)-0.875rem)] select-none flex-col rounded-[14px] bg-sidebar text-sidebar-foreground shadow-message [transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_0s] motion-reduce:transition-none!",
             // Closing: slide past the inset, then move truly off-screen so no hidden drag region stays at the left edge.
             "group-data-[collapsible=offcanvas]:invisible group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] group-data-[collapsible=offcanvas]:translate-x-[calc(-100%-1rem)] group-data-[collapsible=offcanvas]:opacity-0 group-data-[collapsible=offcanvas]:[transition:translate_220ms_cubic-bezier(0.32,0.72,0,1),opacity_180ms_linear,visibility_0s_linear_220ms,left_0s_linear_220ms]",
             className,
@@ -971,7 +971,7 @@ const SidebarMobilePanel = React.forwardRef<
           data-side="left"
           data-vaul-drawer-direction="left"
           className={cn(
-            "group fixed inset-y-0 left-0 z-0 flex h-(--bb-shell-height) w-(--sidebar-width-mobile) touch-pan-y select-none flex-col bg-sidebar text-sidebar-foreground outline-none",
+            "group fixed inset-y-0 left-0 z-0 flex h-(--room-shell-height) w-(--sidebar-width-mobile) touch-pan-y select-none flex-col bg-sidebar text-sidebar-foreground outline-none",
             "border-border-seam data-[side=left]:border-r",
             className,
           )}
@@ -1651,7 +1651,7 @@ interface SidebarStickyTierProps extends React.ComponentProps<"div"> {
 }
 
 type SidebarStickyParentLevelStyle = React.CSSProperties & {
-  "--bb-sidebar-sticky-parent-level": number;
+  "--room-sidebar-sticky-parent-level": number;
 };
 
 const SidebarStickyStack = React.forwardRef<
@@ -1678,7 +1678,7 @@ const SidebarStickyTier = React.forwardRef<
     tier === "parent" && level !== undefined
       ? ({
           ...style,
-          "--bb-sidebar-sticky-parent-level": level,
+          "--room-sidebar-sticky-parent-level": level,
         } satisfies SidebarStickyParentLevelStyle)
       : style;
   return (

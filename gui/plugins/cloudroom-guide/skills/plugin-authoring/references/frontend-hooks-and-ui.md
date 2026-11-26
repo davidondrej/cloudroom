@@ -128,6 +128,11 @@ diff viewers, and the new-thread composer.
   version-matched to your Cloudroom by construction. Edit the copies freely; they
   never change out from under you. Re-running `shadcn add` is the manual
   update path.
+- Some items are Cloudroom's own code, not Radix wrappers: `avatar` and
+  `collapsible` among them. Their parts share their own context, so import
+  every part from your vendored file. A part taken straight from the
+  matching `@radix-ui/*` package doesn't connect to them, and throws "must be
+  used within …" after you re-vendor.
 - `toast`: `import { toast } from "sonner"` — runtime-shimmed to the host's
   Toaster (`toast.success("Saved")` just works; never mount your own
   `<Toaster>`).

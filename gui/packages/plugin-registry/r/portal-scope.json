@@ -7,7 +7,7 @@
   "files": [
     {
       "path": "registry/lib/portal-scope.ts",
-      "content": "declare const __BB_PLUGIN_ID__: string | undefined;\n\nexport function usePortalScopeProps(): {\n  \"data-bb-portaled-overlay\": \"\";\n  \"data-bb-plugin-root\"?: \"\";\n  \"data-bb-plugin\"?: string;\n} {\n  const pluginId =\n    typeof __BB_PLUGIN_ID__ === \"string\" ? __BB_PLUGIN_ID__ : undefined;\n  return {\n    \"data-bb-portaled-overlay\": \"\",\n    \"data-bb-plugin-root\": \"\",\n    ...(pluginId !== undefined ? { \"data-bb-plugin\": pluginId } : {}),\n  };\n}\n",
+      "content": "declare const __BB_PLUGIN_ID__: string | undefined;\n\nexport function usePortalScopeProps(): {\n  \"data-room-portaled-overlay\": \"\";\n  \"data-room-plugin-root\"?: \"\";\n  \"data-room-plugin\"?: string;\n  \"data-bb-plugin-root\"?: \"\";\n  \"data-bb-plugin\"?: string;\n} {\n  const pluginId =\n    typeof __BB_PLUGIN_ID__ === \"string\" ? __BB_PLUGIN_ID__ : undefined;\n  return {\n    \"data-room-portaled-overlay\": \"\",\n    \"data-room-plugin-root\": \"\",\n    ...(pluginId !== undefined ? { \"data-room-plugin\": pluginId } : {}),\n    // Compat: third-party BB plugins scope their CSS to [data-bb-plugin*].\n    \"data-bb-plugin-root\": \"\",\n    ...(pluginId !== undefined ? { \"data-bb-plugin\": pluginId } : {}),\n  };\n}\n",
       "type": "registry:lib",
       "target": "lib/portal-scope.ts"
     }

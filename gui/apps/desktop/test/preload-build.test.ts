@@ -77,14 +77,14 @@ function renderSmokePage(expectedDesktopVersion: string): string {
   let ok = false;
   let reason = "";
   try {
-    if (typeof window.bbDesktop !== "object" || window.bbDesktop === null) {
-      reason = "missing window.bbDesktop";
-    } else if (typeof window.bbDesktop.getInfo !== "function") {
-      reason = "missing window.bbDesktop.getInfo";
+    if (typeof window.roomDesktop !== "object" || window.roomDesktop === null) {
+      reason = "missing window.roomDesktop";
+    } else if (typeof window.roomDesktop.getInfo !== "function") {
+      reason = "missing window.roomDesktop.getInfo";
     } else {
-      const info = await window.bbDesktop.getInfo();
+      const info = await window.roomDesktop.getInfo();
       const expectedVersion = ${JSON.stringify(expectedDesktopVersion)};
-      ok = window.bbDesktop.version === expectedVersion && info.version === expectedVersion;
+      ok = window.roomDesktop.version === expectedVersion && info.version === expectedVersion;
       reason = ok ? "" : "unexpected desktop version";
     }
   } catch (error) {

@@ -28,15 +28,38 @@ import {
 
 type VoiceInputState = "idle" | "recording" | "transcribing" | "error";
 
+/**
+ * Puts one recording's text where it belongs. `submit`: the user tapped send.
+ * `shown`: this composer still shows the recording, so the text can go in at the cursor.
+ */
+type TranscriptDelivery = (
+  transcript: string,
+  how: { submit: boolean; shown: boolean },
+) => void;
+
 interface UseVoiceInputOptions {
-  onTranscript: (transcript: string) => void;
+  /**
+   * Read when the user stops recording (or at start, if the composer lets go first)
+   * and kept for that recording, so its text lands where it was recorded even after
+   * the composer unmounts or switches threads.
+   */
+  onTranscript: TranscriptDelivery;
   onTranscribe: (args: {
     file: File;
     promptContext?: string;
     signal?: AbortSignal;
     clientId?: string;
+    isShown?: () => boolean;
   }) => Promise<string>;
   getPromptContext?: () => string | undefined;
+}
+
+/** The recording this composer is capturing right now. */
+interface ActiveRecording {
+  recorder: MediaRecorder;
+  deliver: TranscriptDelivery;
+  transcribe: boolean;
+  submit: boolean;
 }
 
 const MIN_RECORDING_DURATION_MS = 1_000;
@@ -46,6 +69,8 @@ const RECORDING_BITS_PER_SECOND = 24_000;
 const HTML_DOCUMENT_PATTERN = /<!doctype html|<html[\s>]/i;
 
 const offeredRecordingIds = new Set<number>();
+// Recordings with a live Retry. Retry sends to their own thread, so a new composer must not re-offer them.
+const retryRecordingIds = new Set<number>();
 const recordingToastId = (id: number) => `voice-recording-backup-${id}`;
 
 function normalizeTranscript(rawText: string): string {
@@ -119,16 +144,17 @@ function resolvePreferredAudioMimeType(): string | null {
 
 export function useVoiceInput(options: UseVoiceInputOptions) {
   const preferredAudioInputDeviceId = useAudioInputDevicePreferenceValue();
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const transcribingIdRef = useRef<number | null>(null);
-  const transcribingFileRef = useRef<File | null>(null);
-  const startedAtMsRef = useRef<number | null>(null);
-  const promptContextRef = useRef<string | undefined>(undefined);
-  const shouldTranscribeRef = useRef(true);
-  const transcriptionAbortRef = useRef<AbortController | null>(null);
-  const mountedRef = useRef(true);
+  const recordingRef = useRef<ActiveRecording | null>(null);
+  const transcriptionRef = useRef<{
+    id: number;
+    file: File;
+    abort: AbortController;
+  } | null>(null);
+  // The recording whose progress this composer shows. Detaching clears it; the recording itself keeps going.
+  const shownIdRef = useRef<number | null>(null);
+  // Counts hand-offs, so a mic that finishes opening after the composer let go is closed again.
+  const detachCountRef = useRef(0);
   const wakeLockSentinelRef = useRef<WakeLockSentinel | null>(null);
   const wakeLockRequestRef = useRef<Promise<void> | null>(null);
   const shouldHoldWakeLockRef = useRef(false);
@@ -142,27 +168,34 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
   const showError = useCallback(
     (
       message: string,
-      retry?: { recordingId: number; file: File; run: () => void },
+      recordingId?: number,
+      retry?: { file: File; run: () => void },
     ) => {
-      setState("error");
+      // A recording that finishes in the background must not flag the composer the user moved to.
+      if (recordingId === undefined || shownIdRef.current === recordingId) {
+        setState("error");
+      }
       appToast.error("Voice input failed", {
         description: message,
-        ...(retry
+        ...(retry && recordingId !== undefined
           ? {
-              id: recordingToastId(retry.recordingId),
+              id: recordingToastId(recordingId),
               action: { label: "Retry", onClick: retry.run },
               extraActions: [
                 {
                   label: "Download",
                   onClick: (event) => {
                     event.preventDefault();
-                    downloadVoiceRecording(retry.file, retry.recordingId);
+                    downloadVoiceRecording(retry.file, recordingId);
                   },
                 },
               ],
               cancel: {
                 label: "Discard",
-                onClick: () => void deleteVoiceRecording(retry.recordingId),
+                onClick: () => {
+                  retryRecordingIds.delete(recordingId);
+                  void deleteVoiceRecording(recordingId);
+                },
               },
               duration: Infinity,
             }
@@ -176,19 +209,29 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     async function transcribeRecording(
       recordingId: number,
       file: File,
+      deliver: (transcript: string, shown: boolean) => void,
       promptContext?: string,
     ): Promise<void> {
-      setState("transcribing");
-      transcribingIdRef.current = recordingId;
-      transcribingFileRef.current = file;
+      const isShown = () => shownIdRef.current === recordingId;
+      const settle = (next: VoiceInputState) => {
+        if (isShown()) setState(next);
+      };
       const abortController = new AbortController();
-      transcriptionAbortRef.current = abortController;
+      if (isShown()) {
+        transcriptionRef.current = {
+          id: recordingId,
+          file,
+          abort: abortController,
+        };
+      }
+      settle("transcribing");
       try {
         const transcript = await retryTransient(() =>
           options.onTranscribe({
             file,
             promptContext,
             signal: abortController.signal,
+            isShown,
             ...(recordingId > 0 ? { clientId: String(recordingId) } : {}),
           }),
         );
@@ -196,40 +239,39 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         if (normalized.length === 0) {
           throw new Error("Voice transcription returned an empty result.");
         }
-        if (!mountedRef.current) {
-          offeredRecordingIds.delete(recordingId);
-          return;
-        }
-        options.onTranscript(normalized);
+        deliver(normalized, isShown());
+        retryRecordingIds.delete(recordingId);
         void deleteVoiceRecording(recordingId);
-        setState("idle");
+        settle("idle");
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") {
-          setState("idle");
+          settle("idle");
           return;
         }
         offeredRecordingIds.add(recordingId);
-        showError(resolveRecordingErrorMessage(error), {
-          recordingId,
+        retryRecordingIds.add(recordingId);
+        // Retry shows progress only if this composer still shows the recording.
+        showError(resolveRecordingErrorMessage(error), recordingId, {
           file,
-          run: () => void transcribeRecording(recordingId, file, promptContext),
+          run: () =>
+            void transcribeRecording(recordingId, file, deliver, promptContext),
         });
       } finally {
         releaseVoiceRecording(recordingId);
-        if (transcriptionAbortRef.current === abortController) {
-          transcriptionAbortRef.current = null;
-          transcribingIdRef.current = null;
-          transcribingFileRef.current = null;
+        if (transcriptionRef.current?.abort === abortController) {
+          transcriptionRef.current = null;
         }
       }
     },
     [options, showError],
   );
   const transcribeRef = useLatestRef(transcribe);
+  const onTranscriptRef = useLatestRef(options.onTranscript);
 
   const showUnsentRecordingToast = useCallback(
     (id: number, file: File) => {
       offeredRecordingIds.add(id);
+      retryRecordingIds.delete(id);
       appToast.warning("Unsent voice recording", {
         id: recordingToastId(id),
         description:
@@ -239,7 +281,15 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         duration: Infinity,
         action: {
           label: "Transcribe",
-          onClick: () => void transcribeRef.current(id, file),
+          onClick: () => {
+            // Show progress here only if this composer is free; otherwise transcribe in the background.
+            if (!recordingRef.current && !transcriptionRef.current) {
+              shownIdRef.current = id;
+            }
+            void transcribeRef.current(id, file, (text, shown) =>
+              onTranscriptRef.current(text, { submit: false, shown }),
+            );
+          },
         },
         extraActions: [
           {
@@ -256,12 +306,13 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         },
       });
     },
-    [transcribeRef],
+    [onTranscriptRef, transcribeRef],
   );
 
   useEffect(() => {
     void loadVoiceRecordings().then((saved) => {
       for (const { id, file } of saved) {
+        if (retryRecordingIds.has(id)) continue;
         const toastId = recordingToastId(id);
         if (offeredRecordingIds.has(id) && !appToast.isOpen(toastId)) continue;
         showUnsentRecordingToast(id, file);
@@ -269,10 +320,9 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     });
   }, [showUnsentRecordingToast]);
 
-  const stopMediaStream = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream) return;
-    stream.getTracks().forEach((track) => track.stop());
+  const stopMediaStream = useCallback((target: MediaStream | null) => {
+    target?.getTracks().forEach((track) => track.stop());
+    if (streamRef.current !== target) return;
     streamRef.current = null;
     setStream(null);
   }, []);
@@ -337,35 +387,33 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     void sentinel.release().catch(() => {});
   }, []);
 
+  /**
+   * Lets go of the current recording without losing it: recording stops,
+   * transcription keeps going, and the text still goes where it started.
+   * Only the user's Cancel throws a recording away.
+   */
+  const detach = useCallback(() => {
+    detachCountRef.current += 1;
+    shownIdRef.current = null;
+    transcriptionRef.current = null;
+    const recording = recordingRef.current;
+    recordingRef.current = null;
+    if (recording?.recorder.state === "recording") {
+      try {
+        recording.recorder.stop();
+      } catch {}
+    }
+    releaseRecordingWakeLock();
+    setState("idle");
+  }, [releaseRecordingWakeLock]);
+
   useEffect(() => {
     const support = resolveVoiceSupport(readVoiceSupportEnvironment());
     setIsSupported(support.isSupported);
     setUnsupportedReason(support.reason);
   }, []);
 
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      const recorder = mediaRecorderRef.current;
-      if (recorder && recorder.state === "recording") {
-        try {
-          recorder.stop();
-        } catch {}
-      }
-      mediaRecorderRef.current = null;
-      chunksRef.current = [];
-      startedAtMsRef.current = null;
-      promptContextRef.current = undefined;
-      shouldTranscribeRef.current = true;
-      releaseRecordingWakeLock();
-      if (transcriptionAbortRef.current) {
-        transcriptionAbortRef.current.abort();
-        transcriptionAbortRef.current = null;
-      }
-      stopMediaStream();
-    };
-  }, [releaseRecordingWakeLock, stopMediaStream]);
+  useEffect(() => detach, [detach]);
 
   useEffect(() => {
     return subscribeToDocumentVisibility(() => {
@@ -384,17 +432,21 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
       return;
     }
 
+    const promptContext = options.getPromptContext?.();
+    const detachCount = detachCountRef.current;
+    let mediaStream: MediaStream | null = null;
     let recordingId: number | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(
+      mediaStream = await navigator.mediaDevices.getUserMedia(
         buildAudioInputConstraints(preferredAudioInputDeviceId),
       );
+      const stream = mediaStream;
+      if (detachCountRef.current !== detachCount) {
+        stopMediaStream(stream);
+        return;
+      }
       streamRef.current = stream;
       setStream(stream);
-      chunksRef.current = [];
-      startedAtMsRef.current = Date.now();
-      promptContextRef.current = options.getPromptContext?.();
-      shouldTranscribeRef.current = true;
       shouldHoldWakeLockRef.current = true;
       requestRecordingWakeLock();
 
@@ -403,87 +455,79 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
         audioBitsPerSecond: RECORDING_BITS_PER_SECOND,
         ...(preferredMimeType ? { mimeType: preferredMimeType } : {}),
       });
-      mediaRecorderRef.current = recorder;
       const id = startVoiceRecording();
       recordingId = id;
+      const recording: ActiveRecording = {
+        recorder,
+        deliver: options.onTranscript,
+        transcribe: true,
+        submit: false,
+      };
+      recordingRef.current = recording;
+      shownIdRef.current = id;
+      const chunks: Blob[] = [];
+      const startedAtMs = Date.now();
       let chunkSeq = 0;
 
       recorder.onstart = () => {
-        setState("recording");
+        if (shownIdRef.current === id) setState("recording");
       };
 
       recorder.ondataavailable = (event: BlobEvent) => {
         if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
+          chunks.push(event.data);
           void saveVoiceChunk(id, chunkSeq++, event.data);
         }
       };
 
       recorder.onerror = () => {
-        showError("Voice recording failed");
+        showError("Voice recording failed", id);
       };
 
       recorder.onstop = async () => {
-        releaseRecordingWakeLock();
-        stopMediaStream();
-        if (!mountedRef.current) {
-          releaseVoiceRecording(id);
-          return;
-        }
+        if (shownIdRef.current === id) releaseRecordingWakeLock();
+        stopMediaStream(stream);
+        if (recordingRef.current === recording) recordingRef.current = null;
         const discardRecording = () => {
           void deleteVoiceRecording(id);
           releaseVoiceRecording(id);
         };
 
-        if (!shouldTranscribeRef.current) {
+        if (!recording.transcribe) {
           discardRecording();
-          shouldTranscribeRef.current = true;
-          chunksRef.current = [];
-          promptContextRef.current = undefined;
-          setState("idle");
+          if (shownIdRef.current === id) setState("idle");
           return;
         }
-
-        const startedAtMs = startedAtMsRef.current ?? Date.now();
-        startedAtMsRef.current = null;
-        const durationMs = Date.now() - startedAtMs;
-
-        if (durationMs < MIN_RECORDING_DURATION_MS) {
-          showError("Recording too short (minimum 1 second)");
+        if (Date.now() - startedAtMs < MIN_RECORDING_DURATION_MS) {
+          showError("Recording too short (minimum 1 second)", id);
           discardRecording();
-          chunksRef.current = [];
-          promptContextRef.current = undefined;
           return;
         }
-
-        const chunks = chunksRef.current;
-        chunksRef.current = [];
         if (chunks.length === 0) {
-          showError("No audio was captured");
+          showError("No audio was captured", id);
           discardRecording();
-          promptContextRef.current = undefined;
           return;
         }
 
         const recordedMimeType =
           recorder.mimeType || preferredMimeType || "audio/webm";
         const audioFile = createRecordingFile(chunks, recordedMimeType);
-        const promptContext = promptContextRef.current;
-        promptContextRef.current = undefined;
-
-        await transcribe(id, audioFile, promptContext);
+        const submit = recording.submit;
+        await transcribe(
+          id,
+          audioFile,
+          (text, shown) => recording.deliver(text, { submit, shown }),
+          promptContext,
+        );
       };
 
       recorder.start(CHUNK_TIMESLICE_MS);
     } catch (error) {
+      if (detachCountRef.current !== detachCount) return;
       if (recordingId !== null) releaseVoiceRecording(recordingId);
-      stopMediaStream();
-      mediaRecorderRef.current = null;
-      chunksRef.current = [];
-      startedAtMsRef.current = null;
-      promptContextRef.current = undefined;
-      shouldTranscribeRef.current = true;
-      transcriptionAbortRef.current = null;
+      stopMediaStream(mediaStream);
+      recordingRef.current = null;
+      shownIdRef.current = null;
       releaseRecordingWakeLock();
       showError(
         resolveRecordingErrorMessage(
@@ -505,30 +549,32 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     transcribe,
   ]);
 
-  const stop = useCallback(() => {
-    if (state !== "recording") {
-      return;
-    }
-
-    const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== "recording") {
-      return;
-    }
-    shouldTranscribeRef.current = true;
-    try {
-      recorder.stop();
-    } catch (error) {
-      showError(resolveRecordingErrorMessage(error));
-    }
-  }, [showError, state]);
+  /** Stops recording and transcribes. `submit` sends the message once the text lands. */
+  const stop = useCallback(
+    (submit = false) => {
+      const recording = recordingRef.current;
+      if (state !== "recording" || recording?.recorder.state !== "recording") {
+        return;
+      }
+      recording.submit = submit;
+      // This render's settings: the thread may have finished loading since recording started.
+      recording.deliver = onTranscriptRef.current;
+      try {
+        recording.recorder.stop();
+      } catch (error) {
+        showError(resolveRecordingErrorMessage(error));
+      }
+    },
+    [onTranscriptRef, showError, state],
+  );
 
   const cancel = useCallback(() => {
     if (state === "recording") {
-      const recorder = mediaRecorderRef.current;
-      if (recorder && recorder.state === "recording") {
-        shouldTranscribeRef.current = false;
+      const recording = recordingRef.current;
+      if (recording?.recorder.state === "recording") {
+        recording.transcribe = false;
         try {
-          recorder.stop();
+          recording.recorder.stop();
         } catch (error) {
           showError(resolveRecordingErrorMessage(error));
         }
@@ -537,18 +583,13 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     }
 
     if (state === "transcribing") {
-      const id = transcribingIdRef.current;
-      const file = transcribingFileRef.current;
-      const abortController = transcriptionAbortRef.current;
-      if (abortController) {
-        abortController.abort();
-        transcriptionAbortRef.current = null;
-      }
-      transcribingIdRef.current = null;
-      transcribingFileRef.current = null;
+      const transcription = transcriptionRef.current;
+      transcription?.abort.abort();
+      transcriptionRef.current = null;
+      shownIdRef.current = null;
       setState("idle");
-      if (id !== null && file !== null) {
-        showUnsentRecordingToast(id, file);
+      if (transcription) {
+        showUnsentRecordingToast(transcription.id, transcription.file);
       }
     }
   }, [showError, showUnsentRecordingToast, state]);
@@ -564,5 +605,6 @@ export function useVoiceInput(options: UseVoiceInputOptions) {
     start,
     stop,
     cancel,
+    detach,
   };
 }

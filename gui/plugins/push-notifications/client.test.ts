@@ -44,7 +44,7 @@ describe("client system notifications", () => {
   ])(
     "uses the appropriate notification icon on $platform",
     async ({ platform, icon }) => {
-      if (platform !== "web") vi.stubGlobal("bbDesktop", { platform });
+      if (platform !== "web") vi.stubGlobal("roomDesktop", { platform });
       const delivery = createClientDelivery(vi.fn());
       await delivery.deliver(
         { ...message, channels: [platform === "web" ? "web" : "desktop"] },
@@ -84,7 +84,7 @@ describe("client system notifications", () => {
     TestNotification.permission = "denied";
     await delivery.deliver(message, true);
     expect(TestNotification.instances).toHaveLength(0);
-    vi.stubGlobal("bbDesktop", {});
+    vi.stubGlobal("roomDesktop", {});
     TestNotification.permission = "granted";
     await delivery.deliver(message, true);
     await delivery.deliver({ ...message, channels: ["desktop"] }, true);
@@ -101,7 +101,7 @@ describe("client system notifications", () => {
     const focusWindow = vi.fn(() => {
       if (fails) throw new Error("bridge gone");
     });
-    vi.stubGlobal("bbDesktop", { platform, focusWindow });
+    vi.stubGlobal("roomDesktop", { platform, focusWindow });
     const navigate = vi.fn();
     const delivery = createClientDelivery(navigate);
     await delivery.deliver({ ...message, channels: ["desktop"] }, true);

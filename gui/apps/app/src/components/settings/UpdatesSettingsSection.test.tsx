@@ -14,7 +14,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Host } from "@cloudroom/domain";
 import { makeHost as makeHostFixture } from "@cloudroom/test-helpers/domain-fixtures";
-import type { BbDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
+import type { RoomDesktopApi, RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import {
   HOST_DAEMON_PROTOCOL_VERSION,
   type ProviderCliKey,
@@ -717,10 +717,10 @@ The canonical release summary.
       screen.getByRole("button", { name: "Open homelab settings" }),
     ).toBeDefined();
     expect(
-      daemonRow?.querySelector('[data-bb-update-role="daemon"]'),
+      daemonRow?.querySelector('[data-room-update-role="daemon"]'),
     ).not.toBeNull();
     expect(
-      document.querySelector('[data-bb-update-role="app"]'),
+      document.querySelector('[data-room-update-role="app"]'),
     ).not.toBeNull();
     expect(daemonRow?.querySelector('[data-icon="Laptop"]')).toBeNull();
     await waitFor(() => {
@@ -1413,7 +1413,7 @@ The canonical release summary.
     const checkForUpdates = vi.fn().mockResolvedValue(desktopInfo);
     const installUpdate = vi.fn().mockResolvedValue(undefined);
     useDesktopUpdateInfoMock.mockReturnValue({
-      desktopApi: { checkForUpdates, installUpdate } as unknown as BbDesktopApi,
+      desktopApi: { checkForUpdates, installUpdate } as unknown as RoomDesktopApi,
       desktopInfo,
       isDesktop: true,
     });
@@ -1452,7 +1452,7 @@ The canonical release summary.
       version: "0.0.5",
     };
     useDesktopUpdateInfoMock.mockReturnValue({
-      desktopApi: {} as BbDesktopApi,
+      desktopApi: {} as RoomDesktopApi,
       desktopInfo,
       isDesktop: true,
     });
@@ -1484,7 +1484,7 @@ The canonical release summary.
     };
     const checkForUpdates = vi.fn().mockResolvedValue(desktopInfo);
     useDesktopUpdateInfoMock.mockReturnValue({
-      desktopApi: { checkForUpdates } as unknown as BbDesktopApi,
+      desktopApi: { checkForUpdates } as unknown as RoomDesktopApi,
       desktopInfo,
       isDesktop: true,
     });

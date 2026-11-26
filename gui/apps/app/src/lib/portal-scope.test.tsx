@@ -51,13 +51,13 @@ describe("usePortalScopeProps", () => {
 
     const content = baseElement.querySelector('[role="dialog"]');
     expect(content).not.toBeNull();
-    expect(content!.getAttribute("data-bb-portaled-overlay")).toBe("");
-    expect(content!.getAttribute("data-bb-plugin-root")).toBe("");
+    expect(content!.getAttribute("data-room-portaled-overlay")).toBe("");
+    expect(content!.getAttribute("data-room-plugin-root")).toBe("");
 
-    const scoped = baseElement.querySelectorAll("[data-bb-plugin-root]");
+    const scoped = baseElement.querySelectorAll("[data-room-plugin-root]");
     expect(scoped.length).toBe(2);
     expect(
-      baseElement.querySelectorAll("[data-bb-portaled-overlay]").length,
+      baseElement.querySelectorAll("[data-room-portaled-overlay]").length,
     ).toBe(2);
   });
 
@@ -66,9 +66,9 @@ describe("usePortalScopeProps", () => {
 
     const content = baseElement.querySelector('[role="dialog"]');
     expect(content).not.toBeNull();
-    expect(content!.hasAttribute("data-bb-plugin-root")).toBe(false);
-    expect(content!.getAttribute("data-bb-portaled-overlay")).toBe("");
-    expect(baseElement.querySelectorAll("[data-bb-plugin-root]").length).toBe(
+    expect(content!.hasAttribute("data-room-plugin-root")).toBe(false);
+    expect(content!.getAttribute("data-room-portaled-overlay")).toBe("");
+    expect(baseElement.querySelectorAll("[data-room-plugin-root]").length).toBe(
       0,
     );
   });
@@ -86,12 +86,12 @@ describe("usePortalScopeProps", () => {
     );
 
     const tip = baseElement.querySelector(
-      '[data-bb-plugin-root][role="tooltip"], [role="tooltip"]',
+      '[data-room-plugin-root][role="tooltip"], [role="tooltip"]',
     );
     expect(tip).not.toBeNull();
-    const scopedTip = baseElement.querySelector("[data-bb-plugin-root]");
+    const scopedTip = baseElement.querySelector("[data-room-plugin-root]");
     expect(scopedTip).not.toBeNull();
-    expect(scopedTip!.getAttribute("data-bb-portaled-overlay")).toBe("");
+    expect(scopedTip!.getAttribute("data-room-portaled-overlay")).toBe("");
   });
 
   it("stamps select content so native drag regions cannot swallow options", () => {
@@ -109,7 +109,7 @@ describe("usePortalScopeProps", () => {
     expect(
       baseElement
         .querySelector('[role="listbox"]')
-        ?.getAttribute("data-bb-portaled-overlay"),
+        ?.getAttribute("data-room-portaled-overlay"),
     ).toBe("");
   });
 
@@ -126,7 +126,7 @@ describe("usePortalScopeProps", () => {
     fireEvent.contextMenu(screen.getByText("Context target"));
 
     const menu = baseElement.querySelector('[role="menu"]');
-    expect(menu?.getAttribute("data-bb-portaled-overlay")).toBe("");
+    expect(menu?.getAttribute("data-room-portaled-overlay")).toBe("");
     expect(menu?.classList.contains("z-[70]")).toBe(true);
   });
 });

@@ -1,7 +1,7 @@
 import { useInsertionEffect } from "react";
 
-const CSS_MARKER = "data-bb-plugin-css";
-const CSS_PRELOAD_MARKER = "data-bb-plugin-css-preload";
+const CSS_MARKER = "data-room-plugin-css";
+const CSS_PRELOAD_MARKER = "data-room-plugin-css-preload";
 const CSS_RELEASE_GRACE_MS = 1_500;
 
 interface PluginCssRecord {

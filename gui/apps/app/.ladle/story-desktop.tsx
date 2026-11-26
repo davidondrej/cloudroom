@@ -1,6 +1,6 @@
 import { useEffect, type ReactNode } from "react";
 import type {
-  BbDesktopApi,
+  RoomDesktopApi,
   RoomDesktopBrowserApi,
   RoomDesktopBrowserState,
   RoomDesktopInfo,
@@ -48,7 +48,7 @@ function createStoryDesktopBrowserApi(
 
 function createStoryDesktopApi(
   browserState: RoomDesktopBrowserState | null,
-): BbDesktopApi {
+): RoomDesktopApi {
   return {
     ...STORY_DESKTOP_INFO,
     browser: createStoryDesktopBrowserApi(browserState),
@@ -76,13 +76,13 @@ export function WithDesktopBrowser({
   browserState = null,
   children,
 }: WithDesktopBrowserProps) {
-  if (typeof window !== "undefined" && window.bbDesktop === undefined) {
-    window.bbDesktop = createStoryDesktopApi(browserState);
+  if (typeof window !== "undefined" && window.roomDesktop === undefined) {
+    window.roomDesktop = createStoryDesktopApi(browserState);
   }
   useEffect(() => {
     return () => {
       if (typeof window !== "undefined") {
-        delete window.bbDesktop;
+        delete window.roomDesktop;
       }
     };
   }, []);

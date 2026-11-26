@@ -646,6 +646,7 @@ impl Manager {
                     &self.config,
                     profile,
                     &written,
+                    &path,
                     &transfer.workspace.path,
                     &self.storage,
                 )

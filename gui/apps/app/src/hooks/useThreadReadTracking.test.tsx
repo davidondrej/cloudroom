@@ -302,7 +302,7 @@ describe("useThreadReadTracking", () => {
     const unread = { id: "thr_win", lastReadAt: 10, latestAttentionAt: 20 };
     let setNativeFocus: (state: { isFocused?: boolean }) => void = () => {};
     const desktop = (platform: string) => {
-      (window as { bbDesktop?: unknown }).bbDesktop = {
+      (window as { roomDesktop?: unknown }).roomDesktop = {
         platform,
         getWindowState: () => new Promise(() => {}),
         onWindowStateChange: (listener: typeof setNativeFocus) => {
@@ -312,7 +312,7 @@ describe("useThreadReadTracking", () => {
       };
     };
     afterEach(() => {
-      delete (window as { bbDesktop?: unknown }).bbDesktop;
+      delete (window as { roomDesktop?: unknown }).roomDesktop;
       vi.restoreAllMocks();
     });
 

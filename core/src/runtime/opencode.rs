@@ -58,30 +58,124 @@ fn base(config: &Config, profile: &HarnessConfig) -> io::Result<Command> {
 }
 
 /// Teleport: OpenCode resumes only sessions in its own database, so the exported session is imported
-/// from the cloud folder, which also rebinds it to that folder. Re-importing adds only new messages.
+/// from the cloud folder, which also rebinds it to that folder. OpenCode 1 re-imports add only new messages.
+/// `staged` is Core's own verified copy of `export`, which sits where the agent can write.
 pub async fn import(
     config: &Config,
     profile: &HarnessConfig,
     export: &str,
+    staged: &Path,
     cwd: &Path,
     storage: &crate::workspace::storage::Guard,
 ) -> io::Result<String> {
+    // OpenCode 2 moved import under `session` (#2686); `--standalone` runs it on a private server that exits with it,
+    // not on a background service left running. An unreadable version runs OpenCode 1's.
+    let version = run(config, profile, cwd, storage, vec!["--version"])
+        .await
+        .unwrap_or_default()
+        .0;
+    let session = |action| match major(&String::from_utf8_lossy(&version)) {
+        Some(2..) => vec!["session", action, "--standalone"],
+        _ => vec![action],
+    };
+    let (_, stderr) = run(
+        config,
+        profile,
+        cwd,
+        storage,
+        [session("import"), vec![export]].concat(),
+    )
+    .await?;
+    // OpenCode 2 keeps a session it already has instead of adding its new messages. Only a copy with the same
+    // messages, as a retried move leaves, counts as imported; resuming an older one would lose turns. Any doubt refuses.
+    if String::from_utf8_lossy(&stderr).contains("Session already exists") {
+        let same = async {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            std::fs::File::open(staged)?
+                .take(OUTPUT_LIMIT + 1)
+                .read_to_end(&mut bytes)?;
+            let incoming: Value = serde_json::from_slice(&bytes)?;
+            let id = incoming["info"]["id"].as_str().filter(|id| valid_id(id));
+            let id = id.ok_or_else(|| invalid("OpenCode export has no valid session ID".into()))?;
+            let local: Value = serde_json::from_slice(
+                &run(
+                    config,
+                    profile,
+                    cwd,
+                    storage,
+                    [session("export"), vec![id]].concat(),
+                )
+                .await?
+                .0,
+            )?;
+            Ok::<_, io::Error>(
+                local["messages"].is_array() && local["messages"] == incoming["messages"],
+            )
+        };
+        if !same.await.unwrap_or(false) {
+            return Err(io::Error::other(
+                "OpenCode already has an older copy of this session",
+            ));
+        }
+    }
+    Ok(profile.home.join(DATABASE).to_string_lossy().into_owned())
+}
+
+/// Bytes read from an OpenCode command's output or a staged export.
+const OUTPUT_LIMIT: u64 = 64 << 20;
+
+/// Runs OpenCode through the storage guard, as every agent command, and returns its stdout and stderr, each up to
+/// `OUTPUT_LIMIT`. A non-zero exit or longer output fails.
+async fn run(
+    config: &Config,
+    profile: &HarnessConfig,
+    cwd: &Path,
+    storage: &crate::workspace::storage::Guard,
+    args: Vec<&str>,
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
+    use tokio::io::AsyncReadExt;
     let mut command = base(config, profile)?;
     command
         .current_dir(cwd)
         .stdin(std::process::Stdio::null())
-        .args(["import", export]);
-    let (child, _workload) = storage.spawn_writer(&mut command)?;
-    let output = tokio::time::timeout(std::time::Duration::from_secs(60), child.wait_with_output())
-        .await
-        .map_err(|_| io::Error::other("OpenCode session import timed out"))??;
-    if !output.status.success() {
+        .args(args);
+    let (mut child, _workload) = storage.spawn_writer(&mut command)?;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    let status = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        if let (Some(stdout), Some(stderr)) = (stdout, stderr) {
+            // Each pipe closes as soon as its read ends, so output past the cap can't block OpenCode until the timeout.
+            async fn read(
+                pipe: impl tokio::io::AsyncRead + Unpin,
+                buf: &mut Vec<u8>,
+            ) -> io::Result<usize> {
+                pipe.take(OUTPUT_LIMIT + 1).read_to_end(buf).await
+            }
+            tokio::try_join!(read(stdout, &mut out), read(stderr, &mut err))?;
+        }
+        child.wait().await
+    })
+    .await
+    .map_err(|_| io::Error::other("OpenCode session import timed out"))??;
+    if !status.success() || out.len() as u64 > OUTPUT_LIMIT || err.len() as u64 > OUTPUT_LIMIT {
         return Err(io::Error::other(format!(
             "OpenCode session import failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&err[..err.len().min(4096)]).trim()
         )));
     }
-    Ok(profile.home.join(DATABASE).to_string_lossy().into_owned())
+    Ok((out, err))
+}
+
+/// The major version in `opencode --version` output: "1.19.6" or "opencode v2.3.0".
+fn major(version: &str) -> Option<u32> {
+    version
+        .split(|c: char| !c.is_ascii_digit() && c != '.')
+        .find(|token| token.contains('.'))?
+        .split('.')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Lists configured OpenCode models without creating a session in OpenCode's database.
@@ -253,4 +347,12 @@ pub(super) fn validate(
 fn valid_id(id: &str) -> bool {
     id.strip_prefix("ses_")
         .is_some_and(|rest| rest.len() == 26 && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+#[cfg(test)]
+#[test]
+fn reads_the_major_version_opencode_prints() {
+    assert_eq!(major("opencode v2.3.0\n"), Some(2));
+    assert_eq!(major("1.19.6\n"), Some(1));
+    assert_eq!(major(""), None);
 }

@@ -12,7 +12,7 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
 const PATH = "/api/v1/cloudroom/star-prompt";
 type Prompt = { eligible: boolean; card: boolean; done: boolean; login: string | null; url: string; days: number; stars: number | null };
-const cardAtom = atom<{ url: string; stars: number | null } | null>(null);
+const cardAtom = atom<{ url: string; stars: number | null; login: string | null } | null>(null);
 const cardClaim = { pending: false, handledAt: 0 };
 
 function useStarPrompt(surface: "popup" | "card") {
@@ -92,10 +92,10 @@ export function StarCard({ active, attached }: { active: boolean; attached: bool
   useEffect(() => { if (card && data?.done) setCard(null); }, [card, data?.done, setCard]);
   useEffect(() => {
     if (!first || !data?.card || card || cardClaim.pending || dataUpdatedAt <= cardClaim.handledAt) return;
-    const { url, stars } = data;
+    const { url, stars, login } = data;
     cardClaim.pending = true;
     cardClaim.handledAt = Date.now();
-    void claim("star_card").then((claimed) => { if (claimed) setCard({ url, stars }); }).finally(() => { cardClaim.pending = false; });
+    void claim("star_card").then((claimed) => { if (claimed) setCard({ url, stars, login }); }).finally(() => { cardClaim.pending = false; });
     // oxlint-disable-next-line react-hooks/exhaustive-deps -- `claim` is new on every render
   }, [first, card, data, dataUpdatedAt, setCard]);
   if (!card || !first) return null;
@@ -106,10 +106,12 @@ export function StarCard({ active, attached }: { active: boolean; attached: bool
         <Icon name="GithubLogo" className="size-4 shrink-0 text-foreground" aria-hidden="true" />
         <span className="min-w-0 flex-1 truncate text-foreground">
           {count ? <><span className="font-semibold">{count} developers</span> starred Cloudroom on GitHub. </> : "Cloudroom is open source on GitHub. "}
-          <span className="text-muted-foreground">{count ? "Join them?" : "A star helps more people find it."}</span>
+          <span className="text-muted-foreground">
+            {card.login ? `Stars as @${card.login}.` : count ? "Join them?" : "A star helps more people find it."}
+          </span>
         </span>
         <span className="flex shrink-0 overflow-hidden rounded-md border border-border text-[12px] font-medium">
-          <button type="button" disabled={star.isPending} onClick={() => star.mutate(card.url)}
+          <button type="button" disabled={star.isPending} title={card.login ? `Stars as @${card.login}` : undefined} onClick={() => star.mutate(card.url)}
             className="flex cursor-pointer items-center gap-1.5 bg-surface-raised-solid px-2.5 py-1 text-foreground transition-colors hover:bg-state-hover disabled:opacity-50">
             <StarIcon className="size-3.5 text-muted-foreground" />Star
           </button>

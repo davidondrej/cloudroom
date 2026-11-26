@@ -70,10 +70,10 @@ function getTargetRoots(container: HTMLElement): ParentNode[] {
 function clearTargetLine(container: HTMLElement) {
   for (const root of getTargetRoots(container)) {
     const targetLines = root.querySelectorAll(
-      "[data-bb-source-code-target-line]",
+      "[data-room-source-code-target-line]",
     );
     for (const targetLine of targetLines) {
-      targetLine.removeAttribute("data-bb-source-code-target-line");
+      targetLine.removeAttribute("data-room-source-code-target-line");
       targetLine.removeAttribute("data-selected-line");
     }
   }
@@ -104,7 +104,7 @@ function findTargetLine(
 }
 
 function findVirtualizedViewport(container: HTMLElement): HTMLElement | null {
-  return container.querySelector<HTMLElement>("[data-bb-source-code-viewport]");
+  return container.querySelector<HTMLElement>("[data-room-source-code-viewport]");
 }
 
 function approachVirtualizedTargetLine(
@@ -425,7 +425,7 @@ function RoomSourceCode({
 
       const line = findTargetLine(container, targetLineNumber);
       if (line) {
-        line.setAttribute("data-bb-source-code-target-line", "");
+        line.setAttribute("data-room-source-code-target-line", "");
         line.setAttribute("data-selected-line", "single");
         scrollTargetLine(container, line);
         return;
@@ -464,7 +464,7 @@ function RoomSourceCode({
       ref={containerRef}
       className={cn("flex min-h-0 flex-1 flex-col", className)}
       style={SOURCE_VIEW_STYLE}
-      data-bb-source-code-line-number={targetLineNumber ?? undefined}
+      data-room-source-code-line-number={targetLineNumber ?? undefined}
       onPointerDownCapture={lineSelectionActions.onPointerDownCapture}
       onPointerMoveCapture={lineSelectionActions.onPointerMoveCapture}
       onPointerUpCapture={lineSelectionActions.onPointerUpCapture}
@@ -513,7 +513,7 @@ function SourceCodeViewport({ children }: { children: ReactNode }) {
       <div
         ref={viewportRef}
         className="min-h-0 flex-1 overflow-y-auto"
-        data-bb-source-code-viewport
+        data-room-source-code-viewport
       >
         <div>{children}</div>
       </div>

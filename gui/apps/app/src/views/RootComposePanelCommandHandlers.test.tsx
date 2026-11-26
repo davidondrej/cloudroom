@@ -72,7 +72,7 @@ function dispatchControlShortcut(key: string): KeyboardEvent {
 
 afterEach(() => {
   cleanup();
-  delete window.bbDesktop;
+  delete window.roomDesktop;
 });
 
 describe("RootComposePanelCommandHandlers", () => {
@@ -82,7 +82,7 @@ describe("RootComposePanelCommandHandlers", () => {
     const secondToggle = vi.fn();
     const secondClose = vi.fn(() => true);
     const desktopCloseHandlers = new Set<RoomDesktopCloseWindowRequestHandler>();
-    window.bbDesktop = {
+    window.roomDesktop = {
       ...createRoomDesktopApi(desktopInfo),
       onCloseWindowRequest(listener) {
         desktopCloseHandlers.add(listener);

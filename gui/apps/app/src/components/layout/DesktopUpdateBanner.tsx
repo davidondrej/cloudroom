@@ -26,7 +26,7 @@ const BEHIND_SINCE_KEY = "cloudroom.update-card.behind-since";
 const LATER_UNTIL_KEY = "cloudroom.update-card.later-until";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-const HEIGHT_VAR = "--bb-update-banner-height";
+const HEIGHT_VAR = "--room-update-banner-height";
 const GIT_FOR_WINDOWS_URL = "https://git-scm.com/downloads/win";
 
 // Window-pinned controls (e.g. the home right-panel toggle) read this to sit below the banners.

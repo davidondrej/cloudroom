@@ -38,4 +38,4 @@ const logViewerApi: LogViewerApi = {
   },
 };
 
-contextBridge.exposeInMainWorld("bbLogViewer", logViewerApi);
+contextBridge.exposeInMainWorld("roomLogViewer", logViewerApi);

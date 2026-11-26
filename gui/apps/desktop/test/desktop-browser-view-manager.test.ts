@@ -1889,7 +1889,7 @@ describe("DesktopBrowserViewManager", () => {
       personal.options.webPreferences.partition,
     );
     expect(automated.options.webPreferences.partition).toMatch(
-      /^persist:bb-browser-automation-[0-9a-f]{16}$/,
+      /^persist:room-browser-auto-[0-9a-f]{16}$/,
     );
     expect(requireFakeView(2).options.webPreferences.partition).toBe(
       automated.options.webPreferences.partition,
@@ -1966,7 +1966,10 @@ describe("DesktopBrowserViewManager", () => {
       generation: same.generation,
     });
     expect(electronMock.fakeSessions.map((s) => s.clears)).toEqual([0, 2, 0]);
-    const root = await mkdtemp(join(tmpdir(), "bb-partitions-"));
+    const root = await mkdtemp(join(tmpdir(), "room-partitions-"));
+    await mkdir(join(root, "Partitions", "room-browser-auto-old"), {
+      recursive: true,
+    });
     await mkdir(join(root, "Partitions", "bb-browser-automation-old"), {
       recursive: true,
     });
@@ -3241,17 +3244,17 @@ describe("DesktopBrowserViewManager", () => {
     });
     const view = requireFakeView(0);
     expect(hostWindow.webContents.sentChannels).not.toContain(
-      "bb-desktop:browser:focused",
+      "room-desktop:browser:focused",
     );
 
     manager.focus({ hostWindow, tabId: "browser:a" });
     expect(hostWindow.webContents.sentChannels).not.toContain(
-      "bb-desktop:browser:focused",
+      "room-desktop:browser:focused",
     );
 
     view.webContents.emitFocus();
     expect(hostWindow.webContents.sentChannels).toContain(
-      "bb-desktop:browser:focused",
+      "room-desktop:browser:focused",
     );
     expect(hostWindow.webContents.sentPayloads.at(-1)).toEqual({
       tabId: "browser:a",

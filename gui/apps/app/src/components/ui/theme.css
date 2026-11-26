@@ -148,51 +148,51 @@
      * SidebarContent owns scrolling. This stack owns sticky padding, row
      * sizing, gaps, and derived offsets for its descendant sticky tiers.
      */
-    --bb-sidebar-sticky-stack-padding: 0.5rem;
-    --bb-sidebar-sticky-stack-padding-top: var(
-      --bb-sidebar-sticky-stack-padding
+    --room-sidebar-sticky-stack-padding: 0.5rem;
+    --room-sidebar-sticky-stack-padding-top: var(
+      --room-sidebar-sticky-stack-padding
     );
-    --bb-sidebar-sticky-label-height: 1.5rem;
-    --bb-sidebar-sticky-label-gap: 0.25rem;
-    --bb-sidebar-sticky-row-height: var(--bb-sidebar-row-height);
-    --bb-sidebar-sticky-row-gap: 0.25rem;
-    --bb-sidebar-sticky-child-row-gap: 0.125rem;
-    --bb-sidebar-sticky-label-top: var(--bb-sidebar-sticky-stack-padding-top);
-    --bb-sidebar-sticky-project-top: calc(
-      var(--bb-sidebar-sticky-label-top) +
-        var(--bb-sidebar-sticky-label-height) +
-        var(--bb-sidebar-sticky-label-gap)
+    --room-sidebar-sticky-label-height: 1.5rem;
+    --room-sidebar-sticky-label-gap: 0.25rem;
+    --room-sidebar-sticky-row-height: var(--room-sidebar-row-height);
+    --room-sidebar-sticky-row-gap: 0.25rem;
+    --room-sidebar-sticky-child-row-gap: 0.125rem;
+    --room-sidebar-sticky-label-top: var(--room-sidebar-sticky-stack-padding-top);
+    --room-sidebar-sticky-project-top: calc(
+      var(--room-sidebar-sticky-label-top) +
+        var(--room-sidebar-sticky-label-height) +
+        var(--room-sidebar-sticky-label-gap)
     );
     /* The first pinned parent level (a parent thread or worktree
        group header) sits directly below the project row. Deeper levels stack
-       from this base via --bb-sidebar-sticky-parent-level (set inline per row),
+       from this base via --room-sidebar-sticky-parent-level (set inline per row),
        capped in JS so a deep chain can't pin more ancestors than the viewport
        affords. The section variant (no project row) overrides the base below. */
-    --bb-sidebar-sticky-parent-base-top: calc(
-      var(--bb-sidebar-sticky-project-top) +
-        var(--bb-sidebar-sticky-row-height) + var(--bb-sidebar-sticky-row-gap)
+    --room-sidebar-sticky-parent-base-top: calc(
+      var(--room-sidebar-sticky-project-top) +
+        var(--room-sidebar-sticky-row-height) + var(--room-sidebar-sticky-row-gap)
     );
-    --bb-sidebar-sticky-parent-stride: calc(
-      var(--bb-sidebar-sticky-row-height) +
-        var(--bb-sidebar-sticky-child-row-gap)
+    --room-sidebar-sticky-parent-stride: calc(
+      var(--room-sidebar-sticky-row-height) +
+        var(--room-sidebar-sticky-child-row-gap)
     );
-    --bb-sidebar-sticky-parent-base-z: 40;
+    --room-sidebar-sticky-parent-base-z: 40;
 
-    padding: var(--bb-sidebar-sticky-stack-padding-top)
-      var(--bb-sidebar-sticky-stack-padding)
-      var(--bb-sidebar-sticky-stack-padding);
+    padding: var(--room-sidebar-sticky-stack-padding-top)
+      var(--room-sidebar-sticky-stack-padding)
+      var(--room-sidebar-sticky-stack-padding);
   }
 
   [data-sidebar-sticky-stack][data-sidebar-sticky-density="compact-actions"] {
-    --bb-sidebar-sticky-stack-padding-top: 0.5rem;
+    --room-sidebar-sticky-stack-padding-top: 0.5rem;
   }
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier] {
     position: sticky;
-    top: var(--bb-sidebar-sticky-tier-top);
-    height: var(--bb-sidebar-sticky-tier-height);
-    min-height: var(--bb-sidebar-sticky-tier-height);
-    z-index: var(--bb-sidebar-sticky-tier-z-index);
+    top: var(--room-sidebar-sticky-tier-top);
+    height: var(--room-sidebar-sticky-tier-height);
+    min-height: var(--room-sidebar-sticky-tier-height);
+    z-index: var(--room-sidebar-sticky-tier-z-index);
     isolation: isolate;
   }
 
@@ -209,12 +209,12 @@
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier]::before {
     bottom: 100%;
-    height: var(--bb-sidebar-sticky-tier-shield-top-height, 0);
+    height: var(--room-sidebar-sticky-tier-shield-top-height, 0);
   }
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier]::after {
     top: 100%;
-    height: var(--bb-sidebar-sticky-tier-shield-bottom-height, 0);
+    height: var(--room-sidebar-sticky-tier-shield-bottom-height, 0);
   }
 
   /* The shared active-context surface is translucent so it can tint tabs and
@@ -231,12 +231,12 @@
      sidebar up front. Keeping it opaque prevents an unfocused split's sticky
      parent-thread row from revealing descendants that scroll underneath it. */
   .bb-sidebar-open-in-split-row {
-    --bb-sidebar-open-in-split-background: color-mix(
+    --room-sidebar-open-in-split-background: color-mix(
       in oklch,
       var(--sidebar-accent) 50%,
       var(--sidebar)
     );
-    background-color: var(--bb-sidebar-open-in-split-background);
+    background-color: var(--room-sidebar-open-in-split-background);
   }
 
   /* Utility-layer bg-sidebar owns the sticky tier's base background-color, so
@@ -244,8 +244,8 @@
   [data-sidebar-sticky-stack]
     [data-sidebar-sticky-tier].bb-sidebar-open-in-split-row {
     background-image: linear-gradient(
-      var(--bb-sidebar-open-in-split-background),
-      var(--bb-sidebar-open-in-split-background)
+      var(--room-sidebar-open-in-split-background),
+      var(--room-sidebar-open-in-split-background)
     );
   }
 
@@ -262,20 +262,20 @@
 
   /* Ambient sky-blue glow for a thread actively using computer use (David, 2026-11-19, design 1C). */
   .bb-sidebar-computer-use-row {
-    --bb-computer-use-accent: #0284c7;
-    --bb-computer-use-stop-1: 15%;
-    --bb-computer-use-stop-2: 6%;
+    --room-computer-use-accent: #0284c7;
+    --room-computer-use-stop-1: 15%;
+    --room-computer-use-stop-2: 6%;
     background-image: linear-gradient(
       90deg,
       color-mix(
           in oklab,
-          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--room-computer-use-accent) var(--room-computer-use-stop-1),
           var(--sidebar)
         )
         0%,
       color-mix(
           in oklab,
-          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--room-computer-use-accent) var(--room-computer-use-stop-2),
           var(--sidebar)
         )
         52%,
@@ -284,9 +284,9 @@
   }
 
   .dark .bb-sidebar-computer-use-row {
-    --bb-computer-use-accent: #38bdf8;
-    --bb-computer-use-stop-1: 18%;
-    --bb-computer-use-stop-2: 7%;
+    --room-computer-use-accent: #38bdf8;
+    --room-computer-use-stop-1: 18%;
+    --room-computer-use-stop-2: 7%;
   }
 
   .bb-sidebar-computer-use-row:is(:hover, :has([data-state="open"])) {
@@ -294,13 +294,13 @@
       90deg,
       color-mix(
           in oklab,
-          var(--bb-computer-use-accent) var(--bb-computer-use-stop-1),
+          var(--room-computer-use-accent) var(--room-computer-use-stop-1),
           var(--sidebar-accent)
         )
         0%,
       color-mix(
           in oklab,
-          var(--bb-computer-use-accent) var(--bb-computer-use-stop-2),
+          var(--room-computer-use-accent) var(--room-computer-use-stop-2),
           var(--sidebar-accent)
         )
         52%,
@@ -405,25 +405,25 @@
   }
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier="label"] {
-    --bb-sidebar-sticky-tier-top: var(--bb-sidebar-sticky-label-top);
-    --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-label-height);
-    --bb-sidebar-sticky-tier-z-index: 60;
-    --bb-sidebar-sticky-tier-shield-top-height: calc(
-      var(--bb-sidebar-sticky-stack-padding) + 2px
+    --room-sidebar-sticky-tier-top: var(--room-sidebar-sticky-label-top);
+    --room-sidebar-sticky-tier-height: var(--room-sidebar-sticky-label-height);
+    --room-sidebar-sticky-tier-z-index: 60;
+    --room-sidebar-sticky-tier-shield-top-height: calc(
+      var(--room-sidebar-sticky-stack-padding) + 2px
     );
-    --bb-sidebar-sticky-tier-shield-bottom-height: var(
-      --bb-sidebar-sticky-label-gap
+    --room-sidebar-sticky-tier-shield-bottom-height: var(
+      --room-sidebar-sticky-label-gap
     );
 
-    margin-bottom: var(--bb-sidebar-sticky-label-gap);
+    margin-bottom: var(--room-sidebar-sticky-label-gap);
   }
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier="project"] {
-    --bb-sidebar-sticky-tier-top: var(--bb-sidebar-sticky-project-top);
-    --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-row-height);
-    --bb-sidebar-sticky-tier-z-index: 50;
-    --bb-sidebar-sticky-tier-shield-bottom-height: var(
-      --bb-sidebar-sticky-row-gap
+    --room-sidebar-sticky-tier-top: var(--room-sidebar-sticky-project-top);
+    --room-sidebar-sticky-tier-height: var(--room-sidebar-sticky-row-height);
+    --room-sidebar-sticky-tier-z-index: 50;
+    --room-sidebar-sticky-tier-shield-bottom-height: var(
+      --room-sidebar-sticky-row-gap
     );
   }
 
@@ -432,21 +432,21 @@
        chain of nested parents stacks without per-level CSS. The level is set
        inline per row (see SidebarStickyTier); JS caps how many levels get the
        tier at all. */
-    --bb-sidebar-sticky-tier-top: calc(
-      var(--bb-sidebar-sticky-parent-base-top) +
-        var(--bb-sidebar-sticky-parent-level, 0) *
-        var(--bb-sidebar-sticky-parent-stride)
+    --room-sidebar-sticky-tier-top: calc(
+      var(--room-sidebar-sticky-parent-base-top) +
+        var(--room-sidebar-sticky-parent-level, 0) *
+        var(--room-sidebar-sticky-parent-stride)
     );
-    --bb-sidebar-sticky-tier-height: var(--bb-sidebar-sticky-row-height);
+    --room-sidebar-sticky-tier-height: var(--room-sidebar-sticky-row-height);
     /* Shallower ancestors win the overlap, so z-index descends with depth. */
-    --bb-sidebar-sticky-tier-z-index: calc(
-      var(--bb-sidebar-sticky-parent-base-z) -
-        var(--bb-sidebar-sticky-parent-level, 0)
+    --room-sidebar-sticky-tier-z-index: calc(
+      var(--room-sidebar-sticky-parent-base-z) -
+        var(--room-sidebar-sticky-parent-level, 0)
     );
     /* Parent rows and worktree group headers butt against their first child
        with the compact child gap; the wider project row gap would clip it. */
-    --bb-sidebar-sticky-tier-shield-bottom-height: var(
-      --bb-sidebar-sticky-child-row-gap
+    --room-sidebar-sticky-tier-shield-bottom-height: var(
+      --room-sidebar-sticky-child-row-gap
     );
   }
 
@@ -454,7 +454,7 @@
     [data-sidebar-sticky-project-item]
     > :not([hidden])
     ~ :not([hidden]) {
-    margin-top: var(--bb-sidebar-sticky-row-gap);
+    margin-top: var(--room-sidebar-sticky-row-gap);
   }
 
   /* Section-variant trees (Pinned, projectless Threads) have no project tier:
@@ -462,12 +462,12 @@
      first parent pins directly under the section label instead of reserving an
      empty project-row slot. One base override covers every depth. */
   [data-sidebar-sticky-stack] [data-sidebar-sticky-section] {
-    --bb-sidebar-sticky-parent-base-top: var(--bb-sidebar-sticky-project-top);
+    --room-sidebar-sticky-parent-base-top: var(--room-sidebar-sticky-project-top);
   }
 
   @media (max-width: 767px) and (pointer: coarse) {
     [data-sidebar-sticky-stack] {
-      --bb-sidebar-sticky-row-height: var(--bb-sidebar-row-height-coarse);
+      --room-sidebar-sticky-row-height: var(--room-sidebar-row-height-coarse);
     }
   }
 }
@@ -639,8 +639,11 @@
     ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
     "Courier New", monospace;
   --radius: 0.5rem;
-  --bb-sidebar-row-height: 1.75rem;
-  --bb-sidebar-row-height-coarse: 2.5rem;
+  --room-sidebar-row-height: 1.75rem;
+  --room-sidebar-row-height-coarse: 2.5rem;
+  /* Compat: third-party BB plugins read legacy sidebar row height vars. */
+  --bb-sidebar-row-height: var(--room-sidebar-row-height);
+  --bb-sidebar-row-height-coarse: var(--room-sidebar-row-height-coarse);
   --shadow-x: 0px;
   --shadow-y: 2px;
   --shadow-blur: 0px;
@@ -984,6 +987,7 @@
  * menu/select/dialog that crosses split chrome keeps its visible hit target.
  * Closed persistent drawers stay mounted full-screen, so skip closed overlays.
  */
+[data-room-portaled-overlay]:not([data-state="closed"]),
 [data-bb-portaled-overlay]:not([data-state="closed"]) {
   app-region: no-drag;
   -webkit-app-region: no-drag;

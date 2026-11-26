@@ -60,9 +60,9 @@ async function writeHostPackage(root: string, readme: string): Promise<void> {
   await writeFile(join(root, "README.md"), readme);
   for (const fileName of [
     "room-cli",
-    "bb-parcel-watcher-child.mjs",
-    "bb-plugin-host-worker.mjs",
-    "bb-provider-bridge-worker.mjs",
+    "room-parcel-watcher-child.mjs",
+    "room-plugin-host-worker.mjs",
+    "room-provider-bridge-worker.mjs",
     "daemon-bundle.mjs",
   ]) {
     await writeFile(join(root, "host-daemon/dist", fileName), fileName);
@@ -158,9 +158,9 @@ describe("packHostPackage", () => {
       "package/README.md": "644",
       "package/dist/bb-app.js": "755",
       "package/dist/room-cli.js": "755",
-      "package/host-daemon/dist/bb-parcel-watcher-child.mjs": "644",
-      "package/host-daemon/dist/bb-plugin-host-worker.mjs": "644",
-      "package/host-daemon/dist/bb-provider-bridge-worker.mjs": "644",
+      "package/host-daemon/dist/room-parcel-watcher-child.mjs": "644",
+      "package/host-daemon/dist/room-plugin-host-worker.mjs": "644",
+      "package/host-daemon/dist/room-provider-bridge-worker.mjs": "644",
       "package/host-daemon/dist/daemon-bundle.mjs": "644",
       "package/host-daemon/dist/room-cli": "755",
       "package/host-daemon/dist/room-cli-chunks/chunk-TEST.js": "644",
@@ -249,9 +249,9 @@ describe("bb-app artifact service (desktop packaging)", () => {
           "package/dist/room-cli.js",
           "package/host-daemon/dist/room-cli",
           "package/host-daemon/dist/room-cli-chunks/chunk-TEST.js",
-          "package/host-daemon/dist/bb-parcel-watcher-child.mjs",
-          "package/host-daemon/dist/bb-plugin-host-worker.mjs",
-          "package/host-daemon/dist/bb-provider-bridge-worker.mjs",
+          "package/host-daemon/dist/room-parcel-watcher-child.mjs",
+          "package/host-daemon/dist/room-plugin-host-worker.mjs",
+          "package/host-daemon/dist/room-provider-bridge-worker.mjs",
           "package/host-daemon/dist/daemon-bundle.mjs",
         ]),
       );

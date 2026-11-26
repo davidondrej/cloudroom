@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppCommandId, AppShortcutInput } from "@cloudroom/domain";
 import type {
-  BbDesktopApi,
+  RoomDesktopApi,
   RoomDesktopBrowserFindResult,
   RoomDesktopBrowserOpenTabRequest,
   RoomDesktopBrowserScopedOpenTabRequest,
@@ -75,8 +75,9 @@ const electronMock = vi.hoisted(() => {
   const invokeCalls: string[] = [];
   const listeners = new Map<string, IpcRendererListener>();
   const sendCalls: SendCall[] = [];
-  let exposedApi: BbDesktopApi | null = null;
+  let exposedApi: RoomDesktopApi | null = null;
   let exposedName: string | null = null;
+  let exposedLegacyApi: unknown = null;
   let zoomFactor = 1;
 
   return {
@@ -86,12 +87,16 @@ const electronMock = vi.hoisted(() => {
     get exposedName() {
       return exposedName;
     },
+    get exposedLegacyApi() {
+      return exposedLegacyApi;
+    },
     invokeCalls,
     listeners,
     sendCalls,
     reset(): void {
       exposedApi = null;
       exposedName = null;
+      exposedLegacyApi = null;
       invokeCalls.length = 0;
       listeners.clear();
       sendCalls.length = 0;
@@ -102,16 +107,18 @@ const electronMock = vi.hoisted(() => {
     },
     contextBridge: {
       exposeInMainWorld(name: string, api: unknown): void {
-        if (name === "bbDesktop") {
+        if (name === "roomDesktop") {
           exposedName = name;
-          exposedApi = api as BbDesktopApi;
+          exposedApi = api as RoomDesktopApi;
+        } else if (name === "bbDesktop") {
+          exposedLegacyApi = api;
         }
       },
     },
     ipcRenderer: {
       invoke(channel: string): Promise<RoomDesktopInfo | RoomDesktopWindowState> {
         invokeCalls.push(channel);
-        if (channel === "bb-desktop:get-window-state") {
+        if (channel === "room-desktop:get-window-state") {
           return Promise.resolve(desktopWindowState);
         }
         return Promise.resolve(desktopInfo);
@@ -142,16 +149,17 @@ interface EmitIpcPayloadArgs {
   payload: unknown;
 }
 
-async function loadPreload(): Promise<BbDesktopApi> {
+async function loadPreload(): Promise<RoomDesktopApi> {
   electronMock.reset();
   vi.resetModules();
   process.env.BB_DESKTOP_VERSION = "0.0.0-test";
   await import("../src/preload.js");
   const api = electronMock.exposedApi;
-  expect(electronMock.exposedName).toBe("bbDesktop");
+  expect(electronMock.exposedName).toBe("roomDesktop");
+  expect(electronMock.exposedLegacyApi).toBe(api);
   expect(api).not.toBeNull();
   if (api === null) {
-    throw new Error("Expected preload to expose window.bbDesktop.");
+    throw new Error("Expected preload to expose window.roomDesktop.");
   }
   return api;
 }
@@ -166,7 +174,7 @@ function emitIpcPayload(args: EmitIpcPayloadArgs): void {
 }
 
 describe("desktop preload browser API", () => {
-  let api: BbDesktopApi;
+  let api: RoomDesktopApi;
 
   beforeEach(async () => {
     api = await loadPreload();

@@ -51,6 +51,7 @@ import {
 import { usePromptModePermissionDisplay } from "@/components/promptbox/usePromptModePermissionDisplay";
 import { PROMPT_PLACEHOLDER_HINT } from "@/components/promptbox/follow-up-placeholder";
 import { usePromptVoice } from "@/components/promptbox/usePromptVoice";
+import type { PromptDraftScope } from "@/hooks/usePromptDraftStorage";
 import {
   ProjectNudgeHint,
   useProjectNudge,
@@ -157,6 +158,8 @@ interface NewThreadPromptBoxUIProps {
   pluginComposerHost?: PluginComposerHost | null;
   textEffects?: readonly ComposerTextEffectSource[];
   placeholder?: string;
+  /** The stored draft this box edits. Voice text lands there if the user leaves mid-transcription. */
+  voiceDraftScope?: PromptDraftScope;
 
   history: HistoryConfig;
   typeahead: TypeaheadConfig;
@@ -241,6 +244,7 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
   pluginComposerHost,
   textEffects,
   placeholder: placeholderOverride,
+  voiceDraftScope,
   history,
   typeahead,
   attachments,
@@ -262,7 +266,11 @@ export const NewThreadPromptBoxUI = memo(function NewThreadPromptBoxUI({
   const attachFiles = useCallback((files: File[]) => {
     promptBoxRef.current?.attachFiles(files);
   }, []);
-  const voice = usePromptVoice(promptBoxRef);
+  const voiceTarget = useMemo(
+    () => voiceDraftScope && { draftScope: voiceDraftScope },
+    [voiceDraftScope],
+  );
+  const voice = usePromptVoice(promptBoxRef, voiceTarget);
   const attachmentCount = attachments.items?.length ?? 0;
   const [composerLayout, setComposerLayout] =
     useState<ComposerView["layout"]>("expanded");

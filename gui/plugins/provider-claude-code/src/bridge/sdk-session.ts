@@ -24,6 +24,10 @@ import {
   claudeCliGuidance,
   translateMissingClaudeCliError,
 } from "./missing-cli-error.js";
+import {
+  readProjectInstructions,
+  withProjectInstructions,
+} from "./session-options.js";
 
 export interface SdkSessionOptions {
   cwd: string;
@@ -33,6 +37,8 @@ export interface SdkSessionOptions {
   effort?: Options["effort"];
   sessionId?: string;
   permissionMode?: ClaudePermissionMode;
+  /** Load the folder's own Claude settings (.claude/settings*.json, its hooks and MCP servers). Off: the user's only. */
+  projectSettings?: boolean;
   sandbox?: Options["sandbox"];
   hooks?: Options["hooks"];
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
@@ -436,10 +442,18 @@ export class SdkSession {
       });
     };
     const recordThreadId = this.options.recordThreadId;
+    const env = this.options.env ?? process.env;
+    const projectSettings = this.options.projectSettings === true;
     const sdkOptions: Options = {
       abortController: this.abortController,
       cwd: this.options.cwd,
-      systemPrompt: this.options.systemPrompt,
+      // Without the folder's settings Claude skips its CLAUDE.md too, so it gets them as text.
+      systemPrompt: projectSettings
+        ? this.options.systemPrompt
+        : withProjectInstructions(
+            this.options.systemPrompt,
+            readProjectInstructions(this.options.cwd, env),
+          ),
       ...permissionOptions,
       ...claudeSpawnOptions({
         onSpawn: (child) => {
@@ -451,9 +465,9 @@ export class SdkSession {
         threadId: () => recordThreadId?.() ?? null,
       }),
       includePartialMessages: true,
-      settingSources: ["user", "project", "local"],
+      settingSources: projectSettings ? ["user", "project", "local"] : ["user"],
       persistSession: true,
-      env: this.options.env ?? process.env,
+      env,
       stderr: onStderr,
       ...(this.options.mcpServers
         ? { mcpServers: this.options.mcpServers }

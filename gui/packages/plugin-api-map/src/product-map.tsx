@@ -583,7 +583,7 @@ export function ProductMap({
     const container = containerRef.current;
     if (container === null) return;
     const scope =
-      container.closest<HTMLElement>("[data-bb-plugin]") ?? container;
+      container.closest<HTMLElement>("[data-room-plugin], [data-bb-plugin]") ?? container;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Element)) return;

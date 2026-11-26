@@ -29,8 +29,10 @@ import {
   addReviewThread,
   setAutomationEnabled,
   setAutomationRunThread,
+  retryPausedAutomations,
   AUTOMATION_RETRY_DELAYS_MS,
   REFUSED,
+  UNAVAILABLE,
   type Db,
 } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
@@ -778,6 +780,68 @@ describe("automation data access", () => {
         expect(current?.enabled).toBe(false);
         expect(current?.nextRunAt).toBe(failedAt + 60 * 60_000);
       }
+    }
+  });
+
+  it("stays on when the script's room-cli got no answer from Cloudroom, retrying as a pause would (#2656)", async () => {
+    const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-auto-unavailable-"));
+    const scriptDir = automationScriptDir(pluginDataDir, "auto_down");
+    await mkdir(scriptDir, { recursive: true });
+    await writeFile(join(scriptDir, "script.sh"), ': > "$ROOM_LOOP_UNAVAILABLE_FILE"\nexit 1\n');
+    const db = createTestDb();
+    const automation = createScheduledAutomation(db, 1000);
+    let expectedNextRunAt = 1000;
+    try {
+      for (let failure = 1; failure <= 3; failure += 1) {
+        const claim = claimAutomationScheduledRun(db, {
+          automationId: automation.id,
+          expectedNextRunAt,
+          newNextRunAt: expectedNextRunAt + 60_000,
+          now: expectedNextRunAt,
+        });
+        if (!claim.advanced) throw new Error(`claim ${failure} failed`);
+        const result = await executeStoredScript({
+          pluginDataDir,
+          automationId: "auto_down",
+          runId: claim.run.id,
+          projectId: "proj_test",
+          scriptFile: "script.sh",
+          interpreter: "bash",
+          timeoutMs: 5_000,
+          serverUrl: "http://127.0.0.1:38886",
+        });
+        const { error } = mapScriptResultToRun(result);
+        expect(error).toBe(`${UNAVAILABLE}Script exited with code 1`);
+        closeAutomationRun(db, { runId: claim.run.id, status: "failed", error, now: expectedNextRunAt + 1 });
+        const current = getAutomation(db, automation.id)!;
+        expect(current.enabled).toBe(true);
+        expect(current.consecutiveFailures).toBe(failure);
+        expect(current.nextRunAt).toBe(
+          expectedNextRunAt + 1 + (failure < 3 ? AUTOMATION_RETRY_DELAYS_MS[failure - 1]! : 60 * 60_000),
+        );
+        expectedNextRunAt = current.nextRunAt!;
+      }
+      // A second held loop, then a sweep long past both retries: like main's paused retries, both are due now, so
+      // the overdue spacing holds neither back.
+      const other = createScheduledAutomation(db, 1000, "auto_down2");
+      for (let now = 1; now <= 3; now += 1) {
+        const { run } = createManualRun(db, { automationId: other.id, runMode: "script", now });
+        closeAutomationRun(db, { runId: run.id, status: "failed", error: `${UNAVAILABLE}Script exited with code 1`, now });
+      }
+      const late = expectedNextRunAt + 10 * 60_000;
+      retryPausedAutomations(db, late);
+      for (const id of [automation.id, other.id])
+        expect(getAutomation(db, id)).toMatchObject({ enabled: true, nextRunAt: late, lastError: null });
+      // A webhook loop pauses as on main: its retries would replay the same batch.
+      const hook = createScheduledAutomation(db, 1000, "auto_hook");
+      db.prepare("UPDATE automations SET trigger_type = 'webhook' WHERE id = ?").run(hook.id);
+      for (let now = 1; now <= 3; now += 1) {
+        const { run } = createManualRun(db, { automationId: hook.id, runMode: "script", trigger: "webhook", now });
+        closeAutomationRun(db, { runId: run.id, status: "failed", error: `${UNAVAILABLE}Script exited with code 1`, now });
+      }
+      expect(getAutomation(db, hook.id)).toMatchObject({ enabled: false, consecutiveFailures: 3, nextRunAt: 3 + 60 * 60_000 });
+    } finally {
+      await rm(pluginDataDir, { recursive: true, force: true });
     }
   });
 

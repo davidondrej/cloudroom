@@ -661,7 +661,7 @@ function AgentStep({ progress, onDone, stamped, left, choices, setChoices, onCho
       </div>
       {left !== null && (
         <div className="mt-3.5 h-1.5 w-[360px] bg-(--ob-line)">
-          <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--bb-hero-slide-duration": `${AGENT_COUNTDOWN}s` } as CSSProperties} />
+          <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--room-hero-slide-duration": `${AGENT_COUNTDOWN}s` } as CSSProperties} />
         </div>
       )}
     </>
@@ -748,7 +748,7 @@ function useCountdown(ready: boolean, done: () => void) {
 }
 const CountdownBar = ({ seconds }: { seconds: number }) => (
   <div className="mt-3.5 h-1.5 w-[360px] bg-(--ob-line)">
-    <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--bb-hero-slide-duration": `${seconds}s` } as CSSProperties} />
+    <span className="bb-hero-progress-fill block h-full bg-(--ob-ink)" style={{ "--room-hero-slide-duration": `${seconds}s` } as CSSProperties} />
   </div>
 );
 

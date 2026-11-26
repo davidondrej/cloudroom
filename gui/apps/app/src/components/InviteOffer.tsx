@@ -170,7 +170,7 @@ function InviteTickets({ data, finish }: { data: Invites; finish: () => void }) 
 
   return (
     <div ref={root} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Invite friends" style={ROOT}
-      className="fixed inset-0 z-50 overflow-hidden text-[#f3ecdb] max-md:h-(--bb-shell-height) max-md:overflow-y-auto outline-none duration-300 animate-in fade-in-0">
+      className="fixed inset-0 z-50 overflow-hidden text-[#f3ecdb] max-md:h-(--room-shell-height) max-md:overflow-y-auto outline-none duration-300 animate-in fade-in-0">
       <div className={cn("absolute inset-x-0 top-0 h-10", MACOS_WINDOW_DRAG_CLASS)} />
       <div className="flex h-full items-center max-md:h-auto max-md:min-h-full max-md:flex-col max-md:justify-center max-md:pt-[calc(env(safe-area-inset-top)+32px)] max-md:pb-[calc(env(safe-area-inset-bottom)+28px)]">
         <div className="w-[44%] shrink-0 pr-8 pl-[8.5%] max-md:w-full max-md:px-7">

@@ -14,17 +14,17 @@ export interface GuideArea {
 }
 
 const guideChapters: Record<string, TemplateId> = {
-  threads: "bbGuideThreads",
-  environments: "bbGuideEnvironments",
-  "agent-configuration": "bbGuideAgentConfiguration",
-  providers: "bbGuideProviders",
-  projects: "bbGuideProjects",
-  machines: "bbGuideMachines",
-  terminals: "bbGuideTerminals",
-  browser: "bbGuideBrowser",
-  customization: "bbGuideCustomization",
-  plugins: "bbGuidePlugins",
-  automations: "bbGuideAutomations",
+  threads: "roomGuideThreads",
+  environments: "roomGuideEnvironments",
+  "agent-configuration": "roomGuideAgentConfiguration",
+  providers: "roomGuideProviders",
+  projects: "roomGuideProjects",
+  machines: "roomGuideMachines",
+  terminals: "roomGuideTerminals",
+  browser: "roomGuideBrowser",
+  customization: "roomGuideCustomization",
+  plugins: "roomGuidePlugins",
+  automations: "roomGuideAutomations",
 };
 
 const templateBodyById = new Map(
@@ -43,7 +43,7 @@ export function createGuideArea(): GuideArea {
   return {
     render(input = {}) {
       if (!input.chapter) {
-        return { content: renderStaticTemplate("bbGuideOverview") };
+        return { content: renderStaticTemplate("roomGuideOverview") };
       }
       const templateId = guideChapters[input.chapter];
       if (!templateId) {

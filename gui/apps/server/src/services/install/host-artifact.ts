@@ -28,9 +28,9 @@ const HOST_DEPENDENCIES = [
 ] as const;
 const HOST_DAEMON_FILES = [
   "room-cli",
-  "bb-parcel-watcher-child.mjs",
-  "bb-plugin-host-worker.mjs",
-  "bb-provider-bridge-worker.mjs",
+  "room-parcel-watcher-child.mjs",
+  "room-plugin-host-worker.mjs",
+  "room-provider-bridge-worker.mjs",
   "daemon-bundle.mjs",
 ] as const;
 const HOST_PACKAGE_FILES = ["dist", "host-daemon", "README.md"] as const;

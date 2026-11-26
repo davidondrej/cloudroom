@@ -1,6 +1,7 @@
 import { ThreadMachineStatus } from "@/components/promptbox/banner/ThreadMachineStatus";
 import { canRecoverCloudSend } from "@/cloud/remote-cloud-send";
 import { OtherMacUnavailableError, onMacConnectionChange, otherMacLostAt, viewingOtherMac } from "@/cloud/mac-connection";
+import { getThreadDisplayTitle } from "@/lib/thread-title";
 import { withDraftEdits } from "@/lib/draft-edits";
 import { TeleportLocalNotice, TeleportNotice } from "@/components/thread/TeleportNotice";
 import { TeleportCheckCard } from "@/components/thread/TeleportCheckCard";
@@ -1076,11 +1077,11 @@ export function ThreadDetailPromptArea({
     ],
   );
 
-  const sendCloudDraft = useCallback(async (steer: boolean) => {
-    const submittedDraft = currentPromptDraft;
-    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
+  const sendCloudDraft = useCallback(async (steer: boolean): Promise<boolean> => {
+    const submittedDraft = promptDraft.getCurrent();
+    const draftEdits = withDraftEdits(thread.id, promptDraftToInput(submittedDraft));
     const submittedInput = draftEdits.input;
-    if (!cloudModel || submittedInput.length === 0 || movingToLocal) return;
+    if (!cloudModel || submittedInput.length === 0 || movingToLocal) return false;
     const request = {
       id: thread.id,
       input: submittedInput,
@@ -1099,26 +1100,27 @@ export function ThreadDetailPromptArea({
       });
       clearCloudroomRequestId(thread.id, requestId);
       draftEdits.commit();
+      return true;
     } catch (error) {
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
+      return false;
     }
-  }, [remoteMac, cloudFastSupported, cloudModel, cloudReasoning, currentPromptDraft, currentPromptDraftInput, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
+  }, [remoteMac, cloudFastSupported, cloudModel, cloudReasoning, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
 
-  const handleSend = useCallback(async () => {
-    const submittedDraft = currentPromptDraft;
-    if (isCloud) {
-      await sendCloudDraft(false);
-      return;
-    }
-    const draftEdits = withDraftEdits(thread.id, currentPromptDraftInput);
+  // Reads the stored draft, not this render's copy: a voice message can send after the user leaves.
+  // Resolves true once the message is sent or queued.
+  const handleSend = useCallback(async (): Promise<boolean> => {
+    if (isCloud) return sendCloudDraft(false);
+    const submittedDraft = promptDraft.getCurrent();
+    const draftEdits = withDraftEdits(thread.id, promptDraftToInput(submittedDraft));
     const submittedInput = draftEdits.input;
     const isQueuingMessage = shouldQueueFollowUpMessage(runtimeDisplayStatus);
     if (
       submittedInput.length === 0 ||
       (!isQueuingMessage && isDefaultExecutionOptionsLoading)
     ) {
-      return;
+      return false;
     }
 
     promptDraft.clearIfCurrentMatches(submittedDraft);
@@ -1146,6 +1148,7 @@ export function ThreadDetailPromptArea({
           draftEdits.commit();
         }
       }
+      return true;
     } catch (nextError) {
       promptDraft.restoreIfEmpty(submittedDraft);
       showMutationErrorToast({
@@ -1155,13 +1158,12 @@ export function ThreadDetailPromptArea({
           : "Failed to send message",
         lifecycleOperation: isQueuingMessage ? "queue_message" : "send_message",
       });
+      return false;
     }
   }, [
     isCloud,
     sendCloudDraft,
     createQueuedMessage,
-    currentPromptDraft,
-    currentPromptDraftInput,
     followUpExecutionSelection,
     isDefaultExecutionOptionsLoading,
     promptDraft,
@@ -1356,7 +1358,9 @@ export function ThreadDetailPromptArea({
       return;
     }
     if (isCloud && currentPromptDraftInput.length > 0) {
-      await runWhileFollowUpShortcutSending(setIsFollowUpShortcutSending, () => sendCloudDraft(true));
+      await runWhileFollowUpShortcutSending(setIsFollowUpShortcutSending, async () => {
+        await sendCloudDraft(true);
+      });
       return;
     }
 
@@ -1521,6 +1525,15 @@ export function ThreadDetailPromptArea({
     (action: PromptSuggestionAction) => reportPromptSuggestion(thread.id, action),
     [thread.id],
   );
+  const threadTitle = getThreadDisplayTitle(thread);
+  const voiceTarget = useMemo(
+    () => ({
+      draftScope: { kind: "thread" as const, projectId, threadId: thread.id },
+      label: threadTitle,
+      send: handleSend,
+    }),
+    [handleSend, projectId, thread.id, threadTitle],
+  );
   const bottomComposerConfig = useMemo<FollowUpComposerProps>(
     () => ({
       history: {
@@ -1547,6 +1560,7 @@ export function ThreadDetailPromptArea({
       steerActiveThreadOnEnter: isCloud ? cloudSteerSupported && steerActiveThreadOnEnter : steerActiveThreadOnEnter,
       submitMode: moving ? { kind: "ready" } : submitMode,
       threadRuntimeDisplayStatus: runtimeDisplayStatus,
+      voiceTarget,
     }),
     [
       isCloud,
@@ -1570,6 +1584,7 @@ export function ThreadDetailPromptArea({
       cloudSteerSupported,
       submitMode,
       thread.id,
+      voiceTarget,
     ],
   );
   const sentMessageEditInput = useMemo(

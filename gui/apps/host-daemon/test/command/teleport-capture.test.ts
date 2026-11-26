@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { captureTeleport } from "../../src/command-handlers/teleport.js";
@@ -54,4 +55,60 @@ it("captures a read-only file (Windows copies the read-only flag)", async () => 
   const teleport = await capture("teleport_read_only");
   expect(teleport.files.map((file) => file.kind)).toContain("native");
   await chmod(transcript, 0o644);
+});
+
+// A shell script stands in for OpenCode, so this runs on macOS and Linux only.
+it.skipIf(process.platform === "win32")("moves an OpenCode 2 chat with its session commands, and resumes only a matching existing copy (#2686)", async () => {
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  const chat = JSON.stringify({ info: { id: "ses_2686" }, messages: [{ type: "user", text: "hi" }] });
+  await writeFile(join(bin, "opencode"), `#!/bin/sh
+case "$*" in
+  --version) echo "opencode v2.3.0" ;;
+  "session export --standalone ses_2686") echo '${chat}' ;;
+  "session import --standalone "*) echo "Session already exists" >&2 ;;
+  *) echo "unexpected $*" >&2; exit 1 ;;
+esac
+`, { mode: 0o755 });
+  const options = { threadStorageRootPath: join(root, "storage"), runtimeManager: { getShellEnv: () => ({ ...process.env, PATH: `${bin}:${process.env.PATH}` }) } } as never;
+  const command = (action: string) => ({ type: "thread.teleport", threadId: "thr_source", transferId: `oc_${action}`, action, file: join(root, "chat.json"), workspaceContext: { workspacePath: state.workspace }, sessions: [{ threadId: "thr_source", nativeId: "ses_2686", harness: "opencode" }] }) as never;
+  const captured = await captureTeleport(command("capture"), options) as { files: { kind: string }[] };
+  expect(captured.files.map((file) => file.kind)).toContain("native");
+  await writeFile(join(root, "chat.json"), chat);
+  await expect(captureTeleport(command("import"), options)).resolves.toEqual({ nativeId: "ses_2686" });
+  await writeFile(join(root, "chat.json"), JSON.stringify({ info: { id: "ses_2686" }, messages: [{ type: "user", text: "hi" }, { type: "user", text: "more" }] }));
+  await expect(captureTeleport(command("import"), options)).rejects.toThrow("older copy");
+});
+
+it("sends the GUI history with an Antigravity chat, since the server needs it to finish the move", async () => {
+  const home = join(root, "home");
+  const conversations = join(home, ".gemini", "antigravity-cli", "conversations");
+  await mkdir(conversations, { recursive: true });
+  const db = new DatabaseSync(join(conversations, `${nativeId}.db`));
+  db.exec("CREATE TABLE trajectory_meta (cascade_id TEXT)");
+  db.prepare("INSERT INTO trajectory_meta VALUES (?)").run(nativeId);
+  db.close();
+  // os.homedir() reads HOME on Unix and USERPROFILE on Windows.
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  try {
+    // A capture an older host saved without the GUI history is redone on retry.
+    const stale = join(root, "storage", "thr_source", "teleport", "agy_one");
+    await mkdir(stale, { recursive: true });
+    await writeFile(join(stale, "capture.json"), JSON.stringify({ nativeId, files: [{ path: `${nativeId}.db`, kind: "native" }], omitted: [] }));
+    await writeFile(join(stale, "git-state.txt"), "stale");
+    const captured = await captureTeleport({
+      type: "thread.teleport", threadId: "thr_source", transferId: "agy_one", action: "capture",
+      workspaceContext: { workspacePath: state.workspace },
+      sessions: [{ threadId: "thr_source", nativeId, harness: "antigravity" }],
+      extraText: JSON.stringify({ threads: [{ events: [{ type: "client/turn/requested", data: { input: [{ type: "image", data: image, mimeType: "image/png" }] } }] }] }),
+    } as never, { threadStorageRootPath: join(root, "storage"), runtimeManager: { getShellEnv: () => process.env } } as never) as { nativeId: string; files: { kind: string; path: string }[] };
+    expect(captured.nativeId).toBe(nativeId);
+    expect(captured.files.map((file) => [file.kind, file.path])).toEqual([["native", `${nativeId}.db`], ["context", "gui-history.json"], ["attachment", "gui-history-image-0.png"]]);
+  } finally {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  }
 });

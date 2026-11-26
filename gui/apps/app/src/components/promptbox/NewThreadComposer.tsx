@@ -2005,6 +2005,7 @@ export function NewThreadComposer({
             promptDraft.setTextAndMentions(text, mentions);
           }}
           onSubmit={() => void handleSubmit(options.blockedReason ?? null)}
+          voiceDraftScope={draftStorage}
           isSubmitting={isSubmitting}
           disabled={disabledReason !== null}
           disabledReason={disabledReason ?? undefined}
@@ -2284,6 +2285,7 @@ export function NewThreadComposer({
       composerError,
       commandSuggestions,
       currentDraft,
+      draftStorage,
       defaultMentionLinkResolver,
       effectiveEnvironmentValue,
       environmentProviders,

@@ -45,6 +45,9 @@ export const AUTOMATION_RETRY_DELAYS_MS = [60_000, 15 * 60_000] as const;
 /** A run's error starts with this when its provider refused the work, say OpenAI's cybersecurity filter (run.ts). It
  *  fails the run, but never counts toward a pause: its retry runs on the other provider (ADR 20261119-091500). */
 export const REFUSED = "Refused: ";
+/** A script run's error starts with this when its room-cli got no answer from Cloudroom (script-runner.ts). It counts
+ *  and retries as any failure, but a cron loop stays on while a paused loop would still try again (#2656). */
+export const UNAVAILABLE = "Cloudroom unavailable: ";
 // A paused loop tries again on its own (ADR 20261103-235500), like Cloud loops: 1 hour, 6 hours, then daily, until 10
 // failures in a row. Each try that fails adds one, so the count says how far along it is.
 const PAUSE_RETRY_MS = [60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000];
@@ -265,7 +268,8 @@ function pausedRetryAt(consecutiveFailures: number, now: number): number | null 
 
 /** Paused loops whose time to try again came run again, keeping their failure count, so one more failure pauses them
  *  again and one success clears it. Pauses from before retries (no time saved) from the last 30 days try once too.
- *  Returns the projects whose loops changed. */
+ *  A cron loop that stayed on through our outage instead (#2656) tries again the same way. Returns the projects whose
+ *  loops changed. */
 export function retryPausedAutomations(db: Db, now: number): string[] {
   const rows = db
     .prepare(
@@ -274,11 +278,20 @@ export function retryPausedAutomations(db: Db, now: number): string[] {
          next_run_at = CASE WHEN trigger_type = 'webhook' THEN NULL ELSE @now END,
          last_error = NULL,
          updated_at = @now
-       WHERE enabled = 0 AND last_error LIKE @mark AND consecutive_failures < @stop
-         AND (next_run_at <= @now OR (next_run_at IS NULL AND updated_at >= @since))
+       WHERE consecutive_failures < @stop AND (
+         (enabled = 0 AND last_error LIKE @mark
+           AND (next_run_at <= @now OR (next_run_at IS NULL AND updated_at >= @since)))
+         OR (enabled = 1 AND last_error LIKE @unavailable AND consecutive_failures >= @max AND next_run_at <= @now))
        RETURNING project_id AS projectId`,
     )
-    .all({ now, mark: PAUSE_MARK, stop: STOP_RETRYING, since: now - 30 * 86_400_000 }) as { projectId: string }[];
+    .all({
+      now,
+      mark: PAUSE_MARK,
+      unavailable: `${UNAVAILABLE}%`,
+      max: AUTOMATION_MAX_CONSECUTIVE_FAILURES,
+      stop: STOP_RETRYING,
+      since: now - 30 * 86_400_000,
+    }) as { projectId: string }[];
   return [...new Set(rows.map((row) => row.projectId))];
 }
 
@@ -842,14 +855,27 @@ function recordAutomationFailure(
   }
   const consecutiveFailures =
     automation.consecutiveFailures + (args.error.startsWith(REFUSED) ? 0 : 1);
+  const pauseRetryAt = pausedRetryAt(consecutiveFailures, args.now);
+  // Our outage on a cron loop: where a pause would come, it stays on and waits as long as the pause would (ADR 0337).
+  // Webhook and once loops pause as before: their retries could replay a batch every minute.
+  const held =
+    args.error.startsWith(UNAVAILABLE) &&
+    automation.triggerType === "schedule" &&
+    consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES &&
+    pauseRetryAt !== null;
   // Turned off by hand while this run went on, it stays off: no pause mark, so it never tries again on its own.
   const paused =
     automation.enabled &&
+    !held &&
     consecutiveFailures >= AUTOMATION_MAX_CONSECUTIVE_FAILURES;
   const retryAt =
-    args.retrySchedule && automation.enabled && !paused
-      ? args.now + automationRetryDelayMs(consecutiveFailures)
-      : null;
+    !automation.enabled || paused
+      ? null
+      : held
+        ? pauseRetryAt
+        : args.retrySchedule
+          ? args.now + automationRetryDelayMs(consecutiveFailures)
+          : null;
   const lastError = paused
     ? `${args.error} (loop paused after ${consecutiveFailures} consecutive failures)`
     : args.error;
@@ -870,7 +896,7 @@ function recordAutomationFailure(
     automationId: args.automationId,
     archivedError: THREAD_ARCHIVED_ERROR,
     paused: boolToInt(paused),
-    pausedRetryAt: paused ? pausedRetryAt(consecutiveFailures, args.now) : null,
+    pausedRetryAt: paused ? pauseRetryAt : null,
     retryAt,
     consecutiveFailures,
     lastError,

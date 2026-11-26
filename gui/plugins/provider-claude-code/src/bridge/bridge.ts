@@ -195,6 +195,8 @@ interface ThreadSession {
   session: SdkSession;
   attachment: ThreadAttachment;
   sessionSerial: number;
+  /** Set when Claude's init reports a non-bypass mode even though we asked for bypassPermissions (e.g. disableBypassPermissionsMode). */
+  bypassDisabledByClaude?: boolean;
   closing: boolean;
   /** Why Cloudroom is ending this session: its remaining tool calls are denied with it. */
   closeReason?: string;
@@ -437,7 +439,6 @@ function applyTrustdSetting(attachment: ThreadAttachment): void {
   const sandbox = attachment.sessionOptions.sandbox;
   if (!sandbox) return;
   const allow = claudeSettingsAllowTrustd(
-    attachment.sessionConstructionConfig.sessionOptions.cwd,
     attachment.sessionOptions.env ?? process.env,
   );
   if (allow === (sandbox.enableWeakerNetworkIsolation === true)) return;
@@ -476,6 +477,7 @@ function applyPermissionSetting(
   const sessionOptions = {
     ...current,
     additionalWorkspaceWriteRoots: params.additionalWorkspaceWriteRoots,
+    approvedPlanPermissionMode: permissionMode,
     permissionMode: liveMode,
     permissionScope,
   };
@@ -991,6 +993,7 @@ function toSessionConstructionConfig(
     dynamicTools: params.dynamicTools,
     sessionOptions: {
       additionalWorkspaceWriteRoots: params.additionalWorkspaceWriteRoots,
+      approvedPlanPermissionMode: params.approvedPlanPermissionMode,
       baseInstructions: params.baseInstructions,
       chromeEnabled: params.chromeEnabled,
       claudeAiConnectorsEnabled: params.claudeAiConnectorsEnabled,
@@ -1597,6 +1600,15 @@ function createOnSdkMessage(
     ) {
       threadSession.contextUsageCollector.invalidate();
     }
+    if (
+      message.type === "system" &&
+      message.subtype === "init" &&
+      threadSession.attachment.permissionMode === "bypassPermissions" &&
+      typeof message.permissionMode === "string" &&
+      message.permissionMode !== "bypassPermissions"
+    ) {
+      threadSession.bypassDisabledByClaude = true;
+    }
     const providerThreadId = message.session_id?.trim() ?? "";
     if (
       providerThreadId.length > 0 &&
@@ -2157,6 +2169,33 @@ function describeUnsandboxedAsk(reason: string | undefined): string {
     : `${note} ${reason}`;
 }
 
+// Claude Code's bypass-immune dangerousRemoval checks (including unparsed_line
+// bash/zsh parser false positives like `declare -A`). Intentionally excludes
+// "A permission rule denies a command in this shell -c script" and non-removal
+// policy locks such as disableBypassPermissionsMode or outsideReadsBlocked.
+const CLAUDE_BYPASS_WAIVABLE_REMOVAL_CHECK_PATTERNS = [
+  /^Claude Code can't be sure it read this command the way the shell will, so it can't rule out a dangerous removal\b/i,
+  /^Dangerous rm(?:dir)? operation\b/i,
+  /^This shell -c script runs rm and could not be checked\b/i,
+];
+
+function isClaudeBypassWaivableRemovalCheck(args: {
+  toolName: string;
+  decisionReason: string | undefined;
+  matchedAskRule: unknown;
+}): boolean {
+  if (args.toolName !== "Bash" && args.toolName !== "PowerShell") {
+    return false;
+  }
+  if (args.matchedAskRule !== undefined || args.decisionReason === undefined) {
+    return false;
+  }
+  const reason = args.decisionReason.trim();
+  return CLAUDE_BYPASS_WAIVABLE_REMOVAL_CHECK_PATTERNS.some((pattern) =>
+    pattern.test(reason),
+  );
+}
+
 function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
   const forwardInteractiveRequest =
     createForwardInteractiveRequest(threadIdRef);
@@ -2252,9 +2291,9 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
     }
     // Claude calls this only for a call it would ask the user about — including
     // when an ask rule, a safety check, or disableBypassPermissionsMode blocked
-    // bypass mode — so every ask reaches the user even in Full access. "Allow
-    // for session" reaches Claude as a session rule; Claude keeps no such rule
-    // for sandbox network asks, so the bridge remembers that one.
+    // bypass mode. Every ask reaches the user except Claude's built-in
+    // dangerousRemoval checks in Full access (handled below) and remembered
+    // sandbox network grants ("Allow for session"), which Claude doesn't store.
     if (
       toolName === CLAUDE_SANDBOX_NETWORK_TOOL_NAME &&
       threadSession.attachment.sandboxNetworkAllowed &&
@@ -2277,6 +2316,28 @@ function createCanUseTool(threadIdRef: ThreadIdRef): CanUseTool {
       return {
         behavior: "deny",
         message: options.decisionReason ?? policyMessage,
+        toolUseID: options.toolUseID,
+      };
+    }
+
+    // In Full access, Claude Code's built-in dangerousRemoval circuit breaker
+    // (including unparsed_line parser false positives on zsh syntax) still
+    // calls canUseTool, and CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS
+    // is ignored whenever canUseTool is attached. Auto-allow those checks here
+    // while keeping Command Guard (PreToolUse deny hook), user ask rules, and
+    // disableBypassPermissionsMode intact.
+    if (
+      threadSession.attachment.permissionMode === "bypassPermissions" &&
+      !threadSession.bypassDisabledByClaude &&
+      isClaudeBypassWaivableRemovalCheck({
+        toolName,
+        decisionReason: options.decisionReason,
+        matchedAskRule: options.matchedAskRule,
+      })
+    ) {
+      return {
+        behavior: "allow",
+        updatedInput: input,
         toolUseID: options.toolUseID,
       };
     }

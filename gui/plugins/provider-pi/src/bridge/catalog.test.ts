@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ROOM_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
+import { ROOM_PI_EXTENSION_SOURCE } from "./room-pi-extension.js";
 import { closeAllPiCatalogs, getPiCatalog } from "./catalog.js";
 import { PI_BRIDGE_ARGS_ENV, PI_BRIDGE_COMMAND_ENV } from "./rpc-child.js";
 import { fakePiPath } from "./test-support.js";

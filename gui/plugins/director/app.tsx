@@ -117,7 +117,7 @@ function Row() {
         onClick={open}
         disabled={opening}
         aria-label="Open the Director"
-        className={`flex h-[var(--bb-sidebar-row-height)] w-full cursor-pointer items-center gap-2 rounded-md pl-2 pr-2.5 text-sm text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:pointer-coarse:h-[var(--bb-sidebar-row-height-coarse)] ${active ? "bg-sidebar-accent" : ""}`}
+        className={`flex h-[var(--room-sidebar-row-height)] w-full cursor-pointer items-center gap-2 rounded-md pl-2 pr-2.5 text-sm text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground max-md:pointer-coarse:h-[var(--room-sidebar-row-height-coarse)] ${active ? "bg-sidebar-accent" : ""}`}
       >
         <Tile icon={config.icon} color={config.color} />
         <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">Director</span>

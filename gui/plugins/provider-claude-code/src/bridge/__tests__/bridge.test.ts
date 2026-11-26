@@ -7,7 +7,6 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { execFileSync } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -1193,30 +1192,12 @@ describe("bridge", () => {
 
   const WEAKER_FALSE = '{"sandbox":{"enableWeakerNetworkIsolation":false}}';
   const WEAKER_TRUE = WEAKER_FALSE.replace("false", "true");
-  // root/config is the user's Claude dir; root/repo is a git repo with a
-  // linked worktree at root/wt; root/plain is not a repo.
+  // root/config is the user's Claude dir; root/repo is the thread's folder.
   function makeClaudeSettingsFixture(files: Record<string, string> = {}) {
     const root = mkdtempSync(join(tmpdir(), "bb-claude-sandbox-"));
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", join(root, "repo"), ...args], {
-        stdio: "ignore",
-      });
-    for (const dir of ["config", "plain", "repo/src"]) {
+    for (const dir of ["config", "repo"]) {
       mkdirSync(join(root, dir), { recursive: true });
     }
-    git("init", "-q");
-    git(
-      "-c",
-      "user.name=t",
-      "-c",
-      "user.email=t@t",
-      "commit",
-      "-q",
-      "--allow-empty",
-      "-m",
-      "init",
-    );
-    git("worktree", "add", "-q", join(root, "wt"));
     for (const [file, contents] of Object.entries(files)) {
       mkdirSync(dirname(join(root, file)), { recursive: true });
       writeFileSync(join(root, file), contents);
@@ -1239,25 +1220,13 @@ describe("bridge", () => {
       { "config/settings.json": WEAKER_FALSE },
       false,
     ],
+    // Claude skips the folder's settings outside Full access, so they don't count.
     [
-      "false in cwd local settings",
+      "false in the folder's settings",
       "repo",
       { "repo/.claude/settings.local.json": WEAKER_FALSE },
-      false,
+      true,
     ],
-    [
-      "false in repo-root local settings from a subfolder",
-      "repo/src",
-      { "repo/.claude/settings.local.json": WEAKER_FALSE },
-      false,
-    ],
-    [
-      "false in main-checkout local settings from a worktree",
-      "wt",
-      { "repo/.claude/settings.local.json": WEAKER_FALSE },
-      false,
-    ],
-    ["git failure", "plain", {}, false],
   ] as const)(
     "configures acceptEdits and auto sessions with the same Claude sandbox (trustd %s)",
     (_name, cwdPath, files, weakerNetwork) => {
@@ -1298,11 +1267,6 @@ describe("bridge", () => {
   it.each([
     ["an account switch to settings that set it false", "accountB", null],
     ["a user settings edit to false", "config", "config/settings.json"],
-    [
-      "a project settings edit to false",
-      "config",
-      "repo/.claude/settings.json",
-    ],
   ] as const)("drops the trustd flag on the next turn after %s", async (_name, nextAccount, editedFile) => {
     const root = makeClaudeSettingsFixture({
       "accountB/settings.json": WEAKER_FALSE,
@@ -1396,7 +1360,7 @@ describe("bridge", () => {
         permissionMode: "auto",
         permissionScope: "workspace",
       },
-      {},
+      { CLAUDE_CONFIG_DIR: "/nonexistent-claude-config" },
     );
 
     expect(options.additionalDirectories).toEqual([
@@ -1408,6 +1372,7 @@ describe("bridge", () => {
       failIfUnavailable: false,
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: true,
+      enableWeakerNetworkIsolation: true,
       network: { allowLocalBinding: true },
       filesystem: {
         allowWrite: [
@@ -3064,7 +3029,8 @@ describe("bridge", () => {
       expect(queryOptions.env?.CLAUDE_CODE_WEB_FETCH_AGENT).toBe("0");
       expect(queryOptions.env?.CLAUDE_CODE_ENTRYPOINT).toBe("cli");
       expect(queryOptions.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toBeUndefined();
-      expect(queryOptions.settingSources).toEqual(["user", "project", "local"]);
+      // Outside Full access a folder's own Claude settings (hooks, helpers, MCP servers) never load.
+      expect(queryOptions.settingSources).toEqual(["user"]);
 
       bridge.sendRequest(2, "thread/stop", {
         threadId: "thread-home-config",

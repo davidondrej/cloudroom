@@ -354,7 +354,7 @@ describe("FilePreview", () => {
 
     const pierreFile = await screen.findByTestId("pierre-file");
     const codeViewport = scrollViewport.querySelector<HTMLElement>(
-      "[data-bb-source-code-viewport]",
+      "[data-room-source-code-viewport]",
     );
     expect(codeViewport).not.toBeNull();
     await waitFor(() => {
@@ -368,7 +368,7 @@ describe("FilePreview", () => {
     expect(
       pierreFile.shadowRoot
         ?.querySelector('[data-line="2"]')
-        ?.hasAttribute("data-bb-source-code-target-line"),
+        ?.hasAttribute("data-room-source-code-target-line"),
     ).toBe(true);
   });
 
@@ -582,7 +582,7 @@ describe("FilePreview", () => {
 
   it("hands the desktop shell an absolute preview url", () => {
     const openExternalUrl = vi.fn();
-    (window as unknown as { bbDesktop: unknown }).bbDesktop = {
+    (window as unknown as { roomDesktop: unknown }).roomDesktop = {
       openExternalUrl,
     };
 
@@ -607,7 +607,7 @@ describe("FilePreview", () => {
         `${window.location.origin}/api/v1/threads/thr_1/worktree/files/docs/progress-vis.html`,
       );
     } finally {
-      delete (window as unknown as { bbDesktop?: unknown }).bbDesktop;
+      delete (window as unknown as { roomDesktop?: unknown }).roomDesktop;
     }
   });
 

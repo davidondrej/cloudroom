@@ -13,7 +13,13 @@ interface Statement {
 }
 
 export function pluginScopeRoots(pluginId: string): string {
-  return `[data-bb-plugin="${pluginId}"], [data-bb-plugin-root]:not([data-bb-plugin])`;
+  return [
+    `[data-room-plugin="${pluginId}"]`,
+    `[data-room-plugin-root]:not([data-room-plugin])`,
+    // Compat: older/BB plugins whose vendored portal-scope stamps data-bb-plugin*.
+    `[data-bb-plugin="${pluginId}"]`,
+    `[data-bb-plugin-root]:not([data-bb-plugin])`,
+  ].join(", ");
 }
 
 export function scopePluginUtilities(css: string, scopeRoots: string): string {

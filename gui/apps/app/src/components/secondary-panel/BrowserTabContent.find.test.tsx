@@ -133,7 +133,7 @@ function browserState(
 }
 
 function renderBrowser(harness: FindHarness, initialUrl: string) {
-  window.bbDesktop = createRoomDesktopApi(desktopInfo, harness.api);
+  window.roomDesktop = createRoomDesktopApi(desktopInfo, harness.api);
   return render(
     <AppCommandProvider>
       <BrowserTabContent
@@ -164,7 +164,7 @@ describe("BrowserTabContent find in page", () => {
     cleanup();
     vi.restoreAllMocks();
     window.localStorage.clear();
-    delete window.bbDesktop;
+    delete window.roomDesktop;
   });
 
   it("opens the find bar from the chord only while the browser pane has focus", () => {

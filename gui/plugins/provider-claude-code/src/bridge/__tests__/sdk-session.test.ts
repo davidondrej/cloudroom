@@ -29,6 +29,9 @@ vi.mock("node:child_process", async (importOriginal) => ({
   execFile: execFileMock,
 }));
 
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SdkSession, type SdkSessionOptions } from "../sdk-session.js";
 
 const defaultOptions: SdkSessionOptions = {
@@ -319,20 +322,28 @@ describe("SdkSession", () => {
     expect(queryMock.mock.calls[0]?.[0]?.options).not.toHaveProperty("skills");
   });
 
-  it("mirrors the Claude CLI settings cascade so user, project, and local settings all load", () => {
-    const onMessage = vi.fn();
-    const onDone = vi.fn();
-    const session = new SdkSession(defaultOptions, onMessage, onDone);
+  it("loads the folder's own settings only when allowed, else passes its instructions as text", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bb-claude-project-"));
+    writeFileSync(join(cwd, "AGENTS.md"), "Use tabs.");
+    try {
+      new SdkSession({ ...defaultOptions, cwd }, vi.fn(), vi.fn()).start();
+      const userOnly = queryMock.mock.calls.at(-1)?.[0]?.options;
+      expect(userOnly?.settingSources).toEqual(["user"]);
+      expect(userOnly?.systemPrompt).toContain(
+        `Contents of ${join(cwd, "AGENTS.md")} (project instructions, checked into the codebase):\n\nUse tabs.`,
+      );
 
-    session.start();
-
-    expect(queryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          settingSources: ["user", "project", "local"],
-        }),
-      }),
-    );
+      new SdkSession(
+        { ...defaultOptions, cwd, projectSettings: true },
+        vi.fn(),
+        vi.fn(),
+      ).start();
+      const all = queryMock.mock.calls.at(-1)?.[0]?.options;
+      expect(all?.settingSources).toEqual(["user", "project", "local"]);
+      expect(all?.systemPrompt).toBe(defaultOptions.systemPrompt);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   it("forwards max reasoning effort and thinking display to the SDK when configured", () => {

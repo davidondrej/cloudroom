@@ -81,7 +81,9 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 - Cloud CPU uses the user's Cloud Credits.
 - Test only what you changed.
 - Run the full suite once, at the end.
-- Background jobs keep the sandbox awake for 2 hours, then stop.
+- Background jobs that use CPU keep the sandbox awake for up to 2 hours.
+- After your turn ends, a quiet wait (polling, `sleep`, a Monitor) can stop after 10 minutes.
+- To wait longer, set a `room-cli wake` before you end your turn.
 - Make long jobs resumable.
 - Start long-running servers (dev servers, APIs) with `tty: true` or detached: `setsid nohup <cmd> > /tmp/<name>.log 2>&1 < /dev/null &`.
 - Otherwise Codex can stop them with exit code 143 (openai/codex#46702).

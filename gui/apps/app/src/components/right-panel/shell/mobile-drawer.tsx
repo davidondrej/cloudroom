@@ -159,7 +159,7 @@ export function CompactSecondaryPanelShelf({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        data-bb-portaled-overlay=""
+        data-room-portaled-overlay=""
         tabIndex={-1}
         inert={!open}
         data-testid="secondary-panel-shelf"
@@ -171,8 +171,8 @@ export function CompactSecondaryPanelShelf({
               : APP_OVERLAY_LAYER.secondaryPanel,
         }}
         className={cn(
-          "fixed inset-y-0 right-0 flex h-(--bb-shell-height) touch-pan-y flex-col overflow-hidden border-l border-border-seam bg-background outline-none",
-          "pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--bb-safe-area-bottom,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)]",
+          "fixed inset-y-0 right-0 flex h-(--room-shell-height) touch-pan-y flex-col overflow-hidden border-l border-border-seam bg-background outline-none",
+          "pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--room-safe-area-bottom,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)]",
           "w-(--secondary-panel-width-mobile) data-[state=full]:w-full data-[state=full]:border-l-0",
           "data-[state=closed]:invisible data-[state=closed]:[transition:visibility_0s_linear_220ms]",
           DRAWER_TRANSITION,

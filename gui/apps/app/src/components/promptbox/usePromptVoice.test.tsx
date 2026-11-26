@@ -23,6 +23,7 @@ const voiceInput = {
   start: vi.fn(),
   stop: vi.fn(),
   cancel: vi.fn(),
+  detach: vi.fn(),
 };
 
 afterEach(() => {
@@ -65,6 +66,7 @@ describe("usePromptVoice", () => {
     const options = vi.mocked(useVoiceInput).mock.calls[0]?.[0];
     const transcription = options?.onTranscribe({
       file: new File([], "recording.webm", { type: "audio/webm" }),
+      isShown: () => true,
     });
 
     await act(async () => {

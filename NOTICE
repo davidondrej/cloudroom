@@ -300,7 +300,8 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-packages/shared-ui/src/components/ui/slot.tsx is ported from @radix-ui/react-slot and @radix-ui/react-compose-refs (https://github.com/radix-ui/primitives).
+packages/shared-ui/src/components/ui/slot.tsx is ported from @radix-ui/react-slot and @radix-ui/react-compose-refs, and
+packages/shared-ui/src/components/ui/collapsible.tsx from @radix-ui/react-collapsible and @radix-ui/react-presence (https://github.com/radix-ui/primitives).
 Radix Primitives is licensed under the MIT License below. Its copyright and license notice are retained.
 
 MIT License

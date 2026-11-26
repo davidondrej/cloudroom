@@ -274,7 +274,7 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
 
 /** Agents send Cloudroom feedback straight to David (ADR 0158). `report` is the old hidden name. Prints {"sent":false} while it is off in Settings. */
 export function registerFeedbackCommand(program: Command, getUrl: () => string, name: "feedback" | "report"): void {
-  program.command(`${name} <message>`, { hidden: name === "report" }).description("Send David, Cloudroom's founder, a bug, friction, or idea: what happened and the exact error. No secrets or code.")
+  program.command(`${name} <message>`, { hidden: name === "report" }).description("Send David, Cloudroom's founder, a bug, friction, or idea: what happened and the exact error, up to 4,000 characters. No secrets or code.")
     .action(action(async (message: string) => {
       console.log(JSON.stringify(await createCliRoomSdk(getUrl()).cloudroom.reportBug({ message, threadId: resolveContextThreadId() })));
     }));

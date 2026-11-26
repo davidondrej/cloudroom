@@ -63,7 +63,7 @@ export function reorderHeadForFirstPaint(
   const themeScriptAt = withoutStylesheets.indexOf("bb.theme");
   if (themeScriptAt === -1 || anchor <= themeScriptAt) {
     throw new Error(
-      "bb:font-preload: the pre-paint theme script must precede the injected asset tags in index.html; refusing to move the stylesheet ahead of it",
+      "room:font-preload: the pre-paint theme script must precede the injected asset tags in index.html; refusing to move the stylesheet ahead of it",
     );
   }
   return (
@@ -80,7 +80,7 @@ function firstPreloadableTagIndex(html: string): number {
     html.indexOf("</head>"),
   ].filter((index) => index >= 0);
   if (candidates.length === 0) {
-    throw new Error("bb:font-preload: built index.html has no <head>");
+    throw new Error("room:font-preload: built index.html has no <head>");
   }
   return Math.min(...candidates);
 }
@@ -88,7 +88,7 @@ function firstPreloadableTagIndex(html: string): number {
 export function fontPreload(): Plugin {
   let base = "/";
   return {
-    name: "bb:font-preload",
+    name: "room:font-preload",
     apply: "build",
     configResolved(config) {
       base = config.base;
