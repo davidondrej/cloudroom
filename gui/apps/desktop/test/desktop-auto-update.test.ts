@@ -596,7 +596,11 @@ describe("desktop auto-update service", () => {
       Reflect.set(updater, "spawnLog", async (...args: unknown[]) =>
         spawned.push(args),
       );
-      createElectronAutoUpdaterAdapter(updater, { on: () => undefined });
+      createElectronAutoUpdaterAdapter(
+        updater,
+        { on: () => undefined },
+        { exit: () => undefined, releaseSingleInstanceLock: () => undefined },
+      );
       await Reflect.get(updater, "spawnLog")("/apps/Cloudroom.AppImage", [], {
         PATH: "/usr/bin",
       });

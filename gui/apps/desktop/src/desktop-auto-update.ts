@@ -4,6 +4,7 @@ import type {
   UpdateDownloadedEvent,
   UpdateInfo,
 } from "electron-updater";
+import type { App } from "electron";
 import { existsSync } from "node:fs";
 import type { RoomDesktopInfo } from "@cloudroom/desktop-contract";
 import { closeInheritedFdsOnLinux } from "./app-process.js";
@@ -155,6 +156,7 @@ type SpawnLog = (
 export function createElectronAutoUpdaterAdapter(
   updater: AppUpdater,
   squirrel: SquirrelUpdater,
+  app: Pick<App, "releaseSingleInstanceLock" | "exit">,
 ): DesktopAutoUpdaterAdapter {
   // Linux: electron-updater starts the new AppImage with Node's spawn, which hands it every fd
   // Electron left open, the old AppImage's keepalive pipe included, so each update left the
@@ -195,6 +197,15 @@ export function createElectronAutoUpdaterAdapter(
       squirrel.on("update-downloaded", () => handler());
     },
     quitAndInstall() {
+      if (process.platform === "linux") {
+        // AppImageUpdater launches the replacement before it queues app.quit().
+        // Let the new GUI take the lock, then bypass cancellable quit handlers.
+        // main has already awaited finishQuit(), including the owned runtime.
+        app.releaseSingleInstanceLock();
+        updater.quitAndInstall();
+        app.exit(0);
+        return;
+      }
       // Windows: show only the installer's progress window, then reopen Cloudroom.
       if (process.platform === "win32") updater.quitAndInstall(false, true);
       else updater.quitAndInstall();

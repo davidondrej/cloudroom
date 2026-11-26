@@ -2527,6 +2527,7 @@ function registerDesktopBrowserWindowLifecycle({
 async function startOwnedRuntime(
   args: StartOwnedRuntimeArgs & { windowsReady?: Promise<unknown> },
 ): Promise<DesktopRuntime | null> {
+  if (quitting) return null;
   if (process.argv.includes("--attach-only")) {
     await args.windowsReady;
     await loadStartupError({
@@ -3281,7 +3282,7 @@ async function runDesktopApp(): Promise<void> {
     installNeedsPassword: updateNeedsPassword,
     logger: desktopLogger,
     platform: desktopPlatform,
-    updater: createElectronAutoUpdaterAdapter(autoUpdater, squirrelUpdater),
+    updater: createElectronAutoUpdaterAdapter(autoUpdater, squirrelUpdater, app),
   });
   desktopUpdateService.subscribe(() => {
     sendDesktopInfoChanged();
