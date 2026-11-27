@@ -9,10 +9,12 @@ import {
   getThread,
 } from "@cloudroom/db";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
+import { SandboxDirectory } from "../../src/services/cloudroom/sandboxes.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 import { seedHostSession, seedProjectWithSource } from "../helpers/seed.js";
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -275,4 +277,86 @@ it("restores shared child loops and keeps the Core restore queued until its sand
     service.stop();
     await harness.cleanup();
   }
+});
+
+it("retries archive while the sandbox is restoring or busy, stops on sign-out, and fails non-wait errors at once", async () => {
+  vi.useFakeTimers();
+  const website = "http://127.0.0.1:12340";
+  const sandboxes = new SandboxDirectory(async () => ({
+    website,
+    userId: "test",
+    token: "fixture",
+  }));
+  const answers: Response[] = [];
+  let calls = 0;
+  vi.stubGlobal("fetch", async (input: string, init: RequestInit) => {
+    expect(input).toBe(`${website}/api/desktop/sandboxes`);
+    expect(JSON.parse(String(init.body))).toMatchObject({ action: "archive" });
+    calls++;
+    return answers.shift() ?? Response.json({ state: "archived" });
+  });
+
+  // First archive meets a restoring sandbox (429 wait code); the retry succeeds.
+  answers.push(
+    Response.json(
+      {
+        error:
+          "This thread is still coming back from its saved copy. It continues on its own.",
+        code: "sandbox_restoring",
+      },
+      { status: 429 },
+    ),
+    Response.json({ state: "archived" }),
+  );
+  const restoring = sandboxes.archive("thr_restoring");
+  await vi.advanceTimersByTimeAsync(3_000);
+  await restoring;
+  expect(calls).toBe(2);
+
+  // Busy 409 (CloudroomConnectionError) also retries and succeeds.
+  calls = 0;
+  answers.push(
+    Response.json({ error: "Sandbox is busy." }, { status: 409 }),
+    Response.json({ state: "archived" }),
+  );
+  const busy = sandboxes.archive("thr_busy");
+  await vi.advanceTimersByTimeAsync(3_000);
+  await busy;
+  expect(calls).toBe(2);
+
+  // A non-wait error fails at once without retrying.
+  calls = 0;
+  answers.push(
+    Response.json({ error: "Invalid sandbox request." }, { status: 400 }),
+  );
+  await expect(sandboxes.archive("thr_bad")).rejects.toThrow(
+    "Invalid sandbox request.",
+  );
+  expect(calls).toBe(1);
+
+  // Signing out stops a pending retry immediately instead of trying again.
+  calls = 0;
+  answers.push(
+    Response.json(
+      {
+        error:
+          "This thread is still coming back from its saved copy. It continues on its own.",
+        code: "sandbox_restoring",
+      },
+      { status: 429 },
+    ),
+    Response.json({ state: "archived" }),
+  );
+  const signedOut = sandboxes.archive("thr_signout");
+  const caught = signedOut.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(calls).toBe(1);
+  sandboxes.reset();
+  const error = await caught;
+  expect(error).toBeInstanceOf(Error);
+  expect((error as Error).message).toBe(
+    "The Cloudroom account changed. Try again.",
+  );
+  await vi.advanceTimersByTimeAsync(3_000);
+  expect(calls).toBe(1);
 });
