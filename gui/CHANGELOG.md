@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 173
+
+Speed, Speed, Speed. (2026-11-27)
+
+### Changes
+
+- Switching threads is near-instant: recent threads stay open, the sidebar no longer redraws on every switch, and shortcuts like Cmd+E load their thread ahead of time.
+- The / and @ menus open right away and stay smooth while you type.
+- The running spinner turns smoothly, and the Working... icon now mixes each agent's logo with Cloudroom's grid.
+- Cloud threads keep showing as running through brief connection drops.
+- Claude usage bars survive restarts, and the Director row stays visible while you scroll the sidebar.
+
 ## 172
 
 A new home for Scans (2026-11-27)

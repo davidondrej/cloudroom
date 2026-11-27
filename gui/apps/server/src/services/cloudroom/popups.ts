@@ -181,16 +181,16 @@ export async function recordChecklistHide(deps: AppDeps): Promise<number | null>
 /** The account's call ticket: its booking link, its plan, and whether it had a call before. */
 export type CallTicket = { link: string; plan: string; again: boolean };
 const TICKET_MS = 60 * 60_000;
-const TICKET_CREDITS = 50_000;
 const ticketSchema = z.object({ ticket: z.object({ link: z.string().startsWith("https://cal.com/"), plan: z.string(), again: z.boolean() }).nullable() });
 let ticket: { key: string; at: number; value: CallTicket | null } | null = null;
 
 /** The call ticket at the top right (docs/scopes/calls.md#the-ticket-in-the-app), or null when this account is owed
- *  none. The website decides. It is asked at most once an hour, and only for accounts that pay: a paid plan, or $50
- *  of bought credits not used up yet. So a Free account costs the website nothing, and an older website one call an hour. */
+ *  none. The website decides eligibility (`callEligible` in planUsage) and gives the link; asked at most once an hour
+ *  so ineligible Free accounts cost the website nothing. */
 export async function callTicket(deps: AppDeps): Promise<CallTicket | null> {
   const sandboxes = cloudroom(deps).sandboxes, account = await sandboxes.account(), plan = sandboxes.currentPlan();
-  if (!account || !plan || (plan === "free" && (sandboxes.planUsage(false)?.extraCreditsTotal ?? 0) < TICKET_CREDITS)) return null;
+  const eligible = sandboxes.planUsage(false)?.callEligible ?? (Boolean(plan) && plan !== "free");
+  if (!account || !plan || !eligible) return null;
   if (ticket?.key !== account.userId || Date.now() - ticket.at > TICKET_MS) {
     const parsed = ticketSchema.safeParse(await sandboxes.popups({ call: "ticket" }).catch(() => null));
     ticket = { key: account.userId, at: Date.now(), value: parsed.success ? parsed.data.ticket : null };

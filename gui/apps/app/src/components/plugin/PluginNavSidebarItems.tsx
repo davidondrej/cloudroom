@@ -74,6 +74,7 @@ import { useSidebarReorderDnd } from "@/components/sidebar/useSidebarReorderDnd"
 import type { SidebarSortableDragBindings } from "@/components/sidebar/sortableMotion";
 import { appToast } from "@/components/ui/app-toast";
 import { invalidatePluginList } from "@/hooks/cache-owners/plugin-cache-owner";
+import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
 import { useSetPluginEnabled } from "./useSetPluginEnabled";
 import { appQueryClient } from "@/lib/app-query-client";
 import {
@@ -202,6 +203,17 @@ function PluginNavSidebarItemList({
   const location = useLocation();
   const navigate = useNavigate();
   const setEnabled = useSetPluginEnabled();
+  // Read the shared plugin list cache populated by the sidebar/app without firing an extra fetch.
+  const pluginListQuery = usePluginList({ enabled: false });
+  const alwaysEnabledPluginIds = useMemo(
+    () =>
+      new Set(
+        (pluginListQuery.data?.plugins ?? [])
+          .filter((plugin) => plugin.alwaysEnabled)
+          .map((plugin) => plugin.id),
+      ),
+    [pluginListQuery.data?.plugins],
+  );
   const isCompactViewport = useIsCompactViewport();
   const splitActions = usePaneContentSplitActions();
   const [storedOrder, setStoredOrder] = useAtom(pluginNavPanelOrderAtom);
@@ -385,6 +397,7 @@ function PluginNavSidebarItemList({
     splitEnabled,
     onHide: (key: string) => setPanelVisible(key, false),
     disablePending,
+    alwaysEnabledPluginIds,
     onDisable: (row: PluginSidebarNavRow) => void handleDisable(row),
   };
 
@@ -920,6 +933,7 @@ interface SidebarNavRowItemProps {
   onNavigate?: () => void;
   splitEnabled: boolean;
   disablePending: boolean;
+  alwaysEnabledPluginIds: ReadonlySet<string>;
   onHide: (key: string) => void;
   onDisable: (row: PluginSidebarNavRow) => void;
   dragBindings?: SidebarSortableDragBindings;
@@ -938,7 +952,7 @@ function PluginNavRowMenuItems({
   surface,
 }: {
   disablePending: boolean;
-  onDisable: () => void;
+  onDisable?: () => void;
   onHide: () => void;
   onOpenInSplit?: () => void;
   onOpenDetails: () => void;
@@ -963,11 +977,15 @@ function PluginNavRowMenuItems({
         <Icon name="EyeOff" aria-hidden="true" />
         Hide from sidebar
       </Item>
-      <Separator />
-      <Item disabled={disablePending} onSelect={onDisable}>
-        <Icon name="Unavailable" aria-hidden="true" />
-        Disable
-      </Item>
+      {onDisable !== undefined ? (
+        <>
+          <Separator />
+          <Item disabled={disablePending} onSelect={onDisable}>
+            <Icon name="Unavailable" aria-hidden="true" />
+            Disable
+          </Item>
+        </>
+      ) : null}
     </>
   );
 }
@@ -1013,6 +1031,7 @@ function PluginNavSidebarItem({
   row,
   pathname,
   onNavigate,
+  alwaysEnabledPluginIds,
   onDisable,
   splitEnabled,
   ...props
@@ -1090,7 +1109,11 @@ function PluginNavSidebarItem({
           return;
         void navigate(getPluginDetailRoutePath({ pluginId: chrome.pluginId }));
       }}
-      onDisable={() => onDisable(row)}
+      onDisable={
+        alwaysEnabledPluginIds.has(chrome.pluginId)
+          ? undefined
+          : () => onDisable(row)
+      }
       onSelect={(event) => {
         onNavigate?.();
         if (event.metaKey || event.ctrlKey) {
@@ -1113,7 +1136,7 @@ interface SidebarNavRowChromeProps {
   onPointerDown?: PointerEventHandler<HTMLElement>;
   onOpenInSplit?: () => void;
   onOpenDetails: () => void;
-  onDisable: () => void;
+  onDisable?: () => void;
   onHide: (key: string) => void;
   disablePending: boolean;
   splitMiniMap?: MiniMapSlot[] | null;

@@ -3,6 +3,8 @@
 // Until every computer has a Core with `fs` (a joined machine on another OS or CPU may have none, and Windows builds
 // list no features yet), the old TypeScript handlers answer instead.
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
 import mimeTypes from "mime-types";
 import { fuzzyMatchPaths } from "@cloudroom/fuzzy-match";
 import type {
@@ -109,26 +111,34 @@ export async function writeHostFile(
   command: CommandOf<"host.write_file">,
 ): Promise<HostDaemonOnlineRpcResult<"host.write_file">> {
   const binary = core();
-  return binary ? coreFs(binary, "write", command) : legacyWrite(command);
+  const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.write_file">>(binary, "write", command) : await legacyWrite(command);
+  listings.clear();
+  return result;
 }
 
 export async function mkdirHostPath(command: CommandOf<"host.mkdir">): Promise<HostDaemonOnlineRpcResult<"host.mkdir">> {
   const binary = core();
-  return binary ? coreFs(binary, "mkdir", command) : legacyPaths.mkdirHostPath(command);
+  const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.mkdir">>(binary, "mkdir", command) : await legacyPaths.mkdirHostPath(command);
+  listings.clear();
+  return result;
 }
 
 export async function moveHostPath(
   command: CommandOf<"host.move_path">,
 ): Promise<HostDaemonOnlineRpcResult<"host.move_path">> {
   const binary = core();
-  return binary ? coreFs(binary, "move", command) : legacyPaths.moveHostPath(command);
+  const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.move_path">>(binary, "move", command) : await legacyPaths.moveHostPath(command);
+  listings.clear();
+  return result;
 }
 
 export async function removeHostPath(
   command: CommandOf<"host.remove_path">,
 ): Promise<HostDaemonOnlineRpcResult<"host.remove_path">> {
   const binary = core();
-  return binary ? coreFs(binary, "remove", command) : legacyPaths.removeHostPath(command);
+  const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.remove_path">>(binary, "remove", command) : await legacyPaths.removeHostPath(command);
+  listings.clear();
+  return result;
 }
 
 export async function checkHostPathsExist(
@@ -138,10 +148,27 @@ export async function checkHostPathsExist(
   return binary ? coreFs(binary, "exists", command) : legacy.checkHostPathsExist(command);
 }
 
-/** Identical listings asked for at once share one walk of the folder. */
-const listings = new Map<string, Promise<Listed[]>>();
+const LISTING_CACHE_TTL_MS = 15_000;
+const LISTING_CACHE_MAX_ENTRIES = 16;
 
-function listPaths(binary: string, command: CommandOf<"host.list_files"> | CommandOf<"host.list_paths">, files: boolean, folders: boolean) {
+interface CachedListing {
+  stamp: string;
+  expiresAt: number;
+  promise: Promise<Listed[]>;
+}
+
+/** Recent walks are reused for consecutive `@` keystrokes and shared across concurrent calls. */
+const listings = new Map<string, CachedListing>();
+
+async function readListingStamp(rootPath: string): Promise<string> {
+  const [rootStat, ignoreStat] = await Promise.all([
+    fs.stat(rootPath).catch(() => null),
+    fs.stat(path.join(rootPath, ".gitignore")).catch(() => null),
+  ]);
+  return `${rootStat?.mtimeMs ?? 0}:${ignoreStat?.mtimeMs ?? 0}`;
+}
+
+async function listPaths(binary: string, command: CommandOf<"host.list_files"> | CommandOf<"host.list_paths">, files: boolean, folders: boolean) {
   const request = {
     path: command.path,
     includeFiles: files,
@@ -151,10 +178,34 @@ function listPaths(binary: string, command: CommandOf<"host.list_files"> | Comma
     respectGitIgnore: command.respectGitIgnore,
   };
   const key = JSON.stringify(request);
-  const pending = listings.get(key) ?? coreFs<{ paths: Listed[] }>(binary, "list", request).then((reply) => reply.paths);
-  listings.set(key, pending);
-  void pending.finally(() => listings.delete(key)).catch(() => undefined);
-  return pending;
+  const stamp = await readListingStamp(command.path);
+  const now = Date.now();
+  const cached = listings.get(key);
+  if (cached !== undefined && cached.stamp === stamp && cached.expiresAt > now) {
+    return cached.promise;
+  }
+  const promise = coreFs<{ paths: Listed[] }>(binary, "list", request).then((reply) => reply.paths);
+  const entry: CachedListing = {
+    stamp,
+    expiresAt: now + LISTING_CACHE_TTL_MS,
+    promise,
+  };
+  if (listings.size >= LISTING_CACHE_MAX_ENTRIES && !listings.has(key)) {
+    const oldestKey = listings.keys().next().value;
+    if (oldestKey !== undefined) listings.delete(oldestKey);
+  }
+  listings.set(key, entry);
+  void promise.then(
+    () => {
+      if (listings.get(key) === entry) {
+        entry.expiresAt = Date.now() + LISTING_CACHE_TTL_MS;
+      }
+    },
+    () => {
+      if (listings.get(key) === entry) listings.delete(key);
+    },
+  );
+  return promise;
 }
 
 /** Best matches first when there is a query, else the folder's order; at most `limit`. */

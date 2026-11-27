@@ -238,6 +238,9 @@ export type LoopDialogRun = {
   status: ReviewItemStatus;
   text: string;
   threadId: string | null;
+  /** Full script stdout/stderr (or failure detail), shown in the dialog when clicked. */
+  output?: string | null;
+  error?: string | null;
 };
 
 /** What the Loops panel knows about a loop beyond its settings. */
@@ -329,16 +332,108 @@ function runTime(at: number, now: number): string {
     : RUN_DAY.format(at);
 }
 
+function RunOutputView({
+  run,
+  backLabel,
+  onBack,
+}: {
+  run: LoopDialogRun;
+  backLabel: string;
+  onBack: () => void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (timer.current !== null) window.clearTimeout(timer.current);
+    },
+    [],
+  );
+  const copy = () => {
+    if (!run.output) return;
+    void navigator.clipboard.writeText(run.output).then(() => {
+      setCopied(true);
+      if (timer.current !== null) window.clearTimeout(timer.current);
+      timer.current = window.setTimeout(() => setCopied(false), 1_500);
+    });
+  };
+  return (
+    <>
+      <div className="mt-6 flex items-center gap-2 text-xs font-medium text-subtle-foreground">
+        <span
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            run.status === "running"
+              ? "animate-pulse bg-primary-text"
+              : RUN_DOT[run.status],
+          )}
+        />
+        <span className="truncate">
+          {run.status === "failed" ? "Failed run output" : "Run output"} ·{" "}
+          {formatScheduleRunTime(run.at)}
+        </span>
+        <span aria-hidden className="h-px flex-1 bg-foreground/[0.07]" />
+        <button
+          type="button"
+          onClick={copy}
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground"
+        >
+          <Icon
+            name={copied ? "Check" : "Copy"}
+            className="size-3"
+            aria-hidden
+          />
+          {copied ? "Copied" : "Copy"}
+        </button>
+        <button
+          type="button"
+          onClick={onBack}
+          className="inline-flex shrink-0 cursor-pointer items-center gap-1 rounded px-1.5 py-0.5 text-xs text-muted-foreground hover:bg-state-hover hover:text-foreground"
+        >
+          <Icon name="ChevronLeft" className="size-3" aria-hidden />
+          {backLabel}
+        </button>
+      </div>
+      {run.error ? (
+        <p className="mt-3 text-xs font-medium text-destructive-text">
+          {run.error}
+        </p>
+      ) : null}
+      <div
+        role="region"
+        aria-label="Run output"
+        tabIndex={0}
+        className="transient-scrollbar mt-3 max-h-72 overflow-auto rounded-md border border-border bg-background px-3 py-3 md:max-h-none md:min-h-40 md:flex-1"
+      >
+        <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-foreground/90">
+          {run.output}
+        </pre>
+      </div>
+      <div className="mt-3 flex h-12 shrink-0 items-center gap-2 border-t border-foreground/[0.07] text-xs text-subtle-foreground">
+        <span className="truncate">Click another run on the right to compare</span>
+        <span className="flex-1" />
+        <Button type="button" variant="ghost" size="sm" onClick={onBack}>
+          {backLabel}
+        </Button>
+      </div>
+    </>
+  );
+}
+
 function RecentRuns({
   total,
   runs,
   now,
+  selectedRunId,
+  onSelectRun,
   onOpenThread,
   onOpenReview,
 }: {
   total: number;
   runs: readonly LoopDialogRun[] | null;
   now: number;
+  selectedRunId?: string | null;
+  onSelectRun?: (runId: string) => void;
   onOpenThread?: (threadId: string) => void;
   onOpenReview?: () => void;
 }) {
@@ -369,17 +464,26 @@ function RecentRuns({
           </div>
           <ul className="-mx-2 mt-1.5">
             {runs.slice(0, RECENT_RUNS).map((run) => {
+              const hasOutput =
+                run.threadId === null && Boolean(run.output?.trim());
+              const selected = hasOutput && selectedRunId === run.id;
               const open =
                 run.threadId !== null && onOpenThread
                   ? () => onOpenThread(run.threadId!)
-                  : undefined;
+                  : hasOutput && onSelectRun
+                    ? () => onSelectRun(run.id)
+                    : undefined;
               return (
                 <li key={run.id}>
                   <button
                     type="button"
                     disabled={!open}
+                    aria-pressed={hasOutput ? selected : undefined}
                     onClick={open}
-                    className="flex h-7 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-xs enabled:cursor-pointer enabled:hover:bg-state-hover"
+                    className={cn(
+                      "flex h-7 w-full min-w-0 items-center gap-2.5 rounded-md px-2 text-left text-xs enabled:cursor-pointer enabled:hover:bg-state-hover",
+                      selected && "bg-state-hover",
+                    )}
                   >
                     <span
                       className={cn(
@@ -390,6 +494,7 @@ function RecentRuns({
                       )}
                     />
                     <span
+                      title={run.text}
                       className={cn(
                         "min-w-0 flex-1 truncate",
                         run.status === "running"
@@ -503,8 +608,27 @@ export function LoopDialog({
   const basePrompt = savedPrompt ?? loop.prompt?.trim();
   // Picking Jev on an agent's loop only opens its questions and scripts: it is a Jev loop once they are saved.
   const [jevDraft, setJevDraft] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const jev =
     loop.jev && (loop.jev.action !== null || jevDraft) ? loop.jev : null;
+  const selectedRun =
+    selectedRunId && context.runs
+      ? (context.runs.find(
+          (run) =>
+            run.id === selectedRunId &&
+            run.threadId === null &&
+            Boolean(run.output?.trim()),
+        ) ?? null)
+      : null;
+  const latestFailedOutputRun =
+    context.runs?.find(
+      (run) =>
+        run.status === "failed" &&
+        run.threadId === null &&
+        Boolean(run.output?.trim()),
+    ) ?? null;
+  const toggleRun = (runId: string) =>
+    setSelectedRunId((current) => (current === runId ? null : runId));
   const jevChoice =
     loop.jev && loop.agentEditable && agents?.length === 1
       ? { label: "Jev", icon: TypeSafeLogo, onSelect: () => setJevDraft(true) }
@@ -591,7 +715,13 @@ export function LoopDialog({
           <DialogDescription className="sr-only">
             {loop.cloud ? "Cloud" : "Local"} loop. {next.big}.
           </DialogDescription>
-          {jev ? (
+          {selectedRun ? (
+            <RunOutputView
+              run={selectedRun}
+              backLabel={script ? "Back to script" : "Back"}
+              onBack={() => setSelectedRunId(null)}
+            />
+          ) : jev ? (
             <JevDocument
               saved={
                 jev.action === null
@@ -729,6 +859,7 @@ export function LoopDialog({
                 {next.big}
               </div>
               <div
+                title={loop.paused ? next.small : undefined}
                 className={cn(
                   "mt-0.5 text-xs",
                   loop.paused
@@ -738,6 +869,18 @@ export function LoopDialog({
               >
                 {next.small}
               </div>
+              {loop.paused && latestFailedOutputRun ? (
+                <button
+                  type="button"
+                  onClick={() => toggleRun(latestFailedOutputRun.id)}
+                  className="mt-1.5 inline-flex cursor-pointer items-center gap-1 text-xs font-medium text-muted-foreground hover:text-foreground"
+                >
+                  <Icon name="Terminal" className="size-3" aria-hidden />
+                  {selectedRun?.id === latestFailedOutputRun.id
+                    ? "Hide full output"
+                    : "View full output"}
+                </button>
+              ) : null}
             </div>
 
             <div className="mt-4 flex flex-col border-t border-foreground/[0.07] py-2">
@@ -914,6 +1057,8 @@ export function LoopDialog({
                 total={loop.runs}
                 runs={context.runs}
                 now={now}
+                selectedRunId={selectedRun?.id ?? null}
+                onSelectRun={toggleRun}
                 {...(context.onOpenThread
                   ? { onOpenThread: context.onOpenThread }
                   : {})}
@@ -980,6 +1125,8 @@ function useJevRuns(
               ? run.actions.join(" · ")
               : (run.reason ?? "Ran"),
             threadId: null,
+            output: run.outcome === "failed" ? run.reason : null,
+            error: run.outcome === "failed" ? run.reason : null,
           })),
         );
       },

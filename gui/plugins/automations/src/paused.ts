@@ -139,7 +139,7 @@ async function fetchCloud(
   return { loops, newest, woken };
 }
 
-/** The sidebar's loop icon (#1136): hover text for each open thread (`open`, the threads the sidebar shows) a loop
+/** The purpose cards' loop line (#1136): text for each open thread (`open`, the threads the sidebar shows) a loop
  *  started in the last 30 days or wakes (same-thread loops). Looks up only those threads, one row each at most, so the
  *  read never grows with run history. Cloud runs are in the review list, same-thread Cloud loops in `cloudWoken`. */
 export function loopThreads(

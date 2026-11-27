@@ -126,9 +126,62 @@ export function isWakeAgentSuppressed(output: string): boolean {
 export interface ScriptRunResult {
   exitCode: number | null;
   output: string;
+  stderr?: string;
   timedOut: boolean;
   /** A room-cli in the script got no answer from Cloudroom (#2656). */
   unavailable?: boolean;
+}
+
+const ANSI_ESCAPE =
+  /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/gu;
+const DECORATION_LINE = /^[~^=\-_*│|]+$/u;
+const NODE_VERSION_LINE = /^Node\.js v\d+\.\d+/u;
+const STACK_FRAME_LINE = /^\s+at\s+/u;
+const ERROR_PROP_LINE = /^\s+[A-Za-z_]\w*:/u;
+const ERROR_LINE_MAX = 200;
+const NOISE_LINES = new Set([
+  "[output truncated]",
+  ROOM_NOT_INJECTED_WARNING,
+]);
+
+function lastMeaningfulLine(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const lines = raw
+    .replace(ANSI_ESCAPE, "")
+    .split(/\r?\n/u)
+    .filter((line) => {
+      const trimmed = line.trim();
+      return (
+        trimmed.length > 0 &&
+        !NOISE_LINES.has(trimmed) &&
+        !DECORATION_LINE.test(trimmed)
+      );
+    });
+  if (lines.length === 0) return null;
+  let end = lines.length - 1;
+  while (end > 0 && NODE_VERSION_LINE.test(lines[end]!.trim())) end -= 1;
+  // Node.js prints trailing `{ errno, code, ... }` error properties after stack frames.
+  if (end > 0 && lines[end]!.trim() === "}") {
+    let probe = end - 1;
+    while (probe > 0 && ERROR_PROP_LINE.test(lines[probe]!)) probe -= 1;
+    if (STACK_FRAME_LINE.test(lines[probe]!)) end = probe;
+  }
+  const beforeFrames = end;
+  while (end > 0 && STACK_FRAME_LINE.test(lines[end]!)) end -= 1;
+  if (end === 0 && STACK_FRAME_LINE.test(lines[0]!)) end = beforeFrames;
+  const text = lines[end]!.replace(/\s+/gu, " ").trim();
+  if (!text) return null;
+  return text.length > ERROR_LINE_MAX
+    ? `${text.slice(0, ERROR_LINE_MAX - 1)}…`
+    : text;
+}
+
+/** Last meaningful error line from a failed script: prefers stderr, falls back to combined output. */
+export function scriptErrorLine(
+  stderr: string | undefined,
+  fallbackOutput?: string,
+): string | null {
+  return lastMeaningfulLine(stderr) ?? lastMeaningfulLine(fallbackOutput);
 }
 
 interface ScriptRunOutcome {
@@ -153,11 +206,15 @@ export function mapScriptResultToRun(
     };
   }
   if (result.exitCode !== 0) {
+    const detail = scriptErrorLine(result.stderr, result.output);
+    const error = detail
+      ? `${unavailable}${detail}${result.exitCode !== null ? ` (exit ${result.exitCode})` : ""}`
+      : `${unavailable}Script exited with code ${result.exitCode}`;
     return {
       status: "failed",
       output: result.output.length > 0 ? result.output : null,
       exitCode: result.exitCode,
-      error: `${unavailable}Script exited with code ${result.exitCode}`,
+      error,
       skipReason: null,
     };
   }
@@ -313,11 +370,12 @@ function executeWithProcessGroup(args: {
         signalProcessGroup(child, "SIGKILL");
       }
       const suffix = outputLimitExceeded ? "\n[output truncated]\n" : "";
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
       resolve({
         exitCode: timedOut ? null : outputLimitExceeded ? 1 : code,
-        output: `${Buffer.concat(stdoutChunks).toString("utf8")}${Buffer.concat(
-          stderrChunks,
-        ).toString("utf8")}${suffix}`,
+        output: `${stdout}${stderr}${suffix}`,
+        stderr,
         timedOut,
       });
     });

@@ -2545,7 +2545,34 @@ describe("script wake gate", () => {
     ).toMatchObject({ status: "skipped", skipReason: "wakeAgent false" });
     expect(
       mapScriptResultToRun({ exitCode: 2, output: "bad", timedOut: false }),
+    ).toMatchObject({ status: "failed", error: "bad (exit 2)" });
+    expect(
+      mapScriptResultToRun({ exitCode: 2, output: "", timedOut: false }),
     ).toMatchObject({ status: "failed", error: "Script exited with code 2" });
+    expect(
+      mapScriptResultToRun({
+        exitCode: 1,
+        output:
+          'Traceback (most recent call last):\n  File "report.py", line 76, in payload\n    cell["c"] += b["eventType"]["slug"]\n                 ~~~~~~~~~~~~~~^^^^^^^^\nTypeError: \'NoneType\' object is not subscriptable\n',
+        stderr: "",
+        timedOut: false,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      error: "TypeError: 'NoneType' object is not subscriptable (exit 1)",
+    });
+    expect(
+      mapScriptResultToRun({
+        exitCode: 1,
+        output: "Fetching data...\nError: ENOENT\n",
+        stderr:
+          "\x1b[31mError: ENOENT: no such file\x1b[0m\n    at Object.openSync (node:fs:562:18)\n    at main (file:///app/check.mjs:2:4) {\n  errno: -2,\n  code: 'ENOENT'\n}\n\nNode.js v22.14.0\n",
+        timedOut: false,
+      }),
+    ).toMatchObject({
+      status: "failed",
+      error: "Error: ENOENT: no such file (exit 1)",
+    });
   });
 });
 

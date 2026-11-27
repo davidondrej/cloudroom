@@ -711,4 +711,41 @@ describe("TasksEditor submit-on-Enter", () => {
     );
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  it("keeps the mention list and Enter while the next lookup loads", async () => {
+    const onSubmit = vi.fn();
+    let editor: Editor | null = null;
+    const item = {
+      type: "task" as const,
+      id: "1",
+      key: "TSK-1",
+      title: "Pick me",
+    };
+    const screen = render(
+      <TasksEditor
+        value=""
+        onChange={() => undefined}
+        onSubmit={onSubmit}
+        variant="comment"
+        mentionItems={(query) =>
+          query === "" ? Promise.resolve([item]) : new Promise(() => {})
+        }
+        onEditorReady={(ready) => {
+          editor = ready;
+        }}
+      />,
+    );
+    editor!.chain().focus().insertContent("@").run();
+    await screen.findByText("Pick me");
+    editor!.chain().focus().insertContent("T").run();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("Pick me")).toBeTruthy();
+    fireEvent.keyDown(getEditorSurface(screen.container), { key: "Enter" });
+    await waitFor(() =>
+      expect(
+        screen.container.querySelector('[data-task-mention="TSK-1"]'),
+      ).toBeTruthy(),
+    );
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
 });

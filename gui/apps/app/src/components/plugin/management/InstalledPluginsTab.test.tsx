@@ -1,9 +1,7 @@
 // @vitest-environment jsdom
 
 import { cleanup, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import { type PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 import { InstalledPluginRow } from "./InstalledPluginsTab";
 import { makePluginListItem } from "@/test/fixtures/plugins";
@@ -22,13 +20,8 @@ function plugin(overrides: Partial<PluginListItem> = {}): PluginListItem {
 }
 
 function renderRow(item: PluginListItem) {
-  const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
   return render(
-    <MemoryRouter>
-      <QueryClientWrapper>
-        <InstalledPluginRow plugin={item} onUpdateClick={vi.fn()} />
-      </QueryClientWrapper>
-    </MemoryRouter>,
+    <InstalledPluginRow plugin={item} selected={false} onOpen={vi.fn()} />,
   );
 }
 
@@ -37,38 +30,19 @@ afterEach(() => {
 });
 
 describe("InstalledPluginRow", () => {
-  it("shows the status word and detail and marks the switch when a plugin is not running", () => {
-    renderRow(
-      plugin({
-        status: "incompatible",
-        statusDetail: "requires Cloudroom >=0.38.0 <0.39.0, this is 0.39.0",
-      }),
-    );
+  it("shows the status word when a plugin is not running", () => {
+    renderRow(plugin({ status: "incompatible" }));
 
     expect(screen.getByTestId("plugin-runtime-status-notify").textContent).toBe(
       "Incompatible",
     );
-    expect(
-      screen.getByText("requires Cloudroom >=0.38.0 <0.39.0, this is 0.39.0"),
-    ).toBeTruthy();
-    expect(
-      screen
-        .getByRole("switch", {
-          name: "Disable notify (incompatible, not running)",
-        })
-        .getAttribute("aria-checked"),
-    ).toBe("true");
   });
 
-  it("does not call a needs-configuration plugin not running", () => {
-    renderRow(
-      plugin({
-        status: "needs-configuration",
-        statusDetail: "Set an API token.",
-      }),
-    );
+  it("marks a disabled plugin Off instead of showing a status", () => {
+    renderRow(plugin({ enabled: false, status: "disabled" }));
 
-    expect(screen.getByText("Set an API token.")).toBeTruthy();
-    expect(screen.queryByTestId("plugin-not-running-notify")).toBeNull();
+    expect(screen.getByTestId("plugin-row-notify").textContent).toBe(
+      "NotifyOff",
+    );
   });
 });

@@ -72,7 +72,7 @@ interface RemarkMessageDirectiveFile {
   value: unknown;
 }
 
-interface MessageDirectiveElementProps {
+export interface MessageDirectiveElementProps {
   "data-directive-index"?: string;
 }
 
@@ -278,49 +278,66 @@ export const MessageDirectiveMountsContext = createContext<
   readonly MountedMessageDirective[]
 >(EMPTY_MOUNTED_MESSAGE_DIRECTIVES);
 
+export type MessageDirectiveViewProps = MessageDirectiveElementProps &
+  BuildMessageDirectiveComponentArgs;
+
+export function MessageDirectiveView({
+  message,
+  openWorkspaceFile,
+  openThreadPanel,
+  ...props
+}: MessageDirectiveViewProps) {
+  const mounts = useContext(MessageDirectiveMountsContext);
+  const rawIndex = props["data-directive-index"];
+  if (rawIndex === undefined) {
+    return null;
+  }
+  const mount = mounts[Number(rawIndex)];
+  if (mount === undefined) {
+    return null;
+  }
+  const { slot, attributes, source } = mount;
+  const Component = slot.component;
+  const element = (
+    <Component
+      attributes={attributes}
+      source={source}
+      message={message}
+      openWorkspaceFile={openWorkspaceFile}
+    />
+  );
+  return (
+    <PluginSlotMount
+      key={`${slot.pluginId}/${slot.id}/${slot.generation}`}
+      pluginId={slot.pluginId}
+      slotKind="messageDirective"
+      slotId={slot.id}
+      crashFallback={source}
+    >
+      {openThreadPanel === null ? (
+        element
+      ) : (
+        <PluginThreadPanelNavigationProvider openThreadPanel={openThreadPanel}>
+          {element}
+        </PluginThreadPanelNavigationProvider>
+      )}
+    </PluginSlotMount>
+  );
+}
+
 export function buildMessageDirectiveComponent({
   message,
   openWorkspaceFile,
   openThreadPanel,
 }: BuildMessageDirectiveComponentArgs): ComponentType<MessageDirectiveElementProps> {
   function MessageDirectiveElement(props: MessageDirectiveElementProps) {
-    const mounts = useContext(MessageDirectiveMountsContext);
-    const rawIndex = props["data-directive-index"];
-    if (rawIndex === undefined) {
-      return null;
-    }
-    const mount = mounts[Number(rawIndex)];
-    if (mount === undefined) {
-      return null;
-    }
-    const { slot, attributes, source } = mount;
-    const Component = slot.component;
-    const element = (
-      <Component
-        attributes={attributes}
-        source={source}
+    return (
+      <MessageDirectiveView
+        {...props}
         message={message}
         openWorkspaceFile={openWorkspaceFile}
+        openThreadPanel={openThreadPanel}
       />
-    );
-    return (
-      <PluginSlotMount
-        key={`${slot.pluginId}/${slot.id}/${slot.generation}`}
-        pluginId={slot.pluginId}
-        slotKind="messageDirective"
-        slotId={slot.id}
-        crashFallback={source}
-      >
-        {openThreadPanel === null ? (
-          element
-        ) : (
-          <PluginThreadPanelNavigationProvider
-            openThreadPanel={openThreadPanel}
-          >
-            {element}
-          </PluginThreadPanelNavigationProvider>
-        )}
-      </PluginSlotMount>
     );
   }
 

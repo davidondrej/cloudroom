@@ -15,6 +15,7 @@ import {
 import {
   usageListMethod,
   usageFetchMethod,
+  usageMeasurementSchema,
   type UsageResourceList,
   type UsageMeasurement,
   usageSourceRpcContract,
@@ -22,6 +23,43 @@ import {
   ACCOUNTS_LIST_METHOD,
   accountViewsSchema,
 } from "./usage-source-contract.js";
+
+const SAVED_MEASUREMENTS_KEY = "measurements:v1";
+const CLAUDE_PROVIDER_ID = "claude-code";
+const CLAUDE_RETRY_BASE_MS = 35_000;
+const CLAUDE_RETRY_JITTER_MS = 5_000;
+const CLAUDE_RETRY_MAX_ATTEMPTS = 3;
+const CLAUDE_IDLE_RECOVERY_COOLDOWN_MS = 60_000;
+const USAGE_UPDATED_EVENT = "usage-updated";
+
+function rollExpiredWindows(
+  measurement: UsageMeasurement,
+  now = Date.now(),
+): UsageMeasurement {
+  if (measurement.usage.status !== "ok") return measurement;
+  let changed = false;
+  const windows = measurement.usage.windows.map((window) => {
+    if (window.resetsAt === null) return window;
+    const resetAt = Date.parse(window.resetsAt);
+    if (!Number.isFinite(resetAt) || resetAt > now) return window;
+    changed = true;
+    return { ...window, usedPercent: 0, resetsAt: null };
+  });
+  return changed
+    ? { ...measurement, usage: { ...measurement.usage, windows } }
+    : measurement;
+}
+
+function pluginIdFromKey(key: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    return Array.isArray(parsed) && typeof parsed[0] === "string"
+      ? parsed[0]
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 interface SourceResult {
   pluginId: string;
@@ -198,6 +236,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     machines: UsageMachine[],
     providers: Provider[],
     refreshClaude: boolean,
+    skipLocalClaude: boolean,
   ): Promise<void> => {
     const sources = (
       await room.sdk.plugins
@@ -215,8 +254,14 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           .callRpc({
             pluginId: source.pluginId,
             method: ACCOUNTS_LIST_METHOD,
-            input: providerId === "claude-code" && refreshClaude
-              ? { provider: providerId, refresh: true } : { provider: providerId },
+            input:
+              providerId === "claude-code" && refreshClaude
+                ? {
+                    provider: providerId,
+                    refresh: true,
+                    ...(skipLocalClaude ? { skipLocal: true } : {}),
+                  }
+                : { provider: providerId },
             outputSchema: accountViewsSchema,
             signal: AbortSignal.timeout(providerId === "claude-code" && refreshClaude ? 40_000 : 10_000),
           })
@@ -239,7 +284,11 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
             ...entry,
             accountLabel: (sameLogin ? mac.name : null) ?? entry.accountLabel,
             usage: providerId === "claude-code" && mac.email && (mac.inUse || mac.limitedUntil)
-              ? accountUsage(mac, entry.usage) : entry.usage,
+              ? accountUsage(
+                  skipLocalClaude ? { ...mac, windows: [], credits: null } : mac,
+                  entry.usage,
+                )
+              : entry.usage,
           };
         };
         if (!accounts.some((account) => account.id !== "local")) {
@@ -277,7 +326,17 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         }
       }
   };
+  let disposed = false;
   const inventories = new Map<string, SourceResult>();
+  const resourceMeta = new Map<
+    string,
+    {
+      pluginId: string;
+      resourceId: string;
+      providerId: string;
+      hostId: string | null;
+    }
+  >();
   const measurements = new Map<
     string,
     { value: UsageMeasurement; loadedAt: number }
@@ -287,8 +346,91 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     string,
     { force: boolean; promise: Promise<UsageMeasurement> }
   >();
+  const claudeRetries = new Map<
+    string,
+    { attempts: number; timer: ReturnType<typeof setTimeout> | null }
+  >();
+  const lastIdleRecoveryAt = new Map<string, number>();
   const keyOf = (pluginId: string, resourceId: string) =>
     JSON.stringify([pluginId, resourceId]);
+
+  let hydrated: Promise<void> | null = null;
+  let lastSavedJson = "";
+  let persistChain: Promise<void> = Promise.resolve();
+  const buildSavedSnapshot = (): Record<string, UsageMeasurement> => {
+    const saved: Record<string, UsageMeasurement> = {};
+    for (const [key, entry] of measurements) {
+      if (entry.value.usage.status === "ok") saved[key] = entry.value;
+    }
+    return saved;
+  };
+  const hydrateMeasurements = (): Promise<void> => {
+    if (hydrated !== null) return hydrated;
+    hydrated = (async () => {
+      const raw: unknown = await room.storage?.kv
+        ?.get(SAVED_MEASUREMENTS_KEY)
+        .catch(() => undefined);
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return;
+      for (const [key, item] of Object.entries(raw)) {
+        if (measurements.has(key)) continue;
+        const parsed = usageMeasurementSchema.safeParse(item);
+        if (parsed.success && parsed.data.usage.status === "ok") {
+          measurements.set(key, {
+            value: normalizeUsageMeasurement(parsed.data),
+            loadedAt: 0,
+          });
+        }
+      }
+      lastSavedJson = JSON.stringify(buildSavedSnapshot());
+    })();
+    return hydrated;
+  };
+  const persistMeasurements = (): void => {
+    const kv = room.storage?.kv;
+    if (!kv || disposed) return;
+    const saved = buildSavedSnapshot();
+    const json = JSON.stringify(saved);
+    if (json === lastSavedJson) return;
+    lastSavedJson = json;
+    persistChain = persistChain
+      .then(() => kv.set(SAVED_MEASUREMENTS_KEY, saved))
+      .catch(() => {});
+  };
+  const clearClaudeRetry = (key: string): void => {
+    const state = claudeRetries.get(key);
+    if (state?.timer) clearTimeout(state.timer);
+    claudeRetries.delete(key);
+  };
+  const scheduleClaudeRetry = (pluginId: string, resourceId: string): void => {
+    if (disposed) return;
+    const key = keyOf(pluginId, resourceId);
+    const state = claudeRetries.get(key) ?? { attempts: 0, timer: null };
+    if (state.timer !== null || state.attempts >= CLAUDE_RETRY_MAX_ATTEMPTS)
+      return;
+    const delay =
+      CLAUDE_RETRY_BASE_MS * 2 ** state.attempts +
+      Math.floor(Math.random() * CLAUDE_RETRY_JITTER_MS);
+    state.attempts += 1;
+    const timer = setTimeout(() => {
+      state.timer = null;
+      if (disposed || !failures.has(key)) {
+        claudeRetries.delete(key);
+        return;
+      }
+      void fetchResource(pluginId, resourceId, false)
+        .then(() => {
+          claudeRetries.delete(key);
+          room.realtime?.publish(USAGE_UPDATED_EVENT, {});
+        })
+        .catch(() => {
+          if (failures.has(key)) scheduleClaudeRetry(pluginId, resourceId);
+        });
+    }, delay);
+    timer.unref?.();
+    state.timer = timer;
+    claudeRetries.set(key, state);
+  };
+
   const fetchResource = async (
     pluginId: string,
     resourceId: string,
@@ -315,6 +457,8 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           throw new Error("Usage could not be refreshed.");
         measurements.set(key, { value, loadedAt: Date.now() });
         failures.delete(key);
+        clearClaudeRetry(key);
+        persistMeasurements();
         return value;
       })
       .finally(() => pending.delete(key));
@@ -322,6 +466,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     return promise;
   };
   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
+    await hydrateMeasurements();
     const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
     const [hosts, sources, usageProviders, config] = await Promise.all([
       room.sdk.hosts
@@ -396,16 +541,40 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         )
       ).flat(),
     ];
-    const keys = new Set(
-      [...inventories.values()].flatMap((source) =>
-        source.resources.map((resource) => keyOf(source.pluginId, resource.id)),
-      ),
-    );
-    for (const key of measurements.keys())
-      if (!keys.has(key)) {
+    const keys = new Set<string>();
+    const discoveredPlugins = new Set(sources.map((source) => source.pluginId));
+    const erroredPlugins = new Set<string>();
+    for (const source of inventories.values()) {
+      if (source.error !== null) erroredPlugins.add(source.pluginId);
+      for (const resource of source.resources) {
+        const key = keyOf(source.pluginId, resource.id);
+        keys.add(key);
+        resourceMeta.set(key, {
+          pluginId: source.pluginId,
+          resourceId: resource.id,
+          providerId: resource.providerId,
+          hostId: resource.scope.kind === "host" ? resource.scope.hostId : null,
+        });
+      }
+    }
+    let evicted = false;
+    for (const key of [...measurements.keys()]) {
+      const owner = pluginIdFromKey(key);
+      if (
+        !keys.has(key) &&
+        owner !== null &&
+        discoveredPlugins.has(owner) &&
+        !erroredPlugins.has(owner)
+      ) {
         measurements.delete(key);
         failures.delete(key);
+        resourceMeta.delete(key);
+        lastIdleRecoveryAt.delete(key);
+        clearClaudeRetry(key);
+        evicted = true;
       }
+    }
+    if (evicted) persistMeasurements();
     const selected = [...inventories.values()].flatMap((source) =>
       source.resources
         .filter((resource) => {
@@ -432,6 +601,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         })
         .map((resource) => ({ source, resource })),
     );
+    let primaryClaudeRefreshed = false;
     for (let offset = 0; offset < selected.length; offset += 3) {
       await Promise.all(
         selected.slice(offset, offset + 3).map(async ({ source, resource }) => {
@@ -443,10 +613,29 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
             Date.now() - cached.loadedAt < request.maxAgeMs
           )
             return;
+          if (
+            !request.force &&
+            resource.providerId === CLAUDE_PROVIDER_ID &&
+            claudeRetries.get(key)?.timer != null
+          )
+            return;
+          if (request.force && resource.providerId === CLAUDE_PROVIDER_ID) {
+            clearClaudeRetry(key);
+          }
           try {
             await fetchResource(source.pluginId, resource.id, request.force);
+            if (
+              resource.providerId === CLAUDE_PROVIDER_ID &&
+              resource.scope.kind === "host" &&
+              resource.scope.hostId === config?.primaryHostId
+            ) {
+              primaryClaudeRefreshed = true;
+            }
           } catch {
             failures.add(key);
+            if (resource.providerId === CLAUDE_PROVIDER_ID) {
+              scheduleClaudeRetry(source.pluginId, resource.id);
+            }
           }
         }),
       );
@@ -503,7 +692,12 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         const key = keyOf(source.pluginId, resource.id);
         const cached = measurements.get(key);
         machine.providers.push(
-          resourceProvider(resource, cached?.value, source.pluginId, providers),
+          resourceProvider(
+            resource,
+            cached ? rollExpiredWindows(cached.value) : undefined,
+            source.pluginId,
+            providers,
+          ),
         );
         if (source.error !== null || failures.has(key))
           machine.error = "Some usage could not be refreshed.";
@@ -512,7 +706,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     const refreshClaude = request.force && (request.providerId === null || request.providerId === "claude-code") &&
       machines.some((machine) => !machine.id.startsWith("source:") &&
         (request.machineIds === null || request.machineIds.includes(machine.id)));
-    await mergeAccounts(machines, providers, refreshClaude);
+    await mergeAccounts(machines, providers, refreshClaude, primaryClaudeRefreshed);
     const providerOrder = new Map(
       providers.map((provider, index) => [provider.id, index]),
     );
@@ -525,9 +719,42 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     return { machines };
   };
   room.rpc.register(providerUsageRpcContract, { getUsage: readUsage });
-  const markDirty = () => {
-    for (const value of measurements.values()) value.loadedAt = 0;
+  const markDirty = (
+    event?: { thread?: { providerId?: string; host?: { id?: string } | null } },
+    recoverClaude = false,
+  ) => {
+    const providerId = event?.thread?.providerId;
+    for (const [key, entry] of measurements) {
+      const meta = resourceMeta.get(key);
+      if (!providerId || !meta || meta.providerId === providerId) {
+        entry.loadedAt = 0;
+      }
+    }
+    if (!recoverClaude || providerId !== CLAUDE_PROVIDER_ID || disposed) return;
+    const threadHostId = event?.thread?.host?.id ?? null;
+    const now = Date.now();
+    for (const key of [...failures]) {
+      const meta = resourceMeta.get(key);
+      if (meta?.providerId !== CLAUDE_PROVIDER_ID) continue;
+      if (threadHostId && meta.hostId && meta.hostId !== threadHostId) continue;
+      if (claudeRetries.get(key)?.timer != null) continue;
+      if (now - (lastIdleRecoveryAt.get(key) ?? 0) < CLAUDE_IDLE_RECOVERY_COOLDOWN_MS)
+        continue;
+      lastIdleRecoveryAt.set(key, now);
+      void fetchResource(meta.pluginId, meta.resourceId, true)
+        .then(() => {
+          room.realtime?.publish(USAGE_UPDATED_EVENT, {});
+        })
+        .catch(() => {
+          if (failures.has(key))
+            scheduleClaudeRetry(meta.pluginId, meta.resourceId);
+        });
+    }
   };
-  room.events.on("thread.idle", markDirty);
-  room.events.on("thread.failed", markDirty);
+  room.events.on("thread.idle", (event) => markDirty(event, true));
+  room.events.on("thread.failed", (event) => markDirty(event, false));
+  room.onDispose(() => {
+    disposed = true;
+    for (const key of [...claudeRetries.keys()]) clearClaudeRetry(key);
+  });
 }

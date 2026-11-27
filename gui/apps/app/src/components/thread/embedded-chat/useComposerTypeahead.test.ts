@@ -1,39 +1,11 @@
 // @vitest-environment jsdom
 
 import { renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { useComposerTypeahead } from "./useComposerTypeahead";
 
-const mocks = vi.hoisted(() => ({ usePromptMentions: vi.fn() }));
-
-vi.mock("@/hooks/usePromptMentions", () => ({
-  usePromptMentions: mocks.usePromptMentions,
-}));
-
-vi.mock("@/hooks/useCommandSuggestions", () => ({
-  useCommandSuggestions: () => ({
-    trigger: null,
-    suggestions: [],
-    isLoading: false,
-    isError: false,
-    hasMore: false,
-    isLoadingMore: false,
-    loadMore: () => {},
-  }),
-}));
-
-beforeEach(() => {
-  mocks.usePromptMentions.mockReturnValue({
-    triggers: ["@"],
-    results: { suggestions: [] },
-    isLoading: false,
-    isError: false,
-    setQuery: () => {},
-  });
-});
-
 function threadStorageSearchedFor(environmentId: string | null) {
-  renderHook(() =>
+  const { result } = renderHook(() =>
     useComposerTypeahead({
       projectId: "proj_1",
       providerId: "codex",
@@ -43,7 +15,7 @@ function threadStorageSearchedFor(environmentId: string | null) {
       resolveMentionLink: vi.fn(),
     }),
   );
-  return mocks.usePromptMentions.mock.lastCall?.[1].threadStorageThreadId;
+  return result.current.typeaheadConfig.threadStorageThreadId;
 }
 
 describe("useComposerTypeahead", () => {

@@ -764,11 +764,12 @@ describe("Cloudroom Official plugin detail routing", () => {
       { wrapper: QueryClientWrapper },
     );
 
-    await waitFor(() => {
-      expect(document.querySelector("[data-plugin-summary]")?.textContent).toBe(
-        "Description from installed metadata.",
-      );
-    });
+    expect(
+      await screen.findByText("Description from installed metadata."),
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Description from an unrelated catalog entry."),
+    ).toBeNull();
   });
 
   it("resolves an uninstalled catalog plugin and opens its install confirmation", async () => {
@@ -995,13 +996,6 @@ describe("Cloudroom Official plugin detail routing", () => {
       const pluginButton = await screen.findByRole("button", {
         name: "GitHub plugin details",
       });
-      expect(
-        vi
-          .mocked(fetch)
-          .mock.calls.some(([input]) =>
-            String(input).startsWith("/api/v1/plugin-catalog/search"),
-          ),
-      ).toBe(false);
       fireEvent.click(pluginButton);
     }
 

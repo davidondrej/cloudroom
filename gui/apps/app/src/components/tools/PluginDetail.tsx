@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react";
+import { useSyncExternalStore, type ReactNode } from "react";
 import {
   ResourceActivitySection,
   ResourceDetailConfigurationSection,
@@ -21,6 +21,7 @@ import { formatHomePathForDisplay } from "@cloudroom/shared-ui/lib/utils";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Link } from "react-router";
 import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
+import { PluginSettingsPage } from "@/components/plugin/PluginSettings";
 import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import {
   PluginDetailReleaseControl,
@@ -228,7 +229,10 @@ export function PluginDetail({
   catalogEntry,
   catalogEntries,
   onOpenPlugin,
+  settings,
 }: {
+  /** Settings → Plugins: draw the plugin's settings in the page instead of linking to them. */
+  settings?: ReactNode;
   isLoading: boolean;
   plugin: PluginListItem | null;
   pending: boolean;
@@ -316,12 +320,102 @@ export function PluginDetail({
       tone: "destructive" as const,
       disabled: pending || plugin.provenance === "builtin",
       disabledReason:
-        plugin.provenance === "builtin"
-          ? "Included with Cloudroom; disable this plugin instead."
-          : undefined,
+        plugin.alwaysEnabled
+          ? "Built into Cloudroom; always on."
+          : plugin.provenance === "builtin"
+            ? "Included with Cloudroom; disable this plugin instead."
+            : undefined,
       onSelect: () => onDelete(plugin),
     },
   ];
+  const overflowMenu = (
+    <ResourceOverflowMenu
+      label={`${pluginName} actions`}
+      items={overflowItems}
+    />
+  );
+  const marketplaceListing =
+    catalogEntry === undefined ? null : (
+      <>
+        <PluginMarketplaceListingSections entry={catalogEntry} />
+        <PluginMoreFromAuthorSection
+          entry={catalogEntry}
+          catalogEntries={catalogEntries}
+          onOpenPlugin={onOpenPlugin}
+        />
+      </>
+    );
+  const releaseAndCapabilities = (
+    <>
+      <ResourceDetailReleaseSection
+        label="Release"
+        actions={
+          hasReleaseControl ? (
+            <PluginDetailReleaseControl plugin={plugin} />
+          ) : hasUpdateManagement ? (
+            <CheckPluginUpdatesButton
+              pluginId={plugin.id}
+              appearance="inline"
+            />
+          ) : undefined
+        }
+      >
+        <PluginDetailTable>
+          <PluginDetailFieldRow
+            label={updatesWithRoom ? "Delivery" : "Installed"}
+            labelClassName="font-medium"
+          >
+            {installedValue}
+          </PluginDetailFieldRow>
+          <PluginDetailFieldRow label="Version" labelClassName="font-medium">
+            <span className="font-mono text-xs">{plugin.version}</span>
+          </PluginDetailFieldRow>
+          {hasReleaseUpdate ? (
+            <PluginDetailFieldRow label="Update" stackOnNarrow>
+              <PluginDetailReleaseStatus plugin={plugin} />
+            </PluginDetailFieldRow>
+          ) : null}
+          {settings !== undefined && plugin.publisherLabel !== null ? (
+            <PluginDetailFieldRow label="Publisher" labelClassName="font-medium">
+              {plugin.publisherLabel}
+            </PluginDetailFieldRow>
+          ) : null}
+          {settings !== undefined ? (
+            <PluginDetailFieldRow label="Location" labelClassName="font-medium">
+              <PluginPath path={plugin.rootDir} />
+            </PluginDetailFieldRow>
+          ) : null}
+        </PluginDetailTable>
+      </ResourceDetailReleaseSection>
+      <PluginIncludes plugin={plugin} />
+      {plugin.services.length > 0 ? (
+        <ResourceActivitySection label="Background services">
+          <PluginServices plugin={plugin} />
+        </ResourceActivitySection>
+      ) : null}
+      {plugin.schedules.length > 0 ? (
+        <ResourceActivitySection label="Scheduled jobs">
+          <PluginSchedules plugin={plugin} />
+        </ResourceActivitySection>
+      ) : null}
+    </>
+  );
+  if (settings !== undefined) {
+    return (
+      <PluginSettingsPage
+        pluginId={plugin.id}
+        headerActions={overflowMenu}
+        detailSections={
+          <>
+            {marketplaceListing}
+            {releaseAndCapabilities}
+          </>
+        }
+      >
+        {settings}
+      </PluginSettingsPage>
+    );
+  }
   return (
     <ResourceDetailPage
       maxWidthClassName="max-w-5xl"
@@ -344,22 +438,23 @@ export function PluginDetail({
         </div>
       }
       lifecycleControl={
-        <Switch
-          checked={plugin.enabled}
-          disabled={pending}
-          aria-label={`${plugin.enabled ? "Disable" : "Enable"} ${pluginName}`}
-          onCheckedChange={() => onToggle(plugin)}
-        />
+        plugin.alwaysEnabled ? (
+          <span className="rounded-full bg-surface-recessed px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            Built in · Always on
+          </span>
+        ) : (
+          <Switch
+            checked={plugin.enabled}
+            disabled={pending}
+            aria-label={`${plugin.enabled ? "Disable" : "Enable"} ${pluginName}`}
+            onCheckedChange={() => onToggle(plugin)}
+          />
+        )
       }
-      overflowMenu={
-        <ResourceOverflowMenu
-          label={`${pluginName} actions`}
-          items={overflowItems}
-        />
-      }
+      overflowMenu={overflowMenu}
     >
       <ResourceDetailStack>
-        {catalogEntry === undefined ? (
+        {marketplaceListing ?? (
           <section data-resource-detail-section="overview">
             <PluginOverviewLead
               description={
@@ -367,15 +462,6 @@ export function PluginDetail({
               }
             />
           </section>
-        ) : (
-          <>
-            <PluginMarketplaceListingSections entry={catalogEntry} />
-            <PluginMoreFromAuthorSection
-              entry={catalogEntry}
-              catalogEntries={catalogEntries}
-              onOpenPlugin={onOpenPlugin}
-            />
-          </>
         )}
         {hasConfiguration ? (
           <ResourceDetailConfigurationSection
@@ -399,47 +485,7 @@ export function PluginDetail({
             </p>
           </ResourceDetailConfigurationSection>
         ) : null}
-        <ResourceDetailReleaseSection
-          label="Release"
-          actions={
-            hasReleaseControl ? (
-              <PluginDetailReleaseControl plugin={plugin} />
-            ) : hasUpdateManagement ? (
-              <CheckPluginUpdatesButton
-                pluginId={plugin.id}
-                appearance="inline"
-              />
-            ) : undefined
-          }
-        >
-          <PluginDetailTable>
-            <PluginDetailFieldRow
-              label={updatesWithRoom ? "Delivery" : "Installed"}
-              labelClassName="font-medium"
-            >
-              {installedValue}
-            </PluginDetailFieldRow>
-            <PluginDetailFieldRow label="Version" labelClassName="font-medium">
-              <span className="font-mono text-xs">{plugin.version}</span>
-            </PluginDetailFieldRow>
-            {hasReleaseUpdate ? (
-              <PluginDetailFieldRow label="Update" stackOnNarrow>
-                <PluginDetailReleaseStatus plugin={plugin} />
-              </PluginDetailFieldRow>
-            ) : null}
-          </PluginDetailTable>
-        </ResourceDetailReleaseSection>
-        <PluginIncludes plugin={plugin} />
-        {plugin.services.length > 0 ? (
-          <ResourceActivitySection label="Background services">
-            <PluginServices plugin={plugin} />
-          </ResourceActivitySection>
-        ) : null}
-        {plugin.schedules.length > 0 ? (
-          <ResourceActivitySection label="Scheduled jobs">
-            <PluginSchedules plugin={plugin} />
-          </ResourceActivitySection>
-        ) : null}
+        {releaseAndCapabilities}
       </ResourceDetailStack>
     </ResourceDetailPage>
   );

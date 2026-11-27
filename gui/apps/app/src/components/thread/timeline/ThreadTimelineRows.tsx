@@ -46,7 +46,6 @@ import {
   type TimelineViewWorkRow,
 } from "@cloudroom/thread-view";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import {
   collectTimelineAutoExpansionRowIds,
   isNonExpandableSummary,
@@ -683,12 +682,47 @@ function timelineHeightSnapRevision(rows: readonly TimelineRow[]): string {
   return joinSignatureParts([firstRowId, "active"]);
 }
 
-function useTimelineViewRowsCache(): GetTimelineViewRows {
-  const cacheRef = useRef(createTimelineViewRowsCache());
+const TIMELINE_VIEW_ROWS_CACHE_LIMIT = 24;
+const timelineViewRowsCacheByThread = new Map<
+  string,
+  ReturnType<typeof createTimelineViewRowsCache>
+>();
+
+function getSharedTimelineViewRowsCache(
+  threadId: string,
+): ReturnType<typeof createTimelineViewRowsCache> {
+  const existing = timelineViewRowsCacheByThread.get(threadId);
+  if (existing !== undefined) {
+    timelineViewRowsCacheByThread.delete(threadId);
+    timelineViewRowsCacheByThread.set(threadId, existing);
+    return existing;
+  }
+  const created = createTimelineViewRowsCache();
+  timelineViewRowsCacheByThread.set(threadId, created);
+  if (timelineViewRowsCacheByThread.size > TIMELINE_VIEW_ROWS_CACHE_LIMIT) {
+    const oldestKey = timelineViewRowsCacheByThread.keys().next().value;
+    if (oldestKey !== undefined) {
+      timelineViewRowsCacheByThread.delete(oldestKey);
+    }
+  }
+  return created;
+}
+
+function useTimelineViewRowsCache(
+  threadId: string | undefined,
+): GetTimelineViewRows {
+  const fallbackCacheRef = useRef<ReturnType<
+    typeof createTimelineViewRowsCache
+  > | null>(null);
   return useCallback<GetTimelineViewRows>(
-    (rawRows, options) =>
-      buildTimelineViewRows(rawRows, { ...options, cache: cacheRef.current }),
-    [],
+    (rawRows, options) => {
+      const cache =
+        threadId !== undefined
+          ? getSharedTimelineViewRowsCache(threadId)
+          : (fallbackCacheRef.current ??= createTimelineViewRowsCache());
+      return buildTimelineViewRows(rawRows, { ...options, cache });
+    },
+    [threadId],
   );
 }
 
@@ -2080,7 +2114,6 @@ function TimelineRowsList({
   unreadDividerPlacement,
 }: TimelineRowsListProps) {
   const { threadId } = useTimelineRendererStaticContext();
-  const isCompactViewport = useIsCompactViewport();
   const bottomAnchor = useBottomAnchoredScroll();
   const scrollRestoreRowId = useContext(TimelineScrollRestoreRowIdContext);
   const detailScrollRoot = useContext(TimelineWindowingScrollRootContext);
@@ -2178,9 +2211,7 @@ function TimelineRowsList({
             getScrollElement={getWindowingScrollElement}
             itemKeys={itemKeys}
             measurements={measurements}
-            minItemCount={
-              spacing === "top-level" ? (isCompactViewport ? 40 : 60) : 20
-            }
+            minItemCount={spacing === "top-level" ? 25 : 20}
             renderItem={(index, windowedState) => {
               const item = items[index];
               if (item === undefined) {
@@ -2268,7 +2299,7 @@ function ThreadTimelineRowsComponent(props: ThreadTimelineRowsProps) {
 }
 
 function ThreadTimelineRowsForTimelineView(props: ThreadTimelineRowsProps) {
-  const getViewRows = useTimelineViewRowsCache();
+  const getViewRows = useTimelineViewRowsCache(props.threadId);
   const [windowingMeasurements] = useState(() => new Map<string, number>());
   const rows = useMemo(
     () => getViewRows(props.timelineRows),

@@ -20,7 +20,7 @@ import { SortableContext, verticalListSortingStrategy } from "@/lib/sortable";
 import { createPortal } from "react-dom";
 import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { ProjectResponse } from "@cloudroom/server-contract";
-import { NavLink } from "react-router";
+import { Link } from "react-router";
 import {
   usePromptDraftHasInput,
   usePromptDraftInputThreadIds,
@@ -788,7 +788,12 @@ const SectionTreeItemRow = memo(function SectionTreeItemRow({
                         ? 0
                         : depthOffset + 1
                     }
-                    selectedThreadId={selectedThreadId}
+                    selectedThreadId={
+                      selectedThreadId &&
+                      projectThreadItemContainsThread(item, selectedThreadId)
+                        ? selectedThreadId
+                        : undefined
+                    }
                     collapsedThreadIds={collapsedThreadIds}
                     variant={variant}
                     onProjectSelect={onProjectSelect}
@@ -1032,7 +1037,12 @@ export const ThreadTreeNodeRow = memo(function ThreadTreeNodeRow({
                   projectId={rowProjectId}
                   item={item}
                   depthOffset={depthOffset}
-                  selectedThreadId={selectedThreadId}
+                  selectedThreadId={
+                    selectedThreadId &&
+                    projectThreadItemContainsThread(item, selectedThreadId)
+                      ? selectedThreadId
+                      : undefined
+                  }
                   collapsedThreadIds={collapsedThreadIds}
                   variant={variant}
                   onProjectSelect={onProjectSelect}
@@ -1173,7 +1183,12 @@ function SectionThreadTreeItems({
               projectId={projectId ?? getItemProjectId(item)}
               item={item}
               depthOffset={depthOffset}
-              selectedThreadId={selectedThreadId}
+              selectedThreadId={
+                selectedThreadId &&
+                projectThreadItemContainsThread(item, selectedThreadId)
+                  ? selectedThreadId
+                  : undefined
+              }
               collapsedThreadIds={collapsedThreadIds}
               variant={variant}
               onProjectSelect={onProjectSelect}
@@ -1649,7 +1664,7 @@ function ProjectRowComponent({
     return getCollapsedChildActivity(projectThreads, draftThreadIds);
   }, [draftThreadIds, isCollapsed, projectThreads, threadListState.status]);
   const projectStatus = isLocalPathInvalid ? (
-    <NavLink
+    <Link
       to={getSettingsProjectRoutePath(project.id)}
       onClick={(event) => {
         event.stopPropagation();
@@ -1662,7 +1677,7 @@ function ProjectRowComponent({
       )}
     >
       <Icon name="AlertTriangle" className={COARSE_POINTER_ICON_SIZE_CLASS} />
-    </NavLink>
+    </Link>
   ) : null;
   const projectActions = (
     <SidebarHeaderControls

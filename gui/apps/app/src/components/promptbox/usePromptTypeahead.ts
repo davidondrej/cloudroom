@@ -1,6 +1,7 @@
 // The `@` and `/` menus: which trigger is being typed, what to suggest, and how a pick lands in the editor.
 import {
   commandPillDismissedRangeEnd,
+  createCommandSearchIndex,
   DEFAULT_PLUGIN_MENTION_TRIGGER,
   filterCommandSuggestions,
   findActiveTrigger,
@@ -11,23 +12,23 @@ import {
   type TypeaheadTrigger,
 } from "@cloudroom/client-core";
 import type { PromptMentionResource } from "@cloudroom/domain";
-import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { Transaction } from "@tiptap/pm/state";
 import type { Editor } from "@tiptap/react";
 import { appToast } from "@/components/ui/app-toast";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  pillSpacer,
   promptCommandResourceFromSuggestion,
   promptMentionResourceFromSuggestion,
 } from "./editor/prompt-editor-serialization";
 import {
   typeaheadSuggestionKey,
   type ComposerCommandMenuState,
+  type ComposerCommandSuggestion,
   type ComposerTypeaheadMenuState,
   type ModelShortcutCommandSuggestion,
   type TypeaheadSuggestion,
-} from "./mentions/MentionMenu";
-import { canLoadMoreCommandResults } from "./mentions/mention-menu-scroll";
+} from "./mentions/typeahead-types";
 import {
   isPromptActionAtCursor,
   promptActionCommand,
@@ -35,7 +36,11 @@ import {
   promptActionInsertionRange,
   triggersForPromptAction,
 } from "./prompt-actions";
-import type { PromptBoxAction, PromptBoxProps } from "./prompt-box-types";
+import type {
+  ControlledTypeaheadConfig,
+  PromptBoxAction,
+  PromptBoxProps,
+} from "./prompt-box-types";
 import type { PromptDocument } from "./usePromptEditor";
 
 /** A trigger the user closed. Its menu stays shut until the caret leaves this range and returns. */
@@ -56,46 +61,30 @@ interface PillInsert {
   clearQuery: () => void;
 }
 
-type CommandSources = Pick<
+export type CommandSources = Pick<
   PromptBoxProps,
   "reasoning" | "fastMode" | "modelShortcuts" | "locationCommands"
 >;
 
-/** A row of the `/` menu: a provider command or one of our own. */
-type CommandSuggestion = Extract<
-  ComposerCommandMenuState,
-  { kind: "results" }
->["suggestions"][number];
-
 const DEFAULT_MENTION_TRIGGERS = [DEFAULT_PLUGIN_MENTION_TRIGGER] as const;
 
-/** A pill needs a space after it unless one is already there. */
-function pillSpacer(doc: ProseMirrorNode, position: number): string {
-  const next = doc.resolve(position).nodeAfter;
-  const spaced = next?.isText
-    ? /^\s/u.test(next.text ?? "")
-    : next?.type.name === "hardBreak";
-  return spaced ? "" : " ";
-}
-
-/**
- * Everything the `/` menu can list. Our own commands (place, fast, reasoning)
- * come first; model shortcuts rank among the provider's commands as skills, so
- * they lead only when they match best.
- */
-function listCommands(
+function listOwnCommands(
   query: string,
-  provided: readonly ProviderCommandSuggestion[],
-  { reasoning, fastMode, modelShortcuts, locationCommands }: CommandSources,
-): { all: CommandSuggestion[]; hasOwn: boolean } {
+  {
+    reasoning,
+    fastMode,
+    locationCommands,
+  }: Pick<CommandSources, "reasoning" | "fastMode" | "locationCommands">,
+): ComposerCommandSuggestion[] {
   const needle = query.trim().toLowerCase();
   const matches = (...words: string[]) =>
-    words.join(" ").toLowerCase().includes(needle);
+    needle.length === 0 || words.join(" ").toLowerCase().includes(needle);
 
-  const own: CommandSuggestion[] = [];
+  const own: ComposerCommandSuggestion[] = [];
   for (const { name, description } of locationCommands ?? []) {
-    if (matches(name, description))
+    if (matches(name, description)) {
       own.push({ kind: "location", name, description });
+    }
   }
   if (fastMode && matches("fast", fastMode.label)) {
     const description = `Turn ${fastMode.enabled ? "off" : "on"} ${fastMode.label} mode`;
@@ -114,39 +103,7 @@ function listCommands(
       });
     }
   }
-
-  const shortcutBySkill = new Map<
-    ProviderCommandSuggestion,
-    ModelShortcutCommandSuggestion
-  >();
-  for (const { name, description, icon } of modelShortcuts ?? []) {
-    shortcutBySkill.set(
-      {
-        kind: "command",
-        name,
-        source: "skill",
-        origin: "user",
-        description,
-        argumentHint: null,
-      },
-      { kind: "model-shortcut", name, description, icon },
-    );
-  }
-  const shortcutSkills = filterCommandSuggestions(
-    [...shortcutBySkill.keys()],
-    query,
-  );
-  const ranked = orderCommandSuggestions(
-    [...provided, ...shortcutSkills],
-    query,
-  );
-  return {
-    all: [
-      ...own,
-      ...ranked.map((skill) => shortcutBySkill.get(skill) ?? skill),
-    ],
-    hasOwn: own.length > 0 || shortcutSkills.length > 0,
-  };
+  return own;
 }
 
 interface PendingModelPick {
@@ -163,7 +120,7 @@ export function usePromptTypeahead({
 }: CommandSources & {
   editor: PromptDocument;
   scopeKey: string;
-  typeahead: PromptBoxProps["typeahead"];
+  typeahead: ControlledTypeaheadConfig;
   promptActions: readonly PromptBoxAction[] | undefined;
   /** Voice input covers the editor, so no menu shows. */
   hidden: boolean;
@@ -171,12 +128,19 @@ export function usePromptTypeahead({
   const [active, setActive] = useState<ActiveTrigger | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const pendingPick = useRef<PendingModelPick | null>(null);
-  const offeredShortcut = useRef<{ from: number; query: string; name: string } | null>(null);
-  useLayoutEffect(() => () => {
-    pendingPick.current = null;
-    offeredShortcut.current = null;
-  }, [scopeKey]);
-  // Caret bookkeeping that must not re-render the composer on every key.
+  const offeredShortcut = useRef<{
+    from: number;
+    query: string;
+    name: string;
+  } | null>(null);
+  useLayoutEffect(
+    () => () => {
+      pendingPick.current = null;
+      offeredShortcut.current = null;
+    },
+    [scopeKey],
+  );
+  // Caret bookkeeping that must not re-render the menu on plain typing.
   const track = useRef({
     dismissal: null as Dismissal | null,
     /** True from a pill's insert until the editor has focus again. */
@@ -189,8 +153,9 @@ export function usePromptTypeahead({
   });
   useEffect(
     () => () => {
-      if (track.current.refocusFrame !== null)
+      if (track.current.refocusFrame !== null) {
         cancelAnimationFrame(track.current.refocusFrame);
+      }
     },
     [track],
   );
@@ -202,8 +167,14 @@ export function usePromptTypeahead({
       pendingPick.current.submit = submit;
       return true;
     }
-    if (active && offeredShortcut.current && !modelShortcuts?.some(({ name }) => name === offeredShortcut.current?.name)) {
-      appToast.error("This model shortcut is no longer available. Edit the draft or wait until the thread is ready.");
+    if (
+      active &&
+      offeredShortcut.current &&
+      !modelShortcuts?.some(({ name }) => name === offeredShortcut.current?.name)
+    ) {
+      appToast.error(
+        "This model shortcut is no longer available. Edit the draft or wait until the thread is ready.",
+      );
       return true;
     }
     return false;
@@ -211,9 +182,9 @@ export function usePromptTypeahead({
   const mentionChars = mention.triggers ?? DEFAULT_MENTION_TRIGGERS;
   const hasOwnCommands = Boolean(
     reasoning?.options.length ||
-    fastMode ||
-    modelShortcuts?.length ||
-    locationCommands?.length,
+      fastMode ||
+      modelShortcuts?.length ||
+      locationCommands?.length,
   );
   const commandChar = command.trigger ?? (hasOwnCommands ? "/" : null);
   const triggers = useMemo<TypeaheadTrigger[]>(
@@ -226,7 +197,7 @@ export function usePromptTypeahead({
     [commandChar, mentionChars],
   );
 
-  /** Tells the parent which query to search for. Null clears a kind's results. */
+  /** Tells the source which query to search for. Null clears a kind's results. */
   const announce = (trigger: ActiveTrigger | null) => {
     const typed = trigger?.kind === "mention" ? trigger : null;
     mention.onQueryChange(typed?.query ?? null, typed?.char ?? null);
@@ -265,8 +236,7 @@ export function usePromptTypeahead({
       track.current.key = key;
       setSelectedKey(null);
     }
-    // Plain typing (no menu before, none now) must not set state: even a
-    // same-value setState can re-render the whole composer on every key.
+    // Plain typing (no menu before, none now) must not set state.
     if (next === null && track.current.shown === null) return;
     track.current.shown = next;
     setActive(next);
@@ -276,8 +246,9 @@ export function usePromptTypeahead({
   /** Keep a dismissed trigger's range attached to its text as the surrounding draft changes. */
   const trackEdit = (transaction: Transaction) => {
     const dismissal = track.current.dismissal;
-    if (!dismissal || !transaction.docChanged || track.current.restoringPill)
+    if (!dismissal || !transaction.docChanged || track.current.restoringPill) {
       return;
+    }
     const start = transaction.mapping.mapResult(dismissal.start, 1);
     track.current.dismissal = start.deleted
       ? null
@@ -290,12 +261,14 @@ export function usePromptTypeahead({
 
   const close = () => {
     track.current.key = "";
+    track.current.shown = null;
     setActive(null);
     announce(null);
   };
   const closeOnBlur = () => {
-    if (track.current.dismissal)
+    if (track.current.dismissal) {
       track.current.dismissal = { ...track.current.dismissal, caretLeft: true };
+    }
     close();
   };
   const dismiss = () => {
@@ -348,6 +321,7 @@ export function usePromptTypeahead({
 
   const insertPill = (pill: PillInsert) => {
     track.current.key = "";
+    track.current.shown = null;
     track.current.dismissal = pill.dismissal;
     track.current.restoringPill = true;
     setActive(null);
@@ -456,13 +430,16 @@ export function usePromptTypeahead({
           if (!saved) return;
           const pick: PendingModelPick = {};
           pendingPick.current = pick;
-          void saved.then(() => {
-            if (pendingPick.current !== pick) return;
-            pendingPick.current = null;
-            pick.submit?.();
-          }, () => {
-            if (pendingPick.current === pick) pendingPick.current = null;
-          });
+          void saved.then(
+            () => {
+              if (pendingPick.current !== pick) return;
+              pendingPick.current = null;
+              pick.submit?.();
+            },
+            () => {
+              if (pendingPick.current === pick) pendingPick.current = null;
+            },
+          );
         });
       }
       case "reasoning":
@@ -487,8 +464,9 @@ export function usePromptTypeahead({
       api.reveal();
     };
     if (typeof requestAnimationFrame !== "function") return run();
-    if (track.current.refocusFrame !== null)
+    if (track.current.refocusFrame !== null) {
       cancelAnimationFrame(track.current.refocusFrame);
+    }
     track.current.refocusFrame = requestAnimationFrame(run);
   };
 
@@ -543,23 +521,92 @@ export function usePromptTypeahead({
 
   const kind = active?.kind ?? null;
   const commandQuery = active?.kind === "command" ? active.query : "";
-  const commands = useMemo(
+
+  const shortcutEntries = useMemo(() => {
+    const bySkill = new Map<
+      ProviderCommandSuggestion,
+      ModelShortcutCommandSuggestion
+    >();
+    for (const { name, description, icon } of modelShortcuts ?? []) {
+      bySkill.set(
+        {
+          kind: "command",
+          name,
+          source: "skill",
+          origin: "user",
+          description,
+          argumentHint: null,
+        },
+        { kind: "model-shortcut", name, description, icon },
+      );
+    }
+    return { skills: [...bySkill.keys()], bySkill };
+  }, [modelShortcuts]);
+
+  // Single-pass index built once per catalog/shortcut change when live catalog is provided.
+  const catalogSearchIndex = useMemo(
     () =>
-      listCommands(commandQuery, command.suggestions, {
-        reasoning,
-        fastMode,
-        modelShortcuts,
-        locationCommands,
-      }),
-    [
-      command.suggestions,
-      commandQuery,
+      command.catalog !== undefined
+        ? createCommandSearchIndex([...command.catalog, ...shortcutEntries.skills])
+        : null,
+    [command.catalog, shortcutEntries.skills],
+  );
+
+  const commands = useMemo<{
+    all: ComposerCommandSuggestion[];
+    hasOwn: boolean;
+  }>(() => {
+    if (kind !== "command") {
+      return { all: [], hasOwn: false };
+    }
+    const own = listOwnCommands(commandQuery, {
+      reasoning,
       fastMode,
       locationCommands,
-      modelShortcuts,
-      reasoning,
-    ],
-  );
+    });
+    if (catalogSearchIndex !== null) {
+      const ranked = catalogSearchIndex.search(commandQuery);
+      let hasShortcut = false;
+      const mapped = ranked.map((skill) => {
+        const shortcut = shortcutEntries.bySkill.get(skill);
+        if (shortcut !== undefined) {
+          hasShortcut = true;
+          return shortcut;
+        }
+        return skill;
+      });
+      return {
+        all: [...own, ...mapped],
+        hasOwn: own.length > 0 || hasShortcut,
+      };
+    }
+    const shortcutSkills = filterCommandSuggestions(
+      shortcutEntries.skills,
+      commandQuery,
+    );
+    const ranked = orderCommandSuggestions(
+      [...command.suggestions, ...shortcutSkills],
+      commandQuery,
+    );
+    return {
+      all: [
+        ...own,
+        ...ranked.map((skill) => shortcutEntries.bySkill.get(skill) ?? skill),
+      ],
+      hasOwn: own.length > 0 || shortcutSkills.length > 0,
+    };
+  }, [
+    catalogSearchIndex,
+    command.suggestions,
+    commandQuery,
+    fastMode,
+    kind,
+    locationCommands,
+    reasoning,
+    shortcutEntries.bySkill,
+    shortcutEntries.skills,
+  ]);
+
   const suggestions: readonly TypeaheadSuggestion[] =
     kind === "command"
       ? commands.all
@@ -577,8 +624,16 @@ export function usePromptTypeahead({
   // If the row disappears between typing and Enter, keep the draft and avoid activating the skill below it.
   useLayoutEffect(() => {
     if (active?.kind === "command" && highlighted?.kind === "model-shortcut") {
-      offeredShortcut.current = { from: active.from, query: active.query, name: highlighted.name };
-    } else if (selectedKey || offeredShortcut.current?.query !== active?.query || offeredShortcut.current?.from !== active?.from) {
+      offeredShortcut.current = {
+        from: active.from,
+        query: active.query,
+        name: highlighted.name,
+      };
+    } else if (
+      selectedKey ||
+      offeredShortcut.current?.query !== active?.query ||
+      offeredShortcut.current?.from !== active?.from
+    ) {
       offeredShortcut.current = null;
     }
   }, [active, highlighted, selectedKey]);
@@ -587,34 +642,20 @@ export function usePromptTypeahead({
     if (item) setSelectedKey(typeaheadSuggestionKey(item));
   };
 
-  const canLoadMore =
-    kind === "command" &&
-    canLoadMoreCommandResults({
-      hasMore: command.hasMore,
-      isError: command.isError,
-      isLoadingMore: command.isLoadingMore,
-    });
-  const loadMore = command.loadMore;
-
   // The picked row left the list, so the first row is picked again.
   useEffect(() => {
     if (selectedKey !== null && selectedAt === -1) setSelectedKey(null);
   }, [selectedAt, selectedKey]);
 
-  // Fetch the next page shortly before the selection reaches the end.
-  const nearEnd =
-    canLoadMore &&
-    suggestions.length > 0 &&
-    selectedIndex >= Math.max(0, suggestions.length - 3);
-  useEffect(() => {
-    if (nearEnd) loadMore();
-  }, [loadMore, nearEnd, selectedIndex, suggestions.length]);
-
   const mentionQuery = active?.kind === "mention" ? active.query.trim() : "";
+  const showCommandFallback =
+    command.catalog !== undefined
+      ? commands.all.length === 0
+      : !commands.hasOwn;
   const commandState: ComposerCommandMenuState =
-    !commands.hasOwn && command.isLoading
+    showCommandFallback && command.isLoading
       ? { kind: "loading" }
-      : !commands.hasOwn && command.isError
+      : showCommandFallback && command.isError
         ? { kind: "error" }
         : { kind: "results", suggestions: commands.all };
   const menuState: ComposerTypeaheadMenuState =
@@ -650,7 +691,6 @@ export function usePromptTypeahead({
     menuState,
     suggestions,
     selectedIndex,
-    loadMore: canLoadMore ? loadMore : undefined,
     sync,
     trackEdit,
     closeOnBlur,
@@ -659,15 +699,7 @@ export function usePromptTypeahead({
     dismiss,
     apply,
     insertAction,
-    selectNext: () => {
-      const atLast = selectedIndex >= suggestions.length - 1;
-      const moreComing = command.hasMore || command.isLoadingMore;
-      if (kind === "command" && !command.isError && atLast && moreComing) {
-        if (canLoadMore) loadMore();
-        return;
-      }
-      select((selectedIndex + 1) % suggestions.length);
-    },
+    selectNext: () => select((selectedIndex + 1) % suggestions.length),
     selectPrevious: () =>
       select((selectedIndex + suggestions.length - 1) % suggestions.length),
     /** Applies the highlighted row and returns it. */
@@ -680,3 +712,69 @@ export function usePromptTypeahead({
 }
 
 export type PromptTypeahead = ReturnType<typeof usePromptTypeahead>;
+
+/**
+ * Stable handle PromptBoxInternal uses to talk to the isolated typeahead island
+ * without owning menu state or re-rendering on keystrokes / arrow navigation.
+ */
+export interface TypeaheadBridge {
+  readonly isOpen: boolean;
+  readonly suggestions: readonly TypeaheadSuggestion[];
+  guardSubmit: (submit: () => void) => boolean;
+  sync: (editor: Editor) => void;
+  trackEdit: (transaction: Transaction) => void;
+  closeOnBlur: () => void;
+  closeAt: (editor: Editor) => void;
+  forget: () => void;
+  dismiss: () => void;
+  insertAction: (action: PromptBoxAction) => void;
+  selectNext: () => void;
+  selectPrevious: () => void;
+  applySelected: () => TypeaheadSuggestion | undefined;
+  onEditorFocus: () => void;
+  /** @internal Connects the mounted island's latest handlers. */
+  connect: (handlers: TypeaheadBridgeTarget | null) => void;
+}
+
+export interface TypeaheadBridgeTarget {
+  typeahead: PromptTypeahead;
+  onEditorFocus?: () => void;
+}
+
+export function createTypeaheadBridge(): TypeaheadBridge {
+  let target: TypeaheadBridgeTarget | null = null;
+  let focusedBeforeConnect = false;
+  return {
+    get isOpen() {
+      return target?.typeahead.isOpen ?? false;
+    },
+    get suggestions() {
+      return target?.typeahead.suggestions ?? [];
+    },
+    guardSubmit: (submit) => target?.typeahead.guardSubmit(submit) ?? false,
+    sync: (editor) => target?.typeahead.sync(editor),
+    trackEdit: (transaction) => target?.typeahead.trackEdit(transaction),
+    closeOnBlur: () => target?.typeahead.closeOnBlur(),
+    closeAt: (editor) => target?.typeahead.closeAt(editor),
+    forget: () => target?.typeahead.forget(),
+    dismiss: () => target?.typeahead.dismiss(),
+    insertAction: (action) => target?.typeahead.insertAction(action),
+    selectNext: () => target?.typeahead.selectNext(),
+    selectPrevious: () => target?.typeahead.selectPrevious(),
+    applySelected: () => target?.typeahead.applySelected(),
+    onEditorFocus: () => {
+      if (target?.onEditorFocus) {
+        target.onEditorFocus();
+      } else {
+        focusedBeforeConnect = true;
+      }
+    },
+    connect: (next) => {
+      target = next;
+      if (focusedBeforeConnect && next?.onEditorFocus) {
+        focusedBeforeConnect = false;
+        next.onEditorFocus();
+      }
+    },
+  };
+}

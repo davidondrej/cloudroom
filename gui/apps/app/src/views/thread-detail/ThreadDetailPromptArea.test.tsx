@@ -233,9 +233,11 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
           {execution.providerRouting.environmentId}
         </div>
         <div data-testid="command-suggestions">
-          {typeahead.command?.suggestions
-            .map((command) => command.name)
-            .join(",")}
+          {typeahead.kind === "live"
+            ? `${typeahead.providerId}:${typeahead.commandScope}`
+            : typeahead.command.suggestions
+                .map((command) => command.name)
+                .join(",")}
         </div>
         <div data-testid="selected-model">{execution.model.active?.model}</div>
         <div data-testid="selected-model-label">
@@ -570,11 +572,9 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
     providerId: string;
     commandScope: string;
   }) => ({
-    hasMore: false,
+    catalog: [{ name: `${providerId}:${commandScope}` }],
     isError: false,
     isLoading: false,
-    isLoadingMore: false,
-    loadMore: vi.fn(),
     suggestions: [{ name: `${providerId}:${commandScope}` }],
     trigger: null,
   }),

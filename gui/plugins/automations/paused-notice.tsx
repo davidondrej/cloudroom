@@ -103,7 +103,7 @@ const resume = (loop: PausedLoop) =>
 
 const stop = (event: SyntheticEvent) => event.stopPropagation();
 
-// The app's loop icon on the threads loops started or wake (#1136, gui/apps/app/src/lib/loop-threads.ts). Each label
+// The purpose cards' loop line on threads loops started or wake (#1136, gui/apps/app/src/lib/loop-threads.ts). Each label
 // sends its own set, and null when it goes, so a copy that remounts never clears another's icons.
 const sendLoopThreads = (
   owner: string,

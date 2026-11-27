@@ -63,15 +63,9 @@ export function summarizeUpdateCheck(
   };
 }
 
-export function CheckPluginUpdatesButton({
-  pluginId,
-  appearance = "toolbar",
-}: {
-  pluginId?: string;
-  appearance?: "toolbar" | "inline";
-}) {
+export function useCheckPluginUpdates(pluginId?: string) {
   const queryClient = useQueryClient();
-  const check = useMutation({
+  return useMutation({
     meta: { showErrorToast: false },
     mutationFn: () =>
       checkPluginUpdates(fetch, pluginId === undefined ? {} : { id: pluginId }),
@@ -88,6 +82,16 @@ export function CheckPluginUpdatesButton({
     },
     onSettled: () => invalidatePluginList({ queryClient }),
   });
+}
+
+export function CheckPluginUpdatesButton({
+  pluginId,
+  appearance = "toolbar",
+}: {
+  pluginId?: string;
+  appearance?: "toolbar" | "inline";
+}) {
+  const check = useCheckPluginUpdates(pluginId);
   const label = check.isPending ? "Checking for updates…" : "Check for updates";
   const inline = appearance === "inline";
   const button = (

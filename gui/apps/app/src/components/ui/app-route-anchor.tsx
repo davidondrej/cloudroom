@@ -54,15 +54,11 @@ interface RouteNavigation {
   openInSplit: (path: string) => boolean;
 }
 
-// A thread route change still rendering after this gets a default-priority copy.
-const ROUTE_TRANSITION_BUDGET_MS = 300;
-
 /**
- * BrowserRouter, except a slow thread route change can't be starved: React
- * restarts a transition on every sync update (a plugin's useSyncExternalStore
- * ticker), so a cached big thread could wait for React's 5 s transition expiry.
- * Default updates never interrupt a running transition, so this only takes
- * over after an interruption.
+ * BrowserRouter where thread route switches commit at default priority instead
+ * of inside a transition: thread views are preloaded and must not stall or get
+ * starved by sync store ticks. Non-thread routes (Settings, Tools, etc.) stay
+ * in a transition so lazy chunks never flash a blank Suspense fallback.
  */
 export function AppBrowserRouter({ children }: { children: ReactNode }) {
   const [history] = useState(() => createBrowserHistory({ v5Compat: true }));
@@ -71,10 +67,8 @@ export function AppBrowserRouter({ children }: { children: ReactNode }) {
     location: history.location,
   });
   useLayoutEffect(() => {
-    let latest: object | null = null;
     return history.listen(({ action, location }) => {
       const next = { action, location };
-      latest = next;
       const content = paneContentForPathname(location.pathname);
       const threadId =
         content?.kind === "thread"
@@ -84,14 +78,11 @@ export function AppBrowserRouter({ children }: { children: ReactNode }) {
               location.pathname,
             )?.params.threadId ?? null);
       markThreadNavigation(threadId);
+      if (threadId !== null) {
+        setRoute(next);
+        return;
+      }
       startTransition(() => setRoute(next));
-      // Other pages can be lazy: a default update would swap them for a blank fallback.
-      if (threadId === null) return;
-      window.setTimeout(() => {
-        // Checked again at render: a later navigation can land before React runs this update.
-        if (latest === next)
-          setRoute((current) => (latest === next ? next : current));
-      }, ROUTE_TRANSITION_BUDGET_MS);
     });
   }, [history]);
   return (

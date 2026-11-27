@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -612,11 +613,35 @@ export function ProjectListSearchThreadsAction({
 }
 
 export function ProjectListShell({ children }: ProjectListShellProps) {
+  const stackRef = useRef<HTMLDivElement>(null);
+  const slotRef = useRef<HTMLDivElement>(null);
+  // The sticky labels and rows pin below the plugin row, so they need its height.
+  useLayoutEffect(() => {
+    const stack = stackRef.current;
+    const slot = slotRef.current;
+    if (!stack || !slot) return;
+    const observer = new ResizeObserver(() =>
+      stack.style.setProperty(
+        "--room-sidebar-sticky-top-slot-height",
+        `${slot.offsetHeight}px`,
+      ),
+    );
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <SidebarStickyStack data-sidebar-sticky-density="compact-actions">
+    <SidebarStickyStack
+      ref={stackRef}
+      data-sidebar-sticky-density="compact-actions"
+    >
       <SidebarGroupContent>
-        {/* A plugin's own row above Pinned (the Director draws into it). */}
-        <div data-sidebar-top-slot="" />
+        {/* A plugin's own row above Pinned (the Director draws into it). It stays on top while the list scrolls. */}
+        <div
+          ref={slotRef}
+          data-sidebar-top-slot=""
+          data-sidebar-sticky-tier="top-slot"
+        />
         {children}
       </SidebarGroupContent>
     </SidebarStickyStack>
@@ -1830,7 +1855,12 @@ function ProjectListComponent({
   const pinnedSectionContent = (
     <PinnedThreadTree
       rootNodes={pinnedSidebarState.rootNodes}
-      selectedThreadId={selectedThreadId}
+      selectedThreadId={
+        selectedThreadId &&
+        pinnedSidebarState.effectivePinnedThreadIds.has(selectedThreadId)
+          ? selectedThreadId
+          : undefined
+      }
       collapsedThreadIds={collapsedThreadIds}
       onProjectSelect={onProjectSelect}
       onToggleThreadCollapsed={toggleThreadCollapsed}

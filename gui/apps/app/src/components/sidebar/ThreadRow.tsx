@@ -22,7 +22,7 @@ import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@cloudroom/shared-ui/tooltip";
 import { HoverCardTrigger } from "@cloudroom/shared-ui/hover-card";
 import { SidebarStickyTier } from "@/components/ui/sidebar.js";
-import { NavLink } from "react-router";
+import { Link } from "react-router";
 import {
   ThreadActionsContextMenu,
   ThreadActionsMenu,
@@ -111,7 +111,6 @@ import {
 import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { useComputerUseActivity } from "@/lib/computer-use-active";
 import { usePluginThreadRowStatus } from "@/lib/plugin-thread-row-status";
-import { useLoopThreadLabel } from "@/lib/loop-threads";
 import { harnessIconModeAtom } from "@/components/settings/HarnessIconsSetting";
 import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
@@ -119,7 +118,7 @@ import { getProviderIconInfo } from "@/lib/provider-icon";
 
 const SIDEBAR_TITLE_DOUBLE_CLICK_MS = 400;
 
-/** A small glyph after the title (loop, other project); a click opens the row, hovering names it. */
+/** A small glyph after the title (other project); a click opens the row, hovering names it. */
 function ThreadTitleMark({
   icon,
   label,
@@ -652,7 +651,6 @@ function ThreadRowComponent({
   const threadUnreadSuccess = threadUnreadDone && !threadUnreadError;
   const threadTitle = getThreadDisplayTitle(thread);
   const labelTitle = useThreadTitleDisplayText(threadTitle);
-  const loopLabel = useLoopThreadLabel(thread.id);
   const crossProjectName = useSidebarProjectName(crossProjectId);
   const crossProjectLabel =
     crossProjectId === null
@@ -908,15 +906,17 @@ function ThreadRowComponent({
     );
   const rowContent = (
     <>
-      <NavLink
+      <Link
         ref={rowLinkRef}
         to={getThreadRoutePath({ projectId, threadId: thread.id })}
+        aria-current={isActive ? "page" : undefined}
         data-sidebar-thread-shortcut-target=""
         data-sidebar-thread-id={thread.id}
         data-sidebar-project-id={projectId}
         data-sidebar-thread-child={thread.parentThreadId ? "" : undefined}
         onPointerEnter={prefetchOnHover.onPointerEnter}
         onPointerLeave={prefetchOnHover.onPointerLeave}
+        onPointerDown={prefetchOnHover.onPointerDown}
         onClick={(event) => {
           if (isEditing) {
             event.preventDefault();
@@ -989,13 +989,6 @@ function ThreadRowComponent({
             )}
           </span>
         )}
-        {loopLabel !== null ? (
-          <ThreadTitleMark
-            icon="Repeat"
-            label={loopLabel}
-            onClick={() => rowLinkRef.current?.click()}
-          />
-        ) : null}
         {crossProjectLabel !== null ? (
           <ThreadTitleMark
             icon="FolderExport"

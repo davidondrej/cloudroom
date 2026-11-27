@@ -1328,16 +1328,22 @@ const SETTINGS_CONTENT_ID = "settings-content";
 export function SettingsPluginsContent() {
   const location = useLocation();
   const navigate = useNavigate();
-  const pluginId = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)
-    ?.params.pluginId;
-  if (pluginId) {
-    return <PluginDetailPaneView key={pluginId} pluginId={pluginId} />;
-  }
+  const systemConfigQuery = useSystemConfig();
+  const updateGeneralSettingsMutation = useUpdateGeneralSettings();
+  const pluginId =
+    matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)?.params.pluginId ??
+    null;
   const pluginAuthorKey = new URLSearchParams(location.search).get("author");
   return (
-    <div className="flex min-h-0 flex-1 flex-col pt-4 md:pt-5">
+    <div
+      className={cn(
+        "flex min-h-0 flex-1 flex-col",
+        pluginAuthorKey !== null && "pt-4 md:pt-5",
+      )}
+    >
       <PluginsOverview
         mode={pluginAuthorKey === null ? "installed" : "browse"}
+        selectedPluginId={pluginId}
         onOpenPlugin={(nextPluginId) =>
           navigate(
             getPluginDetailRoutePath({
@@ -1346,6 +1352,27 @@ export function SettingsPluginsContent() {
             }),
           )
         }
+        renderDetail={(shownPluginId) => (
+          <PluginDetailPaneView
+            key={shownPluginId}
+            pluginId={shownPluginId}
+            settings={
+              <ProviderTurnDisplaySection
+                disabled={
+                  systemConfigQuery.data === undefined ||
+                  updateGeneralSettingsMutation.isPending
+                }
+                generalSettings={
+                  systemConfigQuery.data?.generalSettings ?? defaultAppSettings
+                }
+                onGeneralSettingsChange={(next) =>
+                  updateGeneralSettingsMutation.mutateAsync(next)
+                }
+                pluginId={shownPluginId}
+              />
+            }
+          />
+        )}
       />
     </div>
   );

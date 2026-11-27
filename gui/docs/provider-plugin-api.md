@@ -75,7 +75,7 @@ bb.providers.register({
   ],
   serviceTiers: undefined,       // optional; open list, model/list is precise
   composerActions: ["plan"],     // "plan" | "goal"
-  completedTurnDisplay: "flat",  // "collapse" (default) | "flat"; the user's per-provider setting wins
+  completedTurnDisplay: "collapse", // "collapse" (default) | "flat"; the user's per-provider setting wins
   extensionKinds: {},            // "<name>": { item?: Schema, state?: Schema }
   models: { fallback: [], scope: "host" }, // cold-cache placeholder; scope is
                                  // "host" | "workspace" (default): how far one

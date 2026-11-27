@@ -77,8 +77,7 @@ import {
   NewThreadPromptBox,
   type NewThreadPromptBoxProps,
 } from "@/components/promptbox/NewThreadPromptBox";
-import { withAppPromptActions } from "@/components/promptbox/PromptBoxActionsMenu";
-import { buildProviderPromptActionProps } from "@cloudroom/client-core";
+import { useComposerTypeahead } from "@/components/thread/embedded-chat/useComposerTypeahead";
 import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/prompt-mention-link";
 import { type PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import type { ExperimentalComposerSubmitOptions } from "@get-bb/plugin-sdk";
@@ -102,12 +101,10 @@ import {
 } from "@/hooks/queries/project-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useSystemConfig } from "@/hooks/queries/system-queries";
-import { useCommandSuggestions } from "@/hooks/useCommandSuggestions";
 import {
   usePromptDraftStorage,
   type PromptDraftScope,
 } from "@/hooks/usePromptDraftStorage";
-import { usePromptMentions } from "@/hooks/usePromptMentions";
 import { usePromptBoxMachinePreference } from "@/hooks/thread-creation-options/persisted-selection-fields";
 import { agentExecutionTarget, saveNewThreadMachine, saveStartedMachine, startingExecutionTarget } from "@/hooks/useStartingMachine";
 import { useCloudVps, vpsSummary } from "@/components/settings/VpsSettings";
@@ -1704,14 +1701,6 @@ export function NewThreadComposer({
     reuseEnvironmentId,
     reuseThreadOptions,
   );
-  const promptMentions = usePromptMentions(
-    isProjectless ? undefined : projectId,
-    {
-      environmentId: reuseEnvironmentId,
-      hostId: projectHostId,
-      threadStorageThreadId: panelThreadId ?? undefined,
-    },
-  );
   const defaultMentionLinkResolver = useCallback<PromptMentionLinkResolver>(
     (resource) => {
       if (resource.kind === "thread") {
@@ -1731,29 +1720,16 @@ export function NewThreadComposer({
     },
     [navigate, projectId],
   );
-  const [commandQuery, setCommandQuery] = useState<string | null>(null);
-  const [hasComposerFocused, setHasComposerFocused] = useState(false);
-  const handleEditorFocus = useCallback(() => {
-    setHasComposerFocused(true);
-  }, []);
-  const providerPromptActions = useMemo(
-    () => buildProviderPromptActionProps(selectedProviderComposerActions),
-    [selectedProviderComposerActions],
-  );
-  const promptActions = useMemo(
-    () => withAppPromptActions(providerPromptActions.promptActions),
-    [providerPromptActions.promptActions],
-  );
-  const commandSuggestions = useCommandSuggestions({
+  const { typeaheadConfig, promptActions } = useComposerTypeahead({
     projectId,
+    hasMentionsProject: !isProjectless,
     providerId: selectedProviderId,
     commandScope: "new-thread",
-    skillsTrigger: providerPromptActions.skillsTrigger,
-    promptActions,
     environmentId: reuseEnvironmentId,
     hostId: projectHostId,
-    query: commandQuery,
-    composerFocused: hasComposerFocused,
+    threadStorageThreadId: panelThreadId ?? undefined,
+    selectedProviderComposerActions,
+    resolveMentionLink: defaultMentionLinkResolver,
   });
   const promptHistoryEnabled = usePromptHistoryEnabled();
   const { data: projectPromptHistory = [] } = useProjectPromptHistory(
@@ -2141,28 +2117,11 @@ export function NewThreadComposer({
             onSelectEntry: promptDraft.setDraft,
             resetKey: projectId,
           }}
-          typeahead={{
-            mention: {
-              triggers: promptMentions.triggers,
-              results: promptMentions.results,
-              isLoading: promptMentions.isLoading,
-              isError: promptMentions.isError,
-              onQueryChange: promptMentions.setQuery,
-              resolveLink:
-                options.resolveMentionLink ?? defaultMentionLinkResolver,
-            },
-            command: {
-              trigger: commandSuggestions.trigger,
-              suggestions: commandSuggestions.suggestions,
-              isLoading: commandSuggestions.isLoading,
-              isError: commandSuggestions.isError,
-              hasMore: commandSuggestions.hasMore,
-              isLoadingMore: commandSuggestions.isLoadingMore,
-              loadMore: commandSuggestions.loadMore,
-              onQueryChange: setCommandQuery,
-              onEditorFocus: handleEditorFocus,
-            },
-          }}
+          typeahead={
+            options.resolveMentionLink
+              ? { ...typeaheadConfig, resolveLink: options.resolveMentionLink }
+              : typeaheadConfig
+          }
           attachments={{
             items: promptDraft.attachments,
             projectId,
@@ -2407,16 +2366,13 @@ export function NewThreadComposer({
       cloudLocked,
       activeModel,
       composerError,
-      commandSuggestions,
       currentDraft,
       draftStorage,
-      defaultMentionLinkResolver,
       effectiveEnvironmentValue,
       environmentProviders,
       environmentProvidersByHostId,
       executionOptionsRouting,
       handleAttachFiles,
-      handleEditorFocus,
       handleModelChange,
       handleProjectChange,
       handleProviderChange,
@@ -2446,8 +2402,8 @@ export function NewThreadComposer({
       promptBoxFocusRequest,
       promptDraft,
       promptHistoryDrafts,
-      promptMentions,
       pluginComposerHost,
+      typeaheadConfig,
       providerOptions,
       reasoningLevel,
       availableReasoningOptions,

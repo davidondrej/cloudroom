@@ -124,68 +124,6 @@ export function outcomeOf(result: PluginCliResult): { outcome: string; effect: s
   }
 }
 
-// Cua Driver can call an exact bring_to_front unverified whenever a same-app window sits above
-// the target, even an untitled 41 px Chrome helper (#1506). When the driver's own fields prove the
-// target is the front process's focused, visible ordinary window, and every on-screen window of
-// that app above it is an untitled helper under 100 px, report it as activated.
-// Like the driver's own verified result, this is a snapshot: another app's window may sit above
-// the target, and focus can change after the driver's check.
-const focusedWindowSchema = z
-  .object({
-    code: z.literal("bring_to_front_exact_window_unverified"),
-    pid: z.number(),
-    window_id: z.number(),
-    process_activated: z.literal(true),
-    exact_window_effect: z.object({ focused: z.literal(true), target_visible_ordinary: z.literal(true) }).passthrough(),
-    observed: z
-      .object({
-        front_process_matches_target: z.literal(true),
-        focused_window_id: z.number(),
-        process_front_window_on_display: z.number(),
-      })
-      .passthrough(),
-  })
-  .passthrough();
-const listedWindowsSchema = z.object({
-  windows: z.array(
-    z.object({
-      window_id: z.number(),
-      pid: z.number(),
-      title: z.string(),
-      z_index: z.number(),
-      is_on_screen: z.boolean().optional(),
-      bounds: z.object({ width: z.number(), height: z.number() }),
-    }),
-  ),
-});
-
-export async function acceptFocusedWindow(
-  tool: string,
-  input: Record<string, unknown>,
-  result: PluginCliResult,
-  listWindows: (pid: number) => Promise<PluginCliResult>,
-): Promise<PluginCliResult> {
-  if (tool !== "bring_to_front" || result.exitCode === 0 || typeof input.window_id !== "number") return result;
-  try {
-    const parsed = focusedWindowSchema.parse(JSON.parse(result.stdout ?? ""));
-    if (parsed.pid !== input.pid || parsed.window_id !== input.window_id || parsed.observed.focused_window_id !== input.window_id)
-      return result;
-    const listed = await listWindows(parsed.pid);
-    if (listed.exitCode !== 0) return result;
-    const { windows } = listedWindowsSchema.parse(JSON.parse(listed.stdout ?? ""));
-    const target = windows.find((w) => w.window_id === parsed.window_id && w.pid === parsed.pid);
-    if (target?.is_on_screen !== true) return result;
-    const above = windows.filter((w) => w.pid === parsed.pid && w.is_on_screen !== false && w.z_index > target.z_index);
-    const helper = (w: (typeof windows)[number]) => !w.title && Math.min(w.bounds.width, w.bounds.height) < 100;
-    if (!above.some((w) => w.window_id === parsed.observed.process_front_window_on_display) || !above.every(helper))
-      return result;
-    const accepted = { ...parsed, status: "activated", activated: true, code: "bring_to_front_exact_window_focused" };
-    return { ...result, exitCode: 0, stdout: `${JSON.stringify(accepted, null, 2)}\n` };
-  } catch {
-    return result;
-  }
-}
-
 export default async function computerUsePlugin(room: BbPluginApi) {
   const host = room.hosts.experimental_client({ contract: hostContract });
   const pending = new Map<string, { request: Promise<PluginInteractionResult>; startedAt: number }>();
@@ -457,9 +395,11 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       if (active.delete(threadId)) publishActive();
     }
     if (result.driverExits > 0) track("computer_use_crash", { component: "driver", count: result.driverExits });
-    const listWindows = (pid: number) =>
-      host.call("call", { tool: "list_windows", args: { pid }, session, shotsKey }, { hostId, timeoutMs: 30_000 });
-    return acceptFocusedWindow(tool, input, { exitCode: result.exitCode, stdout: withConsentHint(result.stdout), stderr: result.stderr }, listWindows);
+    return {
+      exitCode: result.exitCode,
+      stdout: withConsentHint(result.stdout),
+      stderr: result.stderr,
+    };
   }
 
   async function trackedCall(

@@ -49,7 +49,7 @@ const PARENT_BUSY: &str = "The other thread's Cloudroom is busy or updating. Try
 const DISK_FULL: &str = "Not delivered: the other thread's cloud disk is full or can't be measured, so its work is paused. The user can free space there with Clear caches & builds.";
 fn unconfirmed(why: &str) -> String {
     format!(
-        "Could not confirm your parent got it ({why}). It may have, so sending it again may deliver it twice."
+        "Could not confirm your parent got it ({why}). It may have, so sending it again without its request ID may deliver it twice."
     )
 }
 /// The website's answer for a thread that moved to the Mac (web/lib/mobile.ts, `threadCore`).
@@ -58,7 +58,7 @@ const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, 
 const STARTING: &str = "This child is still starting in its own sandbox.";
 /// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
 /// older Core ignores it and steers, as before (#1517).
-const QUEUE: &str = "_queue";
+pub(super) const QUEUE: &str = "_queue";
 /// `thread archive` when the website only queued it (web/lib/mobile.ts `relayKept`), which tries for about two minutes
 /// and then tries to tell this thread if it failed. A parent that moved to the Mac meanwhile never hears.
 fn archive_queued(id: &str) -> String {
@@ -202,7 +202,7 @@ pub(super) async fn command(
     action: &str,
     text: Option<&str>,
     to_parent: bool,
-    queue: bool,
+    key: Option<&str>,
 ) -> Result<Json<Value>, Failure> {
     // A caller sharing another thread's sandbox has no link of its own on the website: its children in sandboxes of
     // their own are linked to this sandbox's thread (ADR 20261104-015709), so commands for them go through the
@@ -237,8 +237,15 @@ pub(super) async fn command(
             if other { MAYBE_NOTE } else { APP_NOTE },
         );
     };
-    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
-    let request = format!("relay_{key}{}", if queue { QUEUE } else { "" });
+    // A tell's own ID (`tell --request-id`), with `QUEUE` at its end for `--mode queue`: the same one again is the
+    // same request, which its Core takes once.
+    let request = match key {
+        Some(key) => format!("relay_{key}"),
+        None => format!(
+            "relay_{}",
+            random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?
+        ),
+    };
     let body = json!({"action":action,"thread":id,"text":text,"request_id":request,"label":other,"parent":to_parent});
     let failed = start_error(m, caller, id).filter(|_| action != "archive");
     let mut answer = match api.post_waking("relay", &body).await {
@@ -284,8 +291,8 @@ pub(super) async fn command(
                 "Not delivered: your parent's cloud disk is full or can't be measured, so its work is paused. The user can free space in your parent's thread with Clear caches & builds; send it again after that.",
             ));
         }
-        // The parent may have it already, and a resend gets a new request ID, so never ask for one. Only the
-        // website's own "parent busy" 503 means the parent refused it.
+        // The parent may have it already: only a resend under this request ID is safe (thread.rs `resend`). Only
+        // the website's own "parent busy" 503 means the parent refused it.
         Err(ApiError::Status(status, ref message))
             if id == "parent" && status >= 500 && !(status == 503 && message == PARENT_BUSY) =>
         {
@@ -321,6 +328,9 @@ pub(super) async fn command(
         answer["note"] = json!(archive_queued(id));
     }
     answer["id"] = json!(id);
+    if let Some(key) = key {
+        answer["request_id"] = json!(key.strip_suffix(QUEUE).unwrap_or(key));
+    }
     Ok(Json(answer))
 }
 

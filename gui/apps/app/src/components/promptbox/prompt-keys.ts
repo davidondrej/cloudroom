@@ -10,14 +10,23 @@ import { applyPromptListNewline } from "./editor/prompt-editor-list";
 import { applyPromptParagraphNewline } from "./editor/prompt-editor-paragraph";
 import { isModifierSubmitKeyEvent } from "./modifier-submit-shortcut";
 import type { PromptHistory } from "./usePromptHistory";
-import type { PromptTypeahead } from "./usePromptTypeahead";
+import type { TypeaheadBridge } from "./usePromptTypeahead";
 
 export interface PromptKeyContext {
   event: KeyboardEvent;
   editor: Editor | null;
   /** False on touch keyboards, where Enter starts a new line. */
   enterSubmits: boolean;
-  typeahead: PromptTypeahead;
+  typeahead: Pick<
+    TypeaheadBridge,
+    | "isOpen"
+    | "suggestions"
+    | "guardSubmit"
+    | "selectNext"
+    | "selectPrevious"
+    | "applySelected"
+    | "dismiss"
+  >;
   history: PromptHistory;
   ghostText: string | null;
   acceptGhostText: () => void;

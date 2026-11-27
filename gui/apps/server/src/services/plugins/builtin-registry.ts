@@ -25,6 +25,8 @@ interface ResolveBuiltinPluginRootPathArgs {
 
 export const BUILTIN_PLUGINS_DIRECTORY_NAME = "builtin-plugins";
 
+export const ALWAYS_ENABLED_PLUGIN_ERROR = "This built-in plugin is always on.";
+
 const REPO_PLUGINS_DIRECTORY_NAME = "plugins";
 
 /**
@@ -45,6 +47,7 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "cloudroom-guide",
     pluginId: "cloudroom-guide",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "accounts",
@@ -61,11 +64,13 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "automations",
     pluginId: "automations",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "connect",
     pluginId: "connect",
     defaultEnabled: true,
+    alwaysEnabled: true,
     refuseMachineCliSubcommands: ["sign-out-phones"],
     relayRefusedRpcs: {
       relayCredential: "all",
@@ -86,21 +91,25 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "environment-project-checkout",
     pluginId: "environment-project-checkout",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "environment-git-worktree",
     pluginId: "environment-git-worktree",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "environment-personal-workspace",
     pluginId: "environment-personal-workspace",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "custom-instructions",
     pluginId: "custom-instructions",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "plugin-api-tester",
@@ -117,26 +126,31 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "inline-vis",
     pluginId: "inline-vis",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "monaco-editor",
     pluginId: "monaco-editor",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "pdf-preview",
     pluginId: "pdf-preview",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "provider-codex",
     pluginId: "provider-codex",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "provider-claude-code",
     pluginId: "provider-claude-code",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "provider-pi",
@@ -153,6 +167,7 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "provider-usage",
     pluginId: "provider-usage",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "organization",
@@ -179,21 +194,25 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "provider-acp",
     pluginId: "provider-acp",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "computer-use",
     pluginId: "computer-use",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "gpu",
     pluginId: "gpu",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "keep-awake",
     pluginId: "keep-awake",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "machine-ssh",
@@ -209,26 +228,31 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "provider-retry",
     pluginId: "provider-retry",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "internet-watch",
     pluginId: "internet-watch",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "push-notifications",
     pluginId: "push-notifications",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "secrets",
     pluginId: "secrets",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "drafts",
     pluginId: "drafts",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "snippets",
@@ -241,11 +265,13 @@ const builtinDefinitions: Omit<BundledPluginDefinition, "autoInstall">[] = [
     name: "scheduled-send",
     pluginId: "scheduled-send",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "side-chat",
     pluginId: "side-chat",
     defaultEnabled: true,
+    alwaysEnabled: true,
   },
   {
     name: "workflows",

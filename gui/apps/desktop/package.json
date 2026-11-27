@@ -39,7 +39,7 @@
     "@cloudroom/connect-client": "workspace:*",
     "@cloudroom/host-daemon-contract": "workspace:*",
     "bb-app": "workspace:*",
-    "electron-updater": "^6.8.3",
+    "electron-updater": "^6.8.11",
     "semver": "^7.7.0",
     "ws": "^8.19.0",
     "zod": "^4.3.6"

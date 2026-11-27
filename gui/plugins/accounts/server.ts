@@ -902,7 +902,7 @@ export default async function plugin(room: BbPluginApi) {
       };
     });
   };
-  const claudeView = async (refresh = false): Promise<AccountView[]> => {
+  const claudeView = async (refresh = false, skipLocal = false): Promise<AccountView[]> => {
     await refreshMac();
     if (refresh) {
       const active = current("claude-code");
@@ -914,7 +914,9 @@ export default async function plugin(room: BbPluginApi) {
               (a.id === active || (a.profile && limitedUntil("claude-code", a.id))),
           )
           .map((a) => refreshUsage(a, true, a.id === active ? undefined : "free")),
-        readMacUsage() ? refreshUsage(LOCAL, true) : undefined,
+        readMacUsage() && (!skipLocal || Boolean(limitedUntil("claude-code", LOCAL)))
+          ? refreshUsage(LOCAL, true)
+          : undefined,
       ]);
     }
     const needsCloud = macNeedsCloud();
@@ -1429,9 +1431,9 @@ export default async function plugin(room: BbPluginApi) {
   room.rpc.register(
     accountsRpcContract,
     {
-      "accounts.list": ({ provider, refresh }) =>
+      "accounts.list": ({ provider, refresh, skipLocal }) =>
         provider === "claude-code" && refresh
-          ? claudeView(true)
+          ? claudeView(true, Boolean(skipLocal))
           : provider === "acp-antigravity"
             ? antigravityView(Boolean(refresh))
             : views(provider),

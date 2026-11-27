@@ -687,6 +687,27 @@ function FollowUpPromptBoxWithComposer({
     ),
     [execution, executionControlsDisabled, permissionControl, permissionInToolbar],
   );
+  const fastModeCommand = useMemo(
+    () =>
+      executionCommandsEnabled
+        ? promptFastModeCommand(execution.serviceTier)
+        : undefined,
+    [execution.serviceTier, executionCommandsEnabled],
+  );
+  const modelShortcutCommands = useMemo(
+    () =>
+      canSwitchModel && threadProviderId
+        ? promptModelShortcuts(execution, {
+            providerId: threadProviderId,
+            models:
+              cloudShortcutModels ??
+              [...execution.model.options, ...execution.model.moreOptions].map(
+                ({ value }) => value,
+              ),
+          })
+        : undefined,
+    [canSwitchModel, cloudShortcutModels, execution, threadProviderId],
+  );
   const composerElement = (
     <div
       ref={composerInteractionRef}
@@ -700,6 +721,7 @@ function FollowUpPromptBoxWithComposer({
     >
       <PromptBoxWithScrollAnchor
         id={id}
+        autoFocus={paneContext ? paneContext.isFocused && !paneContext.isHidden : true}
         promptBoxRef={promptBoxRef}
         voice={voice}
         minHeight={FOLLOW_UP_PROMPT_BOX_MIN_HEIGHT}
@@ -768,17 +790,8 @@ function FollowUpPromptBoxWithComposer({
         }}
         typeahead={typeahead}
         reasoning={executionCommandsEnabled ? execution.reasoning : undefined}
-        fastMode={
-          executionCommandsEnabled ? promptFastModeCommand(execution.serviceTier) : undefined
-        }
-        modelShortcuts={
-          canSwitchModel && threadProviderId
-            ? promptModelShortcuts(execution, {
-                providerId: threadProviderId,
-                models: cloudShortcutModels ?? [...execution.model.options, ...execution.model.moreOptions].map(({ value }) => value),
-              })
-            : undefined
-        }
+        fastMode={fastModeCommand}
+        modelShortcuts={modelShortcutCommands}
         attachments={attachments}
         promptActions={promptActions}
         suppressPluginComposerCustomizations={

@@ -53,7 +53,7 @@
   },
   "dependencies": {
     "@get-bb/plugin-sdk": "workspace:*",
-    "smol-toml": "^1.7.1",
+    "smol-toml": "^1.9.1",
     "yaml": "^2.9.0",
     "zod": "^4.3.6"
   }

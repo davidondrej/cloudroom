@@ -180,6 +180,9 @@ interface AcpPendingTurnInput {
 interface AcpThreadSession {
   bbThreadId: string;
   turnOutput: boolean;
+  // The turn's first reply, held while it may still be the dialect's limit notice (`limitNotices`). `decided` once
+  // the turn showed anything else.
+  limitReply: { text: string; updates: unknown[] } | "decided" | null;
   construction: AcpSessionParams;
   providerThreadId: string;
   cwd: string;
@@ -376,6 +379,22 @@ function emitContextEstimate(session: AcpThreadSession): void {
       attach: "open",
     },
   ]);
+}
+
+/** The reply without its leading "⚠", while it is still the start of, or starts with, one of the dialect's limit
+ *  notices. Null once it can't be one. */
+function limitNotice(dialect: AcpDialect, text: string): string | null {
+  const rest = text.replace(/^\s*⚠?\s*/u, "");
+  return dialect.limitNotices?.some((notice) => notice.startsWith(rest) || rest.startsWith(notice)) ? rest : null;
+}
+
+const isFullNotice = (dialect: AcpDialect, rest: string): boolean =>
+  dialect.limitNotices?.some((notice) => rest.startsWith(notice)) === true;
+
+/** Shows held-back reply chunks as they came. */
+function releaseHeld(session: AcpThreadSession, updates: unknown[]): void {
+  for (const update of updates)
+    emitForSession(session, ACP_UPDATE_METHOD, { threadId: session.bbThreadId, update });
 }
 
 function emitSessionError(session: AcpThreadSession, message: string, httpStatus?: number): void {
@@ -1920,6 +1939,7 @@ async function startAgentSession(
   session = {
     bbThreadId: roomThreadId,
     turnOutput: false,
+    limitReply: null,
     construction: params,
     providerThreadId: "",
     cwd: params.cwd,
@@ -2541,6 +2561,8 @@ function runPrompts(
       // Only this prompt's output counts: a follow-up sent after a steer's
       // cancel must not borrow the earlier reply's (#1721).
       session.turnOutput = false;
+      // Typed wide: chunks fill it while the prompt below is awaited.
+      session.limitReply = null as AcpThreadSession["limitReply"];
       try {
         session.promptRequestPending = true;
         const prompt = buildPromptContentBlocks(session, pending.input);
@@ -2615,6 +2637,21 @@ function runPrompts(
         return;
       }
       session.promptRequestPending = false;
+
+      // A reply that is only the plan's limit fails the turn as a 429 (delta-translation), so the Accounts plugin notes
+      // it, and drops queued steers: they'd hit the same limit. Anything else held back shows as it came.
+      const held = session.limitReply;
+      session.limitReply = null;
+      if (held !== null && held !== "decided") {
+        const notice = limitNotice(session.dialect, held.text);
+        if (stopReason === "end_turn" && !session.stopping && notice !== null && isFullNotice(session.dialect, notice)) {
+          dropQueuedTurnInputs(session, "ACP turn ended at the plan's limit");
+          emitSessionError(session, notice.trim(), 429);
+          session.activePromptKind = null;
+          return;
+        }
+        releaseHeld(session, held.updates);
+      }
 
       if (!session.stopping) {
         const next = session.queuedInputs.shift();
@@ -2797,6 +2834,24 @@ function handleAgentNotification(
   session.wake.note(parsed.data.update);
   if (TURN_OUTPUT_UPDATES.has(parsed.data.update.sessionUpdate)) {
     session.turnOutput = true;
+  }
+  // The turn's first reply is held while it may be the limit notice, so the limit shows once, as the turn's error.
+  if (
+    session.activePromptKind === "turn" &&
+    session.promptRequestPending &&
+    session.dialect.limitNotices &&
+    session.limitReply !== "decided" &&
+    TURN_OUTPUT_UPDATES.has(parsed.data.update.sessionUpdate)
+  ) {
+    const chunk = acpAgentMessageChunkUpdateSchema.safeParse(parsed.data.update);
+    const text = chunk.success ? extractAcpContentText(chunk.data.content) : undefined;
+    const held = session.limitReply ?? { text: "", updates: [] };
+    if (text !== undefined && limitNotice(session.dialect, held.text + text) !== null) {
+      session.limitReply = { text: held.text + text, updates: [...held.updates, parsed.data.update] };
+      return;
+    }
+    session.limitReply = "decided";
+    releaseHeld(session, held.updates);
   }
   if (session.activePromptKind === "compaction") {
     const chunk = acpAgentMessageChunkUpdateSchema.safeParse(

@@ -15,6 +15,7 @@ import {
   type ExperimentalSidebarFooterDisclosureProps,
   UrlLink,
   useBbContext,
+  useRealtime,
 } from "@get-bb/plugin-sdk/app";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -1159,6 +1160,18 @@ function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
     [sidebarThreads.threads, threadId],
   );
   const [plan, reloadPlan] = usePlanSummary();
+  useRealtime(
+    "usage-updated",
+    useCallback(() => {
+      const machines = storeSnapshot.data?.machines ?? [];
+      const active = selectUsageMachine(machines, lastMachineId, threadMachineId);
+      void refreshUsage({
+        force: false,
+        machineIds: active ? [active.id] : null,
+        maxAgeMs: CARD_MAX_AGE_MS,
+      });
+    }, [threadMachineId]),
+  );
   return (
     <ProviderUsageStatusContent
       {...props}

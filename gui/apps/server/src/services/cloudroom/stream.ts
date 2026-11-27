@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { reasoningLevelSchema, type Thread, type ThreadEventType } from "@cloudroom/domain";
-import { CloudroomClient, CloudroomConnectionError, CloudroomError, type SessionRecord } from "./client.js";
+import { CloudroomClient, CloudroomConnectionError, CloudroomError, type Session, type SessionRecord } from "./client.js";
 import type { CloudChildren } from "./children.js";
 import { tagOf, type CloudThreadState } from "./cloud-threads.js";
 import { mentionsOpenAISide401 } from "./codex-errors.js";
@@ -19,7 +19,7 @@ import { codexOutage } from "./openai-status.js";
 import { connectionFailure, connectionOrReplayFailed, continuedFrom, sessionNotFound, young } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
 import { sandboxThread } from "./sandboxes.js";
-import { binding, bindings, commands, saveBinding, saveStatus, type Binding } from "./store.js";
+import { binding, bindings, commands, saveBinding, saveStatus, statusOf, unstartedTurn, type Binding } from "./store.js";
 import { saveCloudImages } from "./teleport-local.js";
 import type { CloudTransfers } from "./transfers.js";
 
@@ -281,8 +281,9 @@ export class CloudStream {
     if (signal.aborted) return;
     // Earlier sessions come from a website that lists threads (its saved records); a Core without `continued` has none.
     const empty = !shared && saved.cursor === 0 && !this.rt.host.hasShownEvents(saved.threadId) && await this.rt.sandboxes.followsThreads().catch(() => false);
+    let snapshot: Session | null = null;
     if (state().actFrom === null || empty) {
-      const snapshot = await client.session(saved.sessionId!, signal);
+      snapshot = await client.session(saved.sessionId!, signal);
       if (state().actFrom === null) {
         this.rt.threadStates.set(saved.threadId, { ...state(), actFrom: snapshot.last_sequence, home: tagOf(snapshot.last_app_prompt?.request_id) ?? state().home });
         if (!shared) void this.children.listChildren(saved, client, snapshot.continued?.from).catch((error: unknown) => this.rt.host.warn("Cloud child threads could not be listed", error, { threadId: saved.threadId }));
@@ -292,12 +293,43 @@ export class CloudStream {
     }
     this.transfers.resumeCopy(saved.threadId, client);
     this.rt.setConnectionIssue(saved.threadId, "stream");
-    if (saved.error?.startsWith(connectionOrReplayFailed) && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
-      const snapshot = await client.session(saved.sessionId!, signal);
-      if (!signal.aborted && snapshot.last_sequence === saved.cursor && binding(this.rt.host.db, saved.threadId)?.error === saved.error && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
-        saveBinding(this.rt.host.db, saved.threadId, { error: null });
-        this.rt.notify(saved.threadId);
+    const needsErrorCheck = Boolean(saved.error?.startsWith(connectionOrReplayFailed) && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending"));
+    // A sandbox stream that reconnects mid-turn (`cursor > 0`) while the thread looks `idle` gets no new `state` record until the turn ends.
+    const needsStatusCheck = Boolean(sandboxThread(saved.coreUrl)) && saved.cursor > 0 && this.rt.host.getThread(saved.threadId)?.status === "idle";
+    if (!signal.aborted && !snapshot && (needsErrorCheck || needsStatusCheck)) {
+      snapshot = await client.session(saved.sessionId!, signal).catch((error: unknown) => {
+        if (needsErrorCheck) throw error;
+        return null;
+      });
+    }
+    if (signal.aborted || !snapshot) return;
+    this.reconcileStatus(saved.threadId, snapshot);
+    if (needsErrorCheck && snapshot.last_sequence === saved.cursor && binding(this.rt.host.db, saved.threadId)?.error === saved.error && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
+      saveBinding(this.rt.host.db, saved.threadId, { error: null });
+      this.rt.notify(saved.threadId);
+    }
+  }
+
+  private reconcileStatus(threadId: string, snapshot: Session): void {
+    const thread = this.rt.host.getThread(threadId);
+    const current = binding(this.rt.host.db, threadId);
+    if (!thread || !current || current.sessionId !== snapshot.session_id) return;
+    const liveStatus = statusOf(snapshot.state);
+    if (liveStatus === null) return;
+    const waiting = !current.queuePaused && Boolean(unstartedTurn(this.rt.host.db, threadId));
+    if (liveStatus === "active" || liveStatus === "starting" || liveStatus === "stopping") {
+      // A wake restarts an idle thread's agent (`resuming`) with nothing to run: keep it idle, as events.ts does.
+      if (snapshot.state === "resuming" && !waiting && thread.status === "idle") return;
+      const next = waiting ? "active" : liveStatus;
+      if (thread.status !== next) {
+        saveStatus(this.rt.host.db, threadId, next);
+        this.rt.notify(threadId);
       }
+      return;
+    }
+    if (liveStatus === "idle" && snapshot.last_sequence <= current.cursor && !waiting && !commands(this.rt.host.db, threadId, "sending").length && ["active", "starting", "stopping"].includes(thread.status)) {
+      saveStatus(this.rt.host.db, threadId, "idle");
+      this.rt.notify(threadId);
     }
   }
 

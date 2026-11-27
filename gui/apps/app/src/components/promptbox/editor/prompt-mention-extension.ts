@@ -49,10 +49,8 @@ export const PromptMentionExtension = Mention.extend({
     return ReactNodeViewRenderer(PromptMentionPillNodeView);
   },
   addProseMirrorPlugins() {
-    const parentPlugins = this.parent?.() ?? [];
     const mentionName = this.name;
     return [
-      ...parentPlugins,
       new Plugin({
         props: {
           decorations(state) {
@@ -106,14 +104,5 @@ export const PromptMentionExtension = Mention.extend({
       }),
       renderMentionLabel(attrs),
     ];
-  },
-  suggestion: {
-    char: "@",
-    items: () => [],
-    render: () => ({
-      onStart: () => undefined,
-      onUpdate: () => undefined,
-      onExit: () => undefined,
-    }),
   },
 });

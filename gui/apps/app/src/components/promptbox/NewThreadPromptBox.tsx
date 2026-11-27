@@ -410,6 +410,28 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
           return true;
         }
       : undefined;
+  const executionCommandsEnabled =
+    !execution.disabled &&
+    !execution.model.isLoading &&
+    !execution.model.loadFailed;
+  const fastModeCommand = useMemo(
+    () =>
+      executionCommandsEnabled
+        ? promptFastModeCommand(execution.serviceTier)
+        : undefined,
+    [execution.serviceTier, executionCommandsEnabled],
+  );
+  const modelShortcutCommands = useMemo(
+    () =>
+      executionCommandsEnabled
+        ? promptModelShortcuts(execution, { loadModels })
+        : undefined,
+    [execution, executionCommandsEnabled, loadModels],
+  );
+  const locationCommandList = useMemo(
+    () => promptLocationCommands(modeConfig.environment, isProjectlessPrompt),
+    [isProjectlessPrompt, modeConfig.environment],
+  );
 
   return (
     <div
@@ -444,31 +466,10 @@ const DefaultNewThreadComposer = memo(function DefaultNewThreadComposer({
         onComposerLayoutChange={onComposerLayoutChange}
         history={history}
         typeahead={typeahead}
-        reasoning={
-          execution.disabled ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : execution.reasoning
-        }
-        fastMode={
-          execution.disabled ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : promptFastModeCommand(execution.serviceTier)
-        }
-        modelShortcuts={
-          execution.disabled ||
-          execution.model.isLoading ||
-          execution.model.loadFailed
-            ? undefined
-            : promptModelShortcuts(execution, { loadModels })
-        }
-        locationCommands={promptLocationCommands(
-          modeConfig.environment,
-          isProjectlessPrompt,
-        )}
+        reasoning={executionCommandsEnabled ? execution.reasoning : undefined}
+        fastMode={fastModeCommand}
+        modelShortcuts={modelShortcutCommands}
+        locationCommands={locationCommandList}
         mentionMenuPlacement="bottom"
         attachments={attachments}
         promptActions={promptActions}

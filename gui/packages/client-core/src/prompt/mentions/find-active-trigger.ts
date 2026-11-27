@@ -21,15 +21,23 @@ function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
 
+const triggerPatternCache = new Map<string, RegExp>();
+
 function triggerPattern(
   trigger: TypeaheadTrigger,
   options: { windowed: boolean },
 ): RegExp {
+  const key = `${trigger.kind}:${options.windowed ? "1" : "0"}:${trigger.char}`;
+  const cached = triggerPatternCache.get(key);
+  if (cached !== undefined) return cached;
+
   const escapedChar = escapeRegexLiteral(trigger.char);
   const queryPattern =
     trigger.kind === "mention" ? `(?:[^\\s${escapedChar}]| )*` : "\\S*";
   const boundary = options.windowed ? "([\\s([{])" : "(^|[\\s([{])";
-  return new RegExp(`${boundary}${escapedChar}(${queryPattern})$`, "u");
+  const pattern = new RegExp(`${boundary}${escapedChar}(${queryPattern})$`, "u");
+  triggerPatternCache.set(key, pattern);
+  return pattern;
 }
 
 const TRIGGER_SCAN_WINDOW = 256;

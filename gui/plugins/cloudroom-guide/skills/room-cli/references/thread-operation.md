@@ -121,6 +121,9 @@ hostId, providerId, projectId, parentThreadId, groupBy, archivedOnly })`.
   so it is not added twice. Local threads have no such ID; never resend blindly.
   A resend with local `--file`/`--image` uploads them again under new paths, so it
   can fail with `request_conflict`: the message was already saved; don't resend it.
+- From a Cloud thread, every `tell` answer has a `request_id`. After an unclear
+  answer or a failed tell, repeat the exact command with `--request-id ID`: it is
+  delivered once, and a repeat answers with the first message's state.
 - Input sent while a turn is starting stays queued with
   `waitingOn.kind: "turn-starting"`. The `turn/started` event wakes it and
   steers it into that turn. Do not resend it.

@@ -18,7 +18,7 @@ export const defaultExperiments: Experiments = {
   mobileApp: false,
   multiMachinePicker: false,
   sidebarProgressiveDisclosure: false,
-  timelineWindowing: false,
+  timelineWindowing: true,
 };
 
 export const experimentChangesSchema = z

@@ -19,14 +19,44 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
 import { fetchWithAppSurface } from "@/lib/app-surface";
+import { useLoopThreadLabel } from "@/lib/loop-threads";
 
 export const threadPurposeShowInSidebarAtom = createSyncedPreferenceAtom(
   "threadPurpose.showInSidebar",
 );
 
-function ThreadPurposeCardBody({ purpose }: { purpose: ThreadPurpose }) {
+/** Which loops started or wake the thread (#1136): "Started by loop: A. Woken by loops: B, C" as [verb, names] pairs. */
+function useLoopLines(threadId: string): [verb: string, names: string][] {
+  const label = useLoopThreadLabel(threadId);
+  if (!label) return [];
+  return label.split(/\. (?=Woken by loops?: )/).map((part) => {
+    const at = part.indexOf(": ");
+    return [part.slice(0, at), part.slice(at + 2)];
+  });
+}
+
+// The sidebar card: a lime strip on top names the loops (David, 2026-11-27, design B).
+function ThreadPurposeCardBody({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
+  const loops = useLoopLines(threadId);
   return (
     <>
+      <span
+        aria-hidden
+        className={cn(
+          "absolute -top-[5px] left-2.5 size-2.5 rotate-45 rounded-tl-[2px] border-l border-t group-data-[side=top]:hidden",
+          loops.length ? "bg-primary" : "bg-popover",
+        )}
+      />
+      {loops.length ? (
+        <div className="-mx-3.5 -mt-3 mb-3 space-y-0.5 rounded-t-md bg-primary px-3.5 py-2 text-xs text-primary-foreground">
+          {loops.map(([verb, names]) => (
+            <div key={verb} className="flex items-baseline gap-1.5">
+              <span className="shrink-0 opacity-70">{verb}</span>
+              <span className="truncate font-semibold">{names}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span className="font-medium uppercase tracking-wider">Purpose</span>
         <span>
@@ -110,6 +140,7 @@ function ThreadCredits({ threadId }: { threadId: string }) {
 }
 
 function PurposeCreditsCard({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
+  const loops = useLoopLines(threadId);
   return (
     <div className="flex">
       <div className="flex min-w-0 flex-1 basis-0 flex-col gap-3 bg-primary p-5 text-primary-foreground">
@@ -119,6 +150,12 @@ function PurposeCreditsCard({ purpose, threadId }: { purpose: ThreadPurpose; thr
           <span className="text-xs font-semibold opacity-70">{purpose.percent >= 100 ? "done" : "done so far"}</span>
         </div>
         <p className="text-sm leading-relaxed font-medium">{purpose.text}</p>
+        {/* The loops, on a black chip (David, 2026-11-27, design C). */}
+        {loops.map(([verb, names]) => (
+          <span key={verb} className="max-w-full self-start truncate rounded-full bg-black px-2.5 py-1 font-mono text-[11px] text-primary">
+            {verb.toLowerCase()} · {names}
+          </span>
+        ))}
         <div className="mt-auto pt-2 text-xs opacity-60">{updatedText(purpose)}</div>
       </div>
       <ThreadCredits threadId={threadId} />
@@ -231,11 +268,7 @@ export function SidebarThreadPurposeHoverCard({
             openedWarm && "data-[state=open]:animate-none!",
           )}
         >
-          <span
-            aria-hidden
-            className="absolute -top-[5px] left-2.5 size-2.5 rotate-45 rounded-tl-[2px] border-l border-t bg-popover group-data-[side=top]:hidden"
-          />
-          <ThreadPurposeCardBody purpose={purpose} />
+          <ThreadPurposeCardBody purpose={purpose} threadId={threadId} />
         </HoverCardContent>
       ) : null}
     </HoverCard>

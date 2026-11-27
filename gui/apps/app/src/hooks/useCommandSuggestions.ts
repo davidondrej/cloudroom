@@ -3,6 +3,7 @@ import { useEffect, useMemo } from "react";
 import type { PromptMentionCommandTrigger } from "@cloudroom/domain";
 import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import {
+  createCommandSearchIndex,
   filterCommandSuggestions,
   toProviderCommandSuggestion,
   type ProviderCommandSuggestion,
@@ -27,6 +28,8 @@ interface UseCommandSuggestionsArgs {
   hostId?: string | null;
   query: string | null;
   composerFocused?: boolean;
+  /** Set false when the caller indexes `catalog` directly so search runs only once. */
+  filter?: boolean;
 }
 
 const COMMAND_CATALOG_PREFETCH_STALE_TIME_MS = 30_000;
@@ -42,12 +45,11 @@ const COPY_COMMAND_SUGGESTION: ProviderCommandSuggestion = {
 
 interface UseCommandSuggestionsResult {
   trigger: PromptMentionCommandTrigger | null;
+  /** Full merged catalog before query filtering, for single-pass indexing downstream. */
+  catalog: readonly ProviderCommandSuggestion[];
   suggestions: ProviderCommandSuggestion[];
   isLoading: boolean;
   isError: boolean;
-  hasMore: boolean;
-  isLoadingMore: boolean;
-  loadMore: () => void;
 }
 
 interface CommandSuggestionPromptAction {
@@ -57,6 +59,28 @@ interface CommandSuggestionPromptAction {
     name: string;
     trailingText: string;
   };
+}
+
+function buildPromptActionCommands(
+  promptActions: readonly CommandSuggestionPromptAction[] | undefined,
+  trigger: PromptMentionCommandTrigger | null,
+): ProviderCommandSuggestion[] {
+  if (trigger === null || !promptActions?.length) {
+    return [];
+  }
+  const commands: ProviderCommandSuggestion[] = [];
+  for (const action of promptActions) {
+    if (!action.command || action.command.trigger !== trigger) continue;
+    commands.push({
+      kind: "command",
+      name: action.command.name,
+      source: "command",
+      origin: "user",
+      description: null,
+      argumentHint: null,
+    });
+  }
+  return commands;
 }
 
 export function promptActionCommandSuggestions({
@@ -71,23 +95,8 @@ export function promptActionCommandSuggestions({
   if (trigger === null) {
     return [];
   }
-
   return filterCommandSuggestions(
-    (promptActions ?? []).flatMap((action): ProviderCommandSuggestion[] => {
-      if (!action.command || action.command.trigger !== trigger) {
-        return [];
-      }
-      return [
-        {
-          kind: "command",
-          name: action.command.name,
-          source: "command",
-          origin: "user",
-          description: null,
-          argumentHint: null,
-        },
-      ];
-    }),
+    buildPromptActionCommands(promptActions, trigger),
     query,
   );
 }
@@ -99,11 +108,15 @@ function mergeCommandSuggestions(
   const suggestions: ProviderCommandSuggestion[] = [];
   const seen = new Set<string>();
 
-  for (const suggestion of [...preferred, ...fallback]) {
+  for (const suggestion of preferred) {
     const key = `${suggestion.source}:${suggestion.name}`;
-    if (seen.has(key)) {
-      continue;
-    }
+    if (seen.has(key)) continue;
+    seen.add(key);
+    suggestions.push(suggestion);
+  }
+  for (const suggestion of fallback) {
+    const key = `${suggestion.source}:${suggestion.name}`;
+    if (seen.has(key)) continue;
     seen.add(key);
     suggestions.push(suggestion);
   }
@@ -122,17 +135,6 @@ export function useCommandSuggestions(
     args.query !== null;
 
   const trimmedQuery = args.query?.trim() ?? "";
-  const promptActionSuggestions = useMemo(
-    () =>
-      isActive
-        ? promptActionCommandSuggestions({
-            promptActions: args.promptActions,
-            query: trimmedQuery.toLowerCase(),
-            trigger,
-          })
-        : [],
-    [args.promptActions, isActive, trigger, trimmedQuery],
-  );
 
   const commandsQuery = useProjectCommands(
     {
@@ -189,64 +191,65 @@ export function useCommandSuggestions(
     shouldPrefetchCatalog,
   ]);
 
-  const suggestions = useMemo<ProviderCommandSuggestion[]>(() => {
-    if (!isActive) {
+  // Assemble the full merged catalog once per fetch/scope change (not per keystroke).
+  const catalog = useMemo<ProviderCommandSuggestion[]>(() => {
+    if (trigger === null) {
       return [];
     }
-    const actionNames = new Set(
-      (args.promptActions ?? []).flatMap(({ command }) =>
-        command?.trigger === trigger ? [command.name] : [],
-      ),
+    const actionCommands = buildPromptActionCommands(
+      args.promptActions,
+      trigger,
     );
-    const discoveredSuggestions = filterCommandSuggestions(
-      (commandsQuery.data?.commands ?? [])
-        .map(toProviderCommandSuggestion)
-        .map((suggestion) =>
-          suggestion.source === "command" &&
-          suggestion.origin !== "builtin" &&
-          actionNames.has(suggestion.name)
-            ? { ...suggestion, insertAsText: true as const }
-            : suggestion,
-        )
-        .filter(
-          (suggestion) =>
-            args.commandScope === "thread" ||
-            suggestion.source !== "command" ||
-            suggestion.origin !== "builtin" ||
-            !["compact", "teleport"].includes(suggestion.name),
-        ),
-      trimmedQuery,
-    );
-    const appSuggestions =
-      args.commandScope === "thread"
-        ? filterCommandSuggestions([COPY_COMMAND_SUGGESTION], trimmedQuery)
-        : [];
+    const actionNames = new Set(actionCommands.map(({ name }) => name));
+    const discovered: ProviderCommandSuggestion[] = [];
+    const ownNames = new Set<string>();
+    for (const rawCommand of commandsQuery.data?.commands ?? []) {
+      let suggestion = toProviderCommandSuggestion(rawCommand);
+      if (
+        args.commandScope !== "thread" &&
+        suggestion.source === "command" &&
+        suggestion.origin === "builtin" &&
+        (suggestion.name === "compact" || suggestion.name === "teleport")
+      ) {
+        continue;
+      }
+      if (
+        suggestion.source === "command" &&
+        suggestion.origin !== "builtin" &&
+        actionNames.has(suggestion.name)
+      ) {
+        suggestion = { ...suggestion, insertAsText: true as const };
+        ownNames.add(suggestion.name);
+      }
+      discovered.push(suggestion);
+    }
+
+    const appCommands =
+      args.commandScope === "thread" ? [COPY_COMMAND_SUGGESTION] : [];
     // The user's own command wins its name; the action stays in the + menu.
-    const ownNames = new Set(
-      discoveredSuggestions.flatMap((suggestion) =>
-        suggestion.insertAsText ? [suggestion.name] : [],
-      ),
-    );
-    return mergeCommandSuggestions(
-      [
-        ...appSuggestions,
-        ...promptActionSuggestions.filter(({ name }) => !ownNames.has(name)),
-      ],
-      discoveredSuggestions,
-    );
-  }, [
-    commandsQuery.data?.commands,
-    args.commandScope,
-    args.promptActions,
-    isActive,
-    promptActionSuggestions,
-    trigger,
-    trimmedQuery,
-  ]);
+    const preferred = [
+      ...appCommands,
+      ...actionCommands.filter(({ name }) => !ownNames.has(name)),
+    ];
+    return mergeCommandSuggestions(preferred, discovered);
+  }, [commandsQuery.data?.commands, args.commandScope, args.promptActions, trigger]);
+
+  const shouldFilter = args.filter !== false;
+  const searchIndex = useMemo(
+    () => (shouldFilter ? createCommandSearchIndex(catalog) : null),
+    [catalog, shouldFilter],
+  );
+
+  const suggestions = useMemo<ProviderCommandSuggestion[]>(() => {
+    if (!isActive || !shouldFilter || searchIndex === null) {
+      return [];
+    }
+    return searchIndex.search(trimmedQuery);
+  }, [isActive, searchIndex, shouldFilter, trimmedQuery]);
 
   const isLoading =
     isActive &&
-    suggestions.length === 0 &&
+    (!shouldFilter || suggestions.length === 0) &&
     commandsQuery.data === undefined &&
     (commandsQuery.isPending || commandsQuery.isFetching);
   const isError =
@@ -254,11 +257,9 @@ export function useCommandSuggestions(
 
   return {
     trigger,
+    catalog,
     suggestions,
     isLoading,
     isError,
-    hasMore: false,
-    isLoadingMore: false,
-    loadMore: () => {},
   };
 }

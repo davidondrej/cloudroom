@@ -11,6 +11,7 @@ import {
 const state = vi.hoisted(() => ({
   keychain: "",
   file: "",
+  throttle: null as string | null,
 }));
 
 vi.mock("node:child_process", () => ({
@@ -27,12 +28,30 @@ vi.mock("node:child_process", () => ({
 
 vi.mock("node:fs/promises", () => ({
   default: {
-    readFile: (file: string) =>
-      Promise.resolve(
+    readFile: (file: string) => {
+      if (file.includes("cloudroom-claude-usage-throttle")) {
+        return state.throttle === null
+          ? Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" }))
+          : Promise.resolve(state.throttle);
+      }
+      return Promise.resolve(
         file.endsWith(".credentials.json")
           ? state.file
           : JSON.stringify({ oauthAccount: { emailAddress: null } }),
-      ),
+      );
+    },
+    writeFile: (file: string, content: string) => {
+      if (file.includes("cloudroom-claude-usage-throttle")) {
+        state.throttle = content;
+      }
+      return Promise.resolve();
+    },
+    unlink: (file: string) => {
+      if (file.includes("cloudroom-claude-usage-throttle")) {
+        state.throttle = null;
+      }
+      return Promise.resolve();
+    },
   },
 }));
 
@@ -45,6 +64,7 @@ vi.mock("@get-bb/plugin-sdk/provider-bridge", async (importOriginal) => ({
 }));
 
 import {
+  __testing,
   getClaudeProviderHealth,
   getClaudeProviderUsage,
 } from "./provider-maintenance.js";
@@ -81,6 +101,8 @@ function saveLogin(fields: Record<string, unknown>) {
 }
 
 beforeEach(() => {
+  state.throttle = null;
+  __testing.resetUsageThrottle();
   saveLogin({});
   vi.stubGlobal(
     "fetch",
@@ -127,6 +149,33 @@ describe("Claude Code credential loading", () => {
     const result = await getClaudeProviderUsage();
 
     expect(result).toEqual({
+      supported: true,
+      usage: expect.objectContaining({
+        status: "error",
+        message:
+          "Anthropic temporarily throttled this usage check. This does not mean your Claude limit is exhausted. Try again later.",
+      }),
+    });
+  });
+
+  it("enforces a Retry-After 429 cooldown across bridge restarts", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: new Headers({ "retry-after": "120" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getClaudeProviderUsage();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // Immediate repeat and simulated cold restart both stay gated without calling Anthropic.
+    await getClaudeProviderUsage();
+    __testing.resetUsageThrottle(false);
+    const afterRestart = await getClaudeProviderUsage();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(afterRestart).toEqual({
       supported: true,
       usage: expect.objectContaining({
         status: "error",

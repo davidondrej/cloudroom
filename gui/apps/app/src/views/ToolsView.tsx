@@ -144,7 +144,13 @@ function PluginsToolView({
   );
 }
 
-function PluginDetailToolView({ pluginId }: { pluginId: string }) {
+function PluginDetailToolView({
+  pluginId,
+  settings,
+}: {
+  pluginId: string;
+  settings?: ReactNode;
+}) {
   const navigate = useNavigate();
   const location = useLocation();
   const [deleteTarget, setDeleteTarget] = useState<PluginListItem | null>(null);
@@ -316,6 +322,7 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
         catalogEntry={selectedCatalogEntry ?? undefined}
         catalogEntries={catalogQuery.data?.entries ?? []}
         onOpenPlugin={handleOpenCatalogPlugin}
+        settings={settings}
       />
     );
   } else if (selectedCatalogEntry !== null && !selectedCatalogEntry.installed) {
@@ -416,12 +423,19 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
   );
 }
 
-export function PluginDetailPaneView({ pluginId }: { pluginId: string }) {
+export function PluginDetailPaneView({
+  pluginId,
+  settings,
+}: {
+  pluginId: string;
+  /** Settings → Plugins passes the plugin's extra settings, so the page shows them in place. */
+  settings?: ReactNode;
+}) {
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       <div className="min-h-0 flex-1 overflow-hidden">
         <Suspense fallback={<ResourceBodyFallback />}>
-          <PluginDetailToolView pluginId={pluginId} />
+          <PluginDetailToolView pluginId={pluginId} settings={settings} />
         </Suspense>
       </div>
     </div>

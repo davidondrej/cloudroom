@@ -516,3 +516,184 @@ it("reloads saved Claude usage only on a forced machine refresh", async () => {
     await harness.dispose();
   }
 });
+
+it("persists ok measurements, rolls expired windows, survives unloaded plugins, and prefers fresh native bars on skipLocal", async () => {
+  const pastReset = new Date(Date.now() - 60_000).toISOString();
+  const savedKey = JSON.stringify(["provider-claude-code", "mac-claude"]);
+  const savedMeasurement = {
+    accountKey: "anthropic:account:1",
+    observedAt: Date.now() - 120_000,
+    usage: {
+      status: "ok",
+      accountEmail: "scott@example.com",
+      planLabel: "Max",
+      plan: { id: "max", multiplier: 5 },
+      windows: [
+        {
+          id: "0:five",
+          kind: "five-hour",
+          label: "Five-hour limit",
+          model: null,
+          usedPercent: 85,
+          resetsAt: pastReset,
+          cost: null,
+        },
+      ],
+      credits: null,
+    },
+  };
+  let pluginLoaded = false;
+  let fetchFails = true;
+  let nativePercent = 42;
+  let macAccountWindows: { label: string; usedPercent: number; resetsAt: number | null }[] = [];
+  const callRpc = vi.fn(async ({ method, input }) => {
+    if (method === usageListMethod) {
+      return {
+        resources: [
+          {
+            id: "mac-claude",
+            providerId: "claude-code",
+            label: "Claude Code",
+            scope: { kind: "host", hostId: "here", hostName: "Mac" },
+          },
+        ],
+      };
+    }
+    if (method === "accounts.list") {
+      if (input.provider !== "claude-code") return [];
+      return [
+        {
+          id: "local",
+          name: "This Mac",
+          email: "scott@example.com",
+          plan: "Max",
+          inUse: true,
+          windows: macAccountWindows,
+          limitedUntil: null,
+        },
+        {
+          id: "added",
+          name: "Backup",
+          email: "backup@example.com",
+          plan: "Pro",
+          inUse: false,
+          windows: [{ label: "Five-hour limit", usedPercent: 10, resetsAt: null }],
+          limitedUntil: null,
+        },
+      ];
+    }
+    if (fetchFails) throw new Error("HTTP 429");
+    return {
+      ...savedMeasurement,
+      observedAt: Date.now(),
+      usage: {
+        ...savedMeasurement.usage,
+        windows: [
+          {
+            ...savedMeasurement.usage.windows[0]!,
+            usedPercent: nativePercent,
+            resetsAt: new Date(Date.now() + 3_600_000).toISOString(),
+          },
+        ],
+      },
+    };
+  });
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "provider-usage",
+    sdk: {
+      system: { config: async () => ({ primaryHostId: "here" }) },
+      hosts: { list: async () => [makeHostResponse({ id: "here", status: "connected" })] },
+      providers: {
+        list: async () => [{ id: "claude-code", displayName: "Claude Code", logoUrl: null }],
+      },
+      plugins: {
+        experimental_discoverRpc: async ({ method } = {}) => {
+          if (method === "accounts.list")
+            return [{ pluginId: "accounts", method, displayName: "Accounts" }];
+          return pluginLoaded
+            ? [{ pluginId: "provider-claude-code", method: usageListMethod, displayName: "Claude" }]
+            : [];
+        },
+        callRpc,
+      },
+    },
+  });
+  try {
+    await bb.storage.kv.set("measurements:v1", { [savedKey]: savedMeasurement });
+    plugin(bb);
+    // 1. Before provider-claude-code finishes loading, saved KV is NOT wiped.
+    await harness.callRpc("getUsage", {
+      force: false,
+      machineIds: ["here"],
+      providerId: null,
+      maxAgeMs: 60_000,
+    });
+    expect(await bb.storage.kv.get("measurements:v1")).toHaveProperty(savedKey);
+
+    // 2. Once loaded, even if refresh fails (429), hydrated measurement is shown with expired window rolled to 0%.
+    pluginLoaded = true;
+    const afterFailure = await harness.callRpc("getUsage", {
+      force: false,
+      machineIds: ["here"],
+      providerId: null,
+      maxAgeMs: 60_000,
+    });
+    expect(afterFailure).toMatchObject({
+      machines: [
+        {
+          error: "Some usage could not be refreshed.",
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              accountId: "local",
+              usage: expect.objectContaining({
+                status: "ok",
+                accountEmail: "scott@example.com",
+                windows: [
+                  expect.objectContaining({ usedPercent: 0, resetsAt: null }),
+                ],
+              }),
+            }),
+          ]),
+        },
+      ],
+    });
+
+    // 3. Forced reload succeeds natively -> passes skipLocal: true and keeps fresh native 42% (not accounts' stale 99%).
+    macAccountWindows = [{ label: "Five-hour limit", usedPercent: 99, resetsAt: null }];
+    fetchFails = false;
+    nativePercent = 42;
+    const afterReload = await harness.callRpc("getUsage", {
+      force: true,
+      machineIds: ["here"],
+      providerId: null,
+      maxAgeMs: 0,
+    });
+    expect(afterReload).toMatchObject({
+      machines: [
+        {
+          error: null,
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              accountId: "local",
+              usage: expect.objectContaining({
+                status: "ok",
+                windows: [expect.objectContaining({ usedPercent: 42 })],
+              }),
+            }),
+          ]),
+        },
+      ],
+    });
+    expect(
+      callRpc.mock.calls.some(
+        ([{ method, input }]) =>
+          method === "accounts.list" &&
+          input.provider === "claude-code" &&
+          input.refresh === true &&
+          input.skipLocal === true,
+      ),
+    ).toBe(true);
+  } finally {
+    await harness.dispose();
+  }
+});

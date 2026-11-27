@@ -30,6 +30,10 @@ const NO_INDICATOR: PaneContentSplitIndicator = {
 };
 
 const NULL_LAYOUT_ATOM = atom<SplitLayout | null>(null);
+const MULTI_PANE_SPLIT_LAYOUT_ATOM = atom<SplitLayout | null>((get) => {
+  const layout = get(splitLayoutAtom);
+  return layout !== null && countPanes(layout.root) >= 2 ? layout : null;
+});
 
 function useSplitLayoutForIndicator(enabled: boolean): {
   layout: SplitLayout | null;
@@ -37,7 +41,7 @@ function useSplitLayoutForIndicator(enabled: boolean): {
 } {
   const isCompact = useIsCompactViewport();
   const layout = useAtomValue(
-    enabled && !isCompact ? splitLayoutAtom : NULL_LAYOUT_ATOM,
+    enabled && !isCompact ? MULTI_PANE_SPLIT_LAYOUT_ATOM : NULL_LAYOUT_ATOM,
   );
   return { layout, isCompact };
 }

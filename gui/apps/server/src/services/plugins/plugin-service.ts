@@ -115,7 +115,10 @@ import {
   recoverInterruptedGitPluginPromotion,
 } from "./install-sources.js";
 import { readPluginManifest, type PluginManifest } from "./manifest.js";
-import { listBundledPluginRegistrations } from "./builtin-registry.js";
+import {
+  ALWAYS_ENABLED_PLUGIN_ERROR,
+  listBundledPluginRegistrations,
+} from "./builtin-registry.js";
 import { createPluginUsageTelemetry } from "./plugin-usage-telemetry.js";
 import {
   type BbPluginApi,
@@ -999,6 +1002,18 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     return capabilities;
   }
 
+  function isAlwaysEnabledPlugin(
+    row: Pick<InstalledPluginRow, "id" | "sourceKind" | "sourceBuiltinName">,
+  ): boolean {
+    return bundledPlugins.some(
+      (bundled) =>
+        bundled.alwaysEnabled === true &&
+        (bundled.pluginId === row.id ||
+          (row.sourceKind === "builtin" &&
+            bundled.name === row.sourceBuiltinName)),
+    );
+  }
+
   function list(): InstalledPlugin[] {
     const scheduleRows = listPluginSchedules(deps.db);
     const rows = listInstalledPlugins(deps.db);
@@ -1043,6 +1058,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           sourceDisplay: sourceDisplayForRow(row),
           updateState: updateStateForRow(row),
           enabled: row.enabled,
+          alwaysEnabled: isAlwaysEnabledPlugin(row),
           description:
             loadedPlugin?.manifest.description ??
             identity?.manifest.description ??
@@ -1640,6 +1656,12 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
 
     async setEnabled(id, enabled) {
       return withPluginOperationLock(REGISTRATION_MUTATION_KEY, async () => {
+        if (!enabled) {
+          const existing = getInstalledPlugin(deps.db, id);
+          if (existing && isAlwaysEnabledPlugin(existing)) {
+            throw new Error(ALWAYS_ENABLED_PLUGIN_ERROR);
+          }
+        }
         if (!setInstalledPluginEnabled(deps.db, id, enabled)) return undefined;
         if (enabled) {
           const row = getInstalledPlugin(deps.db, id);

@@ -24,6 +24,7 @@ room-cli loop list
 room-cli loop update ID [--name NAME] [--priority 1-4] [--prompt TEXT] [--cron EXPR [--timezone ZONE] | --at ISO_TIME | --in 30m] [--script TEXT|--script-file PATH] [--provider P] [--model M] [--reasoning LEVEL] [--agent P,M[,LEVEL]]... [--secrets KEY,.env|none|all] [--parent THREAD|none]
 room-cli loop pause|resume|run|delete|hook ID
 room-cli loop report --outcome done|acted|needs-you|failed --confidence high|medium|low --reason TEXT [--action TEXT]...
+room-cli loop runs ID [--limit 1-100]   A loop's past runs, newest first (20 by default): each run's thread, start and end, and its loop report. Only loops in this thread's project
 A loop runs on a schedule even while the user's Mac is off (`room-cli automation` is the same command): every minute with a script, else at most every 15 minutes. `run ID` makes it due now and turns a paused loop back on; `pause ID` keeps it off until `resume ID`. A --webhook loop runs when its secret URL gets a POST instead: create prints the URL once, `hook ID` replaces it, and each run gets the requests that arrived as data. A URL takes up to 64 KB a request, but a run reads only up to its first 16 KB, less with a long prompt: send bigger reports as a link or in parts. Each --cron run starts a fresh Cloud thread in its own sandbox, from this thread's project and agent; --same-thread re-prompts this thread instead. A one-time --at/--in run re-prompts this thread; --new-thread gives it a fresh one. A fresh-thread automation saves this thread's settings, so it keeps running after this thread is archived. Its runs use this thread's agent unless --provider, --model, or --reasoning picks another (fresh-thread loops only); `list` shows every loop on the account, with each one's project_id and agent, and `update` changes the agent. --agent, given 2 to 8 times, makes agents that take turns: each run gets the next one in order, and one Cloud can't run (a plan limit, a login, a model) is skipped for the next; one --agent ends the turns. --priority is P1 (essential) to P4 (niche); loops start at P3. --secrets picks the only API keys (names from Settings → Cloud environment) a fresh-thread loop's runs and script get, plus .env for the project's .env files: pick just what the prompt and script need, like --secrets SENTRY_TOKEN,.env, or none. Without it a loop gets all of them; `list` shows each loop's secrets (null: all). Any picked list, even .env or none, blocks `room-cli mac` in its runs. A loop that needs the Mac keeps all keys: make or widen it from a Cloud thread with all keys or the desktop CLI, since a thread with picked keys passes them on and can't widen a loop; `update --secrets all` fixes only later runs. --parent picks a manager for a fresh-thread loop: an open Cloud thread in its project that each run starts under, so it can steer and archive them and they can `thread tell --parent` it; `none` clears it. A run whose manager is archived or gone starts top-level. A script runs first (60 s), in the automation's own sandbox with fresh threads, else in this one: no output skips the run (exit 0 or 1; other exit codes fail it, and 3 failures in a row pause it), and its output is added to the prompt. It keeps its state (a cursor, a seen list) in $ROOM_LOOP_STATE, never ~/.cache or /tmp, which a rebuilt sandbox loses; if that is unset, exit 2. Cloudroom fills in the next run within a minute; check `list` for it or an error. Inside a loop run, `report` records what the run did, why, and how sure it was (ADR 0298): a --reason of up to 500 characters and up to 10 --action values of up to 200 characters each, like --action \"merged #419\": group related changes, as the run's transcript keeps the details.";
 const MAX_PROMPT: usize = 32_000;
 
@@ -77,6 +78,9 @@ pub struct Body {
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     actions: Option<Vec<String>>,
+    // `runs` (ADR 20261127-143904): how many of the newest runs, 1-100.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limit: Option<u8>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -305,6 +309,9 @@ fn check(input: &Body) -> Result<(), Failure> {
     if input.webhook.is_some() && input.script.is_some() {
         return bad("A webhook loop has no script yet");
     }
+    if input.limit.is_some_and(|n| !(1..=100).contains(&n)) {
+        return bad("Use --limit 1 to 100");
+    }
     if input.priority.is_some_and(|p| !(1..=4).contains(&p)) {
         return bad("Use --priority 1, 2, 3, or 4");
     }
@@ -382,6 +389,30 @@ fn target_flag(words: &[&str]) -> Option<&'static str> {
 fn bad_project(words: &[&str], own: &str) -> bool {
     let named = words.iter().filter(|w| **w == "--project").count();
     named > 1 || (named == 1 && flag(words, "--project").is_none_or(|p| p.is_empty() || p != own))
+}
+
+/// `runs ID [--limit N] [--project P]`, the desktop CLI's form, so one loop prompt works in both. The website reads only
+/// this thread's project's loops, so `--project` changes nothing, even empty (an unset `$ROOM_PROJECT_ID`).
+fn runs(words: &[&str]) -> Result<Value, &'static str> {
+    const USE: &str = "Use room-cli loop runs ID [--limit 1-100]";
+    let ["runs", id, rest @ ..] = words else {
+        return Err(USE);
+    };
+    if id.starts_with('-') {
+        return Err(USE);
+    }
+    let mut body = json!({"action": "runs", "id": id});
+    for pair in rest.chunks(2) {
+        match pair {
+            ["--limit", n] => match n.parse::<u8>() {
+                Ok(n) if (1..=100).contains(&n) => body["limit"] = json!(n),
+                _ => return Err("Use --limit 1 to 100"),
+            },
+            ["--project", _] => {}
+            _ => return Err(USE),
+        }
+    }
+    Ok(body)
 }
 
 /// `--in 30m` as `30 minutes`.
@@ -481,6 +512,13 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
         }
         ["pause" | "resume" | "run" | "delete" | "hook", id] => body["id"] = json!(id),
+        ["runs", ..] => match runs(&words) {
+            Ok(runs) => body = runs,
+            Err(message) => {
+                eprintln!("{message}");
+                return Ok(2);
+            }
+        },
         ["create", ..] | ["update", ..] => {
             if words[0] == "update" {
                 let Some(id) = words.get(1).filter(|w| !w.starts_with('-')) else {
@@ -641,6 +679,23 @@ mod tests {
             ]),
             None
         );
+    }
+
+    #[test]
+    fn runs_reads_the_desktop_form() {
+        use super::runs;
+        let id = "0b6f3c8e-9d7a-4a59-8f8e-1c2d3e4f5a6b";
+        assert_eq!(
+            runs(&["runs", id, "--project", "a", "--limit", "30"]).unwrap(),
+            serde_json::json!({"action": "runs", "id": id, "limit": 30})
+        );
+        assert!(runs(&["runs", id]).is_ok());
+        // An unset $ROOM_PROJECT_ID: the website still reads only this thread's project.
+        assert!(runs(&["runs", id, "--project", ""]).is_ok());
+        assert!(runs(&["runs", id, "--project"]).is_err());
+        assert!(runs(&["runs", id, "--limit", "0"]).is_err());
+        assert!(runs(&["runs", id, "--limit"]).is_err());
+        assert!(runs(&["runs", "--limit", "5"]).is_err());
     }
 
     #[test]

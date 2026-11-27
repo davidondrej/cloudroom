@@ -88,30 +88,35 @@ import {
   type MarkdownLocalImageRouting,
 } from "./markdown-link-routing.js";
 import {
-  buildThreadMentionComponent,
+  ThreadMentionView,
   remarkThreadMentions,
   splitRawThreadIdsInText,
+  type ThreadMentionElementProps,
 } from "./markdown-thread-mentions.js";
 import {
-  buildPromptMentionComponent,
+  PromptMentionView,
   remarkPromptMentions,
   substitutePromptMentions,
   type IndexedPromptMention,
   type MarkdownPromptMentions,
+  type PromptMentionElementProps,
 } from "./markdown-prompt-mentions.js";
 import {
-  buildMessageDirectiveComponent,
+  MessageDirectiveView,
   EMPTY_MOUNTED_MESSAGE_DIRECTIVES,
   MESSAGE_DIRECTIVE_MOUNT_LIMIT,
   MessageDirectiveMountsContext,
   remarkMessageDirectives,
   type BuildMessageDirectiveComponentArgs,
   type MarkdownMessageDirectives,
+  type MessageDirectiveElementProps,
   type MountedMessageDirective,
 } from "./markdown-message-directives.js";
 import {
   createMarkdownPieceCache,
   resolveMarkdownPieces,
+  seedMarkdownPieceCache,
+  type MarkdownPieceEntry,
   type MarkdownPieceRenderConfig,
 } from "./markdown-incremental-pieces.js";
 import { normalizePromptBlockquoteBoundaries } from "./markdown-prompt-blockquote-boundaries.js";
@@ -167,7 +172,7 @@ interface IsMarkdownAppRouteHrefArgs {
   href: string | undefined;
 }
 
-interface BuildMarkdownComponentsArgs {
+interface MarkdownRuntimeContextValue {
   imagePolicy: MarkdownImagePolicy;
   imageSourceOffset: number;
   linkRouting?: MarkdownLinkRouting;
@@ -1396,130 +1401,109 @@ function resolveMarkdownSourceMedia({
 
 const EMPTY_THREAD_IDS: readonly string[] = [];
 
-function buildMarkdownComponents({
-  imagePolicy,
-  imageSourceOffset,
-  linkRouting,
-  preferredTheme,
-  rewriteLocalhostLinks,
-  setExpandedImage,
-  threadMentions,
-  promptMentions,
-  messageDirectives,
-}: BuildMarkdownComponentsArgs): Components {
-  interface RawThreadIdLabelCandidate {
-    end: number;
-    start: number;
-    threadId: string;
-  }
+const DEFAULT_MARKDOWN_RUNTIME: MarkdownRuntimeContextValue = {
+  imagePolicy: "render",
+  imageSourceOffset: 0,
+  preferredTheme: "dark",
+  rewriteLocalhostLinks: false,
+  setExpandedImage: () => {},
+};
 
-  function flattenMarkdownLinkLabel(node: ReactNode): {
-    codeRanges: ReadonlyArray<{ end: number; start: number }>;
-    text: string;
-  } {
-    const codeRanges: Array<{ end: number; start: number }> = [];
-    let text = "";
-    const append = (child: ReactNode): void => {
-      if (typeof child === "string" || typeof child === "number") {
-        text += String(child);
-        return;
-      }
-      if (!isValidElement(child)) {
-        Children.forEach(child, append);
-        return;
-      }
-      const element = child as ReactElement<{ children?: ReactNode }>;
-      const isCode =
-        element.type === "code" || element.type === MarkdownCodeRenderer;
-      const start = text.length;
-      append(element.props.children);
-      if (isCode && text.length > start) {
-        codeRanges.push({ start, end: text.length });
-      }
-    };
-    append(node);
-    return { codeRanges, text };
-  }
+const MarkdownRuntimeContext = createContext<MarkdownRuntimeContextValue>(
+  DEFAULT_MARKDOWN_RUNTIME,
+);
 
-  function rawThreadIdLabelCandidates(
-    node: ReactNode,
-  ): RawThreadIdLabelCandidate[] {
-    const flattened = flattenMarkdownLinkLabel(node);
-    const candidates: RawThreadIdLabelCandidate[] = [];
-    let offset = 0;
-    for (const segment of splitRawThreadIdsInText(flattened.text)) {
-      const start = offset;
-      const end = start + segment.text.length;
-      offset = end;
-      if (
-        segment.rawThreadId === null ||
-        flattened.codeRanges.some(
-          (range) => start < range.end && end > range.start,
-        )
-      ) {
-        continue;
-      }
-      candidates.push({ start, end, threadId: segment.rawThreadId });
+interface RawThreadIdLabelCandidate {
+  end: number;
+  start: number;
+  threadId: string;
+}
+
+function flattenMarkdownLinkLabel(node: ReactNode): {
+  codeRanges: ReadonlyArray<{ end: number; start: number }>;
+  text: string;
+} {
+  const codeRanges: Array<{ end: number; start: number }> = [];
+  let text = "";
+  const append = (child: ReactNode): void => {
+    if (typeof child === "string" || typeof child === "number") {
+      text += String(child);
+      return;
     }
-    return candidates;
-  }
+    if (!isValidElement(child)) {
+      Children.forEach(child, append);
+      return;
+    }
+    const element = child as ReactElement<{ children?: ReactNode }>;
+    const isCode =
+      element.type === "code" || element.type === MarkdownCodeRenderer;
+    const start = text.length;
+    append(element.props.children);
+    if (isCode && text.length > start) {
+      codeRanges.push({ start, end: text.length });
+    }
+  };
+  append(node);
+  return { codeRanges, text };
+}
 
-  function renderLiftedMarkdownLinkLabel(
-    node: ReactNode,
-    anchorProps: Omit<MarkdownAnchorProps, "children">,
-    candidates: readonly RawThreadIdLabelCandidate[],
-    resourceById: ReadonlyMap<string, PromptTextMention["resource"]>,
-    cursor: { value: number },
-  ): ReactNode {
-    if (typeof node === "string" || typeof node === "number") {
-      const text = String(node);
-      const start = cursor.value;
-      const end = start + text.length;
-      cursor.value = end;
-      const containedCandidates = candidates.filter(
-        (candidate) => candidate.start >= start && candidate.end <= end,
+function rawThreadIdLabelCandidates(
+  node: ReactNode,
+): RawThreadIdLabelCandidate[] {
+  const flattened = flattenMarkdownLinkLabel(node);
+  const candidates: RawThreadIdLabelCandidate[] = [];
+  let offset = 0;
+  for (const segment of splitRawThreadIdsInText(flattened.text)) {
+    const start = offset;
+    const end = start + segment.text.length;
+    offset = end;
+    if (
+      segment.rawThreadId === null ||
+      flattened.codeRanges.some(
+        (range) => start < range.end && end > range.start,
+      )
+    ) {
+      continue;
+    }
+    candidates.push({ start, end, threadId: segment.rawThreadId });
+  }
+  return candidates;
+}
+
+function renderLiftedMarkdownLinkLabel(
+  node: ReactNode,
+  anchorProps: Omit<MarkdownAnchorProps, "children">,
+  candidates: readonly RawThreadIdLabelCandidate[],
+  resourceById: ReadonlyMap<string, PromptTextMention["resource"]>,
+  cursor: { value: number },
+  linkRouting: MarkdownLinkRouting | undefined,
+  rewriteLocalhostLinks: boolean,
+): ReactNode {
+  if (typeof node === "string" || typeof node === "number") {
+    const text = String(node);
+    const start = cursor.value;
+    const end = start + text.length;
+    cursor.value = end;
+    const containedCandidates = candidates.filter(
+      (candidate) => candidate.start >= start && candidate.end <= end,
+    );
+    if (containedCandidates.length === 0) {
+      return (
+        <MarkdownAnchor
+          {...anchorProps}
+          linkRouting={linkRouting}
+          rewriteLocalhostLinks={rewriteLocalhostLinks}
+        >
+          {text}
+        </MarkdownAnchor>
       );
-      if (containedCandidates.length === 0) {
-        return (
-          <MarkdownAnchor
-            {...anchorProps}
-            linkRouting={linkRouting}
-            rewriteLocalhostLinks={rewriteLocalhostLinks}
-          >
-            {text}
-          </MarkdownAnchor>
-        );
-      }
-      const rendered: ReactNode[] = [];
-      let localCursor = 0;
-      for (const candidate of containedCandidates) {
-        const candidateStart = candidate.start - start;
-        const candidateEnd = candidate.end - start;
-        if (candidateStart > localCursor) {
-          rendered.push(
-            <MarkdownAnchor
-              key={`text:${localCursor}`}
-              {...anchorProps}
-              linkRouting={linkRouting}
-              rewriteLocalhostLinks={rewriteLocalhostLinks}
-            >
-              {text.slice(localCursor, candidateStart)}
-            </MarkdownAnchor>,
-          );
-        }
-        const resource = resourceById.get(candidate.threadId);
-        if (resource !== undefined) {
-          rendered.push(
-            <PromptMentionPill
-              key={`${candidate.threadId}:${candidateStart}`}
-              resource={resource}
-              serializedText={candidate.threadId}
-            />,
-          );
-        }
-        localCursor = candidateEnd;
-      }
-      if (localCursor < text.length) {
+    }
+    const rendered: ReactNode[] = [];
+    let localCursor = 0;
+    for (const candidate of containedCandidates) {
+      const candidateStart = candidate.start - start;
+      const candidateEnd = candidate.end - start;
+      if (candidateStart > localCursor) {
         rendered.push(
           <MarkdownAnchor
             key={`text:${localCursor}`}
@@ -1527,198 +1511,386 @@ function buildMarkdownComponents({
             linkRouting={linkRouting}
             rewriteLocalhostLinks={rewriteLocalhostLinks}
           >
-            {text.slice(localCursor)}
+            {text.slice(localCursor, candidateStart)}
           </MarkdownAnchor>,
         );
       }
-      return rendered;
+      const resource = resourceById.get(candidate.threadId);
+      if (resource !== undefined) {
+        rendered.push(
+          <PromptMentionPill
+            key={`${candidate.threadId}:${candidateStart}`}
+            resource={resource}
+            serializedText={candidate.threadId}
+          />,
+        );
+      }
+      localCursor = candidateEnd;
     }
-    if (!isValidElement(node)) {
-      return Children.map(node, (child) =>
-        renderLiftedMarkdownLinkLabel(
-          child,
-          anchorProps,
-          candidates,
-          resourceById,
-          cursor,
-        ),
-      );
-    }
-    if (node.type === "code" || node.type === MarkdownCodeRenderer) {
-      cursor.value += flattenMarkdownLinkLabel(node).text.length;
-      return (
+    if (localCursor < text.length) {
+      rendered.push(
         <MarkdownAnchor
+          key={`text:${localCursor}`}
           {...anchorProps}
           linkRouting={linkRouting}
           rewriteLocalhostLinks={rewriteLocalhostLinks}
         >
-          {node}
-        </MarkdownAnchor>
+          {text.slice(localCursor)}
+        </MarkdownAnchor>,
       );
     }
-    const element = node as ReactElement<{ children?: ReactNode }>;
-    return cloneElement(
-      element,
-      undefined,
+    return rendered;
+  }
+  if (!isValidElement(node)) {
+    return Children.map(node, (child) =>
       renderLiftedMarkdownLinkLabel(
-        element.props.children,
+        child,
         anchorProps,
         candidates,
         resourceById,
         cursor,
+        linkRouting,
+        rewriteLocalhostLinks,
       ),
     );
   }
-
-  function MarkdownLink(props: MarkdownAnchorProps) {
-    const { children, ...anchorProps } = props;
-    const candidates = useMemo(
-      () =>
-        threadMentions === undefined
-          ? []
-          : rawThreadIdLabelCandidates(children),
-      [children],
-    );
-    const candidateThreadIds = useMemo(
-      () =>
-        candidates.length === 0
-          ? EMPTY_THREAD_IDS
-          : [...new Set(candidates.map((candidate) => candidate.threadId))],
-      [candidates],
-    );
-    const resourceById = useRawThreadMentionResources(candidateThreadIds);
-    const resolvedCandidates = candidates.filter((candidate) =>
-      resourceById.has(candidate.threadId),
-    );
-    if (resolvedCandidates.length > 0) {
-      return (
-        <>
-          {renderLiftedMarkdownLinkLabel(
-            children,
-            anchorProps,
-            resolvedCandidates,
-            resourceById,
-            { value: 0 },
-          )}
-        </>
-      );
-    }
+  if (node.type === "code" || node.type === MarkdownCodeRenderer) {
+    cursor.value += flattenMarkdownLinkLabel(node).text.length;
     return (
       <MarkdownAnchor
         {...anchorProps}
         linkRouting={linkRouting}
         rewriteLocalhostLinks={rewriteLocalhostLinks}
       >
-        {children}
+        {node}
       </MarkdownAnchor>
     );
   }
+  const element = node as ReactElement<{ children?: ReactNode }>;
+  return cloneElement(
+    element,
+    undefined,
+    renderLiftedMarkdownLinkLabel(
+      element.props.children,
+      anchorProps,
+      candidates,
+      resourceById,
+      cursor,
+      linkRouting,
+      rewriteLocalhostLinks,
+    ),
+  );
+}
 
-  function MarkdownCodeRenderer(props: MarkdownCodeProps) {
+function MarkdownLink(props: MarkdownAnchorProps) {
+  const { linkRouting, rewriteLocalhostLinks, threadMentions } = useContext(
+    MarkdownRuntimeContext,
+  );
+  const { children, ...anchorProps } = props;
+  const candidates = useMemo(
+    () =>
+      threadMentions === undefined ? [] : rawThreadIdLabelCandidates(children),
+    [children, threadMentions],
+  );
+  const candidateThreadIds = useMemo(
+    () =>
+      candidates.length === 0
+        ? EMPTY_THREAD_IDS
+        : [...new Set(candidates.map((candidate) => candidate.threadId))],
+    [candidates],
+  );
+  const resourceById = useRawThreadMentionResources(candidateThreadIds);
+  const resolvedCandidates = candidates.filter((candidate) =>
+    resourceById.has(candidate.threadId),
+  );
+  if (resolvedCandidates.length > 0) {
     return (
-      <MarkdownCode
-        {...props}
-        imagePolicy={imagePolicy}
-        linkRouting={linkRouting}
-        preferredTheme={preferredTheme}
-        rewriteLocalhostLinks={rewriteLocalhostLinks}
-      />
+      <>
+        {renderLiftedMarkdownLinkLabel(
+          children,
+          anchorProps,
+          resolvedCandidates,
+          resourceById,
+          { value: 0 },
+          linkRouting,
+          rewriteLocalhostLinks,
+        )}
+      </>
     );
   }
+  return (
+    <MarkdownAnchor
+      {...anchorProps}
+      linkRouting={linkRouting}
+      rewriteLocalhostLinks={rewriteLocalhostLinks}
+    >
+      {children}
+    </MarkdownAnchor>
+  );
+}
 
-  function MarkdownImage({
-    src,
-    alt,
-    className: _className,
-    node,
-    "data-markdown-image-offset": pieceOffset,
-    ...imageAttributes
-  }: MarkdownImageProps) {
-    if (imagePolicy === "alt-text") {
-      return (
-        <span data-markdown-image-fallback="">
-          [Image: {typeof alt === "string" && alt.length > 0 ? alt : "image"}]
-        </span>
-      );
-    }
-    const sourceOffset = pieceOffset ?? node?.position?.start.offset;
+function MarkdownCodeRenderer(props: MarkdownCodeProps) {
+  const { imagePolicy, linkRouting, preferredTheme, rewriteLocalhostLinks } =
+    useContext(MarkdownRuntimeContext);
+  return (
+    <MarkdownCode
+      {...props}
+      imagePolicy={imagePolicy}
+      linkRouting={linkRouting}
+      preferredTheme={preferredTheme}
+      rewriteLocalhostLinks={rewriteLocalhostLinks}
+    />
+  );
+}
+
+function MarkdownImage({
+  src,
+  alt,
+  className: _className,
+  node,
+  "data-markdown-image-offset": pieceOffset,
+  ...imageAttributes
+}: MarkdownImageProps) {
+  const { imagePolicy, imageSourceOffset, setExpandedImage } = useContext(
+    MarkdownRuntimeContext,
+  );
+  if (imagePolicy === "alt-text") {
     return (
-      <MarkdownRenderedImage
-        alt={alt}
-        sourceOffset={
-          sourceOffset === undefined
-            ? undefined
-            : imageSourceOffset + sourceOffset
-        }
-        imageAttributes={imageAttributes}
-        setExpandedImage={setExpandedImage}
-        src={src}
-      />
+      <span data-markdown-image-fallback="">
+        [Image: {typeof alt === "string" && alt.length > 0 ? alt : "image"}]
+      </span>
     );
   }
+  const sourceOffset = pieceOffset ?? node?.position?.start.offset;
+  return (
+    <MarkdownRenderedImage
+      alt={alt}
+      sourceOffset={
+        sourceOffset === undefined
+          ? undefined
+          : imageSourceOffset + sourceOffset
+      }
+      imageAttributes={imageAttributes}
+      setExpandedImage={setExpandedImage}
+      src={src}
+    />
+  );
+}
 
-  function MarkdownSource({
-    media,
-    node: _node,
-    ...sourceProps
-  }: MarkdownSourceProps) {
-    if (imagePolicy === "alt-text") {
-      return null;
-    }
-    return (
-      <source
-        {...sourceProps}
-        media={resolveMarkdownSourceMedia({ media, preferredTheme })}
-      />
-    );
+function MarkdownSource({
+  media,
+  node: _node,
+  ...sourceProps
+}: MarkdownSourceProps) {
+  const { imagePolicy, preferredTheme } = useContext(MarkdownRuntimeContext);
+  if (imagePolicy === "alt-text") {
+    return null;
   }
+  return (
+    <source
+      {...sourceProps}
+      media={resolveMarkdownSourceMedia({ media, preferredTheme })}
+    />
+  );
+}
 
-  const components: Components = {
-    a: MarkdownLink,
-    blockquote: MarkdownBlockquote,
-    code: MarkdownCodeRenderer,
-    h1: MarkdownH1,
-    h2: MarkdownH2,
-    h3: MarkdownH3,
-    h4: MarkdownH4,
-    h5: MarkdownH5,
-    h6: MarkdownH6,
-    hr: MarkdownHr,
-    img: MarkdownImage,
-    input: MarkdownInput,
-    li: MarkdownListItem,
-    ol: MarkdownOrderedList,
-    p: MarkdownParagraph,
-    pre: MarkdownPre,
-    source: MarkdownSource,
-    table: MarkdownTable,
-    td: MarkdownTableCell,
-    th: MarkdownTableHeader,
-    thead: MarkdownTableHead,
-    ul: MarkdownUnorderedList,
-  };
+function MarkdownThreadMention(props: ThreadMentionElementProps) {
+  const { threadMentions } = useContext(MarkdownRuntimeContext);
+  if (threadMentions === undefined) return null;
+  return (
+    <ThreadMentionView
+      {...props}
+      mentions={threadMentions.mentions}
+      resolveSegmentLinkHref={threadMentions.resolveLinkHref}
+    />
+  );
+}
 
-  if (threadMentions !== undefined) {
-    components["bb-thread-mention"] = buildThreadMentionComponent({
-      mentions: threadMentions.mentions,
-      resolveSegmentLinkHref: threadMentions.resolveLinkHref,
-    });
+function MarkdownPromptMention(props: PromptMentionElementProps) {
+  const { promptMentions } = useContext(MarkdownRuntimeContext);
+  if (promptMentions === undefined) return null;
+  return (
+    <PromptMentionView
+      {...props}
+      mentions={promptMentions.mentions}
+      resolveLinkHref={promptMentions.resolveLinkHref}
+      resolveMentionLink={promptMentions.resolveMentionLink}
+    />
+  );
+}
+
+function MarkdownMessageDirective(props: MessageDirectiveElementProps) {
+  const { messageDirectives } = useContext(MarkdownRuntimeContext);
+  if (messageDirectives === undefined) return null;
+  return (
+    <MessageDirectiveView
+      {...props}
+      message={messageDirectives.message}
+      openWorkspaceFile={messageDirectives.openWorkspaceFile}
+      openThreadPanel={messageDirectives.openThreadPanel}
+    />
+  );
+}
+
+const BASE_MARKDOWN_COMPONENTS: Components = {
+  a: MarkdownLink,
+  blockquote: MarkdownBlockquote,
+  code: MarkdownCodeRenderer,
+  h1: MarkdownH1,
+  h2: MarkdownH2,
+  h3: MarkdownH3,
+  h4: MarkdownH4,
+  h5: MarkdownH5,
+  h6: MarkdownH6,
+  hr: MarkdownHr,
+  img: MarkdownImage,
+  input: MarkdownInput,
+  li: MarkdownListItem,
+  ol: MarkdownOrderedList,
+  p: MarkdownParagraph,
+  pre: MarkdownPre,
+  source: MarkdownSource,
+  table: MarkdownTable,
+  td: MarkdownTableCell,
+  th: MarkdownTableHeader,
+  thead: MarkdownTableHead,
+  ul: MarkdownUnorderedList,
+};
+
+const STATIC_MARKDOWN_COMPONENTS_BY_MASK = new Map<number, Components>();
+
+function getStaticMarkdownComponents({
+  hasThreadMentions,
+  hasPromptMentions,
+  hasMessageDirectives,
+}: {
+  hasThreadMentions: boolean;
+  hasPromptMentions: boolean;
+  hasMessageDirectives: boolean;
+}): Components {
+  const mask =
+    (hasThreadMentions ? 1 : 0) |
+    (hasPromptMentions ? 2 : 0) |
+    (hasMessageDirectives ? 4 : 0);
+  const existing = STATIC_MARKDOWN_COMPONENTS_BY_MASK.get(mask);
+  if (existing !== undefined) {
+    return existing;
   }
-
-  if (promptMentions !== undefined) {
-    components["bb-prompt-mention"] = buildPromptMentionComponent({
-      mentions: promptMentions.mentions,
-      resolveLinkHref: promptMentions.resolveLinkHref,
-      resolveMentionLink: promptMentions.resolveMentionLink,
-    });
+  const components: Components = { ...BASE_MARKDOWN_COMPONENTS };
+  if (hasThreadMentions) {
+    components["bb-thread-mention"] = MarkdownThreadMention;
   }
-
-  if (messageDirectives !== undefined) {
-    components["bb-message-directive"] =
-      buildMessageDirectiveComponent(messageDirectives);
+  if (hasPromptMentions) {
+    components["bb-prompt-mention"] = MarkdownPromptMention;
   }
-
+  if (hasMessageDirectives) {
+    components["bb-message-directive"] = MarkdownMessageDirective;
+  }
+  STATIC_MARKDOWN_COMPONENTS_BY_MASK.set(mask, components);
   return components;
+}
+
+interface ParsedMarkdownCacheEntry {
+  chars: number;
+  piece?: MarkdownPieceEntry;
+  element?: ReactNode;
+}
+
+const MARKDOWN_PARSE_CACHE_MAX_ENTRIES = 500;
+const MARKDOWN_PARSE_CACHE_MAX_CHARS = 4_000_000;
+const parsedMarkdownCache = new Map<string, ParsedMarkdownCacheEntry>();
+let parsedMarkdownCacheChars = 0;
+
+function readParsedMarkdownCache(
+  key: string,
+): ParsedMarkdownCacheEntry | undefined {
+  const existing = parsedMarkdownCache.get(key);
+  if (existing === undefined) return undefined;
+  parsedMarkdownCache.delete(key);
+  parsedMarkdownCache.set(key, existing);
+  return existing;
+}
+
+function writeParsedMarkdownCache(
+  key: string,
+  entry: ParsedMarkdownCacheEntry,
+): void {
+  if (entry.chars > MARKDOWN_PARSE_CACHE_MAX_CHARS / 2) return;
+  const previous = parsedMarkdownCache.get(key);
+  if (previous !== undefined) {
+    parsedMarkdownCacheChars -= previous.chars;
+    parsedMarkdownCache.delete(key);
+  }
+  parsedMarkdownCache.set(key, entry);
+  parsedMarkdownCacheChars += entry.chars;
+  while (
+    parsedMarkdownCache.size > MARKDOWN_PARSE_CACHE_MAX_ENTRIES ||
+    parsedMarkdownCacheChars > MARKDOWN_PARSE_CACHE_MAX_CHARS
+  ) {
+    const oldest = parsedMarkdownCache.entries().next().value;
+    if (oldest === undefined) break;
+    parsedMarkdownCache.delete(oldest[0]);
+    parsedMarkdownCacheChars -= oldest[1].chars;
+  }
+}
+
+function serializeAbsoluteLocalRouting(
+  routing: MarkdownAbsoluteLocalFileLinkRouting,
+): string {
+  return routing.kind === "contained" ? `c:${routing.rootPath}` : routing.kind;
+}
+
+function serializeRelativeLocalRouting(
+  routing: MarkdownRelativeLocalFileLinkRouting | undefined,
+): string {
+  return routing === undefined ? "" : `${routing.baseDir}\u0001${routing.rootPath}`;
+}
+
+function buildMarkdownParseCacheKey({
+  allowHtml,
+  body,
+  hasKatex,
+  hasPromptMentions,
+  hasThreadMentions,
+  localFileRouting,
+  localImageRouting,
+  mode,
+  preserveSoftBreaks,
+  urlTransform,
+}: {
+  allowHtml: boolean;
+  body: string;
+  hasKatex: boolean;
+  hasPromptMentions: boolean;
+  hasThreadMentions: boolean;
+  localFileRouting: MarkdownLocalFileLinkRouting | undefined;
+  localImageRouting: MarkdownLocalImageRouting | undefined;
+  mode: "incremental" | "regular";
+  preserveSoftBreaks: boolean;
+  urlTransform: UrlTransform | undefined;
+}): string | null {
+  if (urlTransform !== undefined) return null;
+  if (
+    localImageRouting !== undefined &&
+    localImageRouting.cacheKey === undefined
+  ) {
+    return null;
+  }
+  const fileKey =
+    localFileRouting === undefined
+      ? ""
+      : `${serializeAbsoluteLocalRouting(localFileRouting.absoluteLinks)}\u0001${serializeRelativeLocalRouting(localFileRouting.relativeLinks)}`;
+  const imageKey =
+    localImageRouting === undefined
+      ? ""
+      : `${localImageRouting.cacheKey}\u0001${serializeAbsoluteLocalRouting(localImageRouting.absolutePaths)}\u0001${serializeRelativeLocalRouting(localImageRouting.relativePaths)}`;
+  const flags =
+    (allowHtml ? 1 : 0) |
+    (hasKatex ? 2 : 0) |
+    (preserveSoftBreaks ? 4 : 0) |
+    (hasThreadMentions ? 8 : 0) |
+    (hasPromptMentions ? 16 : 0);
+  return `${mode}:${flags}\u0000${fileKey}\u0000${imageKey}\u0000${body}`;
 }
 
 const FRONTMATTER_PATTERN =
@@ -1852,23 +2024,32 @@ function MarkdownPreviewComponent({
       registry: messageDirectives.registry,
     };
   }, [messageDirectives]);
+  const hasMessageDirectives = messageDirectiveMounts !== null;
   const markdownComponents = useMemo(
     () =>
-      buildMarkdownComponents({
-        imagePolicy,
-        imageSourceOffset,
-        linkRouting,
-        preferredTheme,
-        rewriteLocalhostLinks,
-        setExpandedImage,
-        threadMentions,
-        promptMentions: resolvedPromptMentions,
-        messageDirectives: messageDirectiveMounts ?? undefined,
+      getStaticMarkdownComponents({
+        hasThreadMentions: threadMentions !== undefined,
+        hasPromptMentions: resolvedPromptMentions !== undefined,
+        hasMessageDirectives,
       }),
-    [
-      linkRouting,
+    [threadMentions, resolvedPromptMentions, hasMessageDirectives],
+  );
+  const runtimeContextValue = useMemo<MarkdownRuntimeContextValue>(
+    () => ({
       imagePolicy,
       imageSourceOffset,
+      linkRouting,
+      preferredTheme,
+      rewriteLocalhostLinks,
+      setExpandedImage,
+      threadMentions,
+      promptMentions: resolvedPromptMentions,
+      messageDirectives: messageDirectiveMounts ?? undefined,
+    }),
+    [
+      imagePolicy,
+      imageSourceOffset,
+      linkRouting,
       preferredTheme,
       rewriteLocalhostLinks,
       threadMentions,
@@ -1876,16 +2057,14 @@ function MarkdownPreviewComponent({
       messageDirectiveMounts,
     ],
   );
-  const hasMessageDirectives = messageDirectiveMounts !== null;
+  const preserveSoftBreaks =
+    threadMentions?.preserveSoftBreaks === true || promptMentions !== undefined;
   const baseRemarkPlugins = useMemo((): MarkdownRemarkPlugins => {
     const plugins: MarkdownRemarkPlugins = [
       remarkGfm,
       [remarkMath, { singleDollarTextMath: false }],
     ];
-    if (
-      threadMentions?.preserveSoftBreaks === true ||
-      promptMentions !== undefined
-    ) {
+    if (preserveSoftBreaks) {
       plugins.push(remarkLineBreaks);
     }
     if (threadMentions !== undefined) {
@@ -1898,7 +2077,12 @@ function MarkdownPreviewComponent({
       plugins.push(remarkDirective);
     }
     return plugins;
-  }, [threadMentions, promptMentions, hasMessageDirectives]);
+  }, [
+    preserveSoftBreaks,
+    threadMentions,
+    promptMentions,
+    hasMessageDirectives,
+  ]);
   const remarkPlugins = useMemo(
     (): MarkdownRemarkPlugins =>
       messageDirectiveMounts === null
@@ -1951,12 +2135,92 @@ function MarkdownPreviewComponent({
       resolvedUrlTransform,
     ],
   );
-  const markdownPieces = usesIncrementalBlocks
-    ? resolveMarkdownPieces(markdownPieceCache, markdownPieceRenderConfig, body)
-    : null;
+  const parseCacheKey = useMemo(
+    () =>
+      hasMessageDirectives
+        ? null
+        : buildMarkdownParseCacheKey({
+            allowHtml,
+            body,
+            hasKatex: rehypeKatex !== null,
+            hasPromptMentions: promptMentions !== undefined,
+            hasThreadMentions: threadMentions !== undefined,
+            localFileRouting,
+            localImageRouting,
+            mode: usesIncrementalBlocks ? "incremental" : "regular",
+            preserveSoftBreaks,
+            urlTransform,
+          }),
+    [
+      allowHtml,
+      body,
+      hasMessageDirectives,
+      localFileRouting,
+      localImageRouting,
+      preserveSoftBreaks,
+      promptMentions,
+      rehypeKatex,
+      threadMentions,
+      urlTransform,
+      usesIncrementalBlocks,
+    ],
+  );
 
-  const renderedMarkdown =
-    markdownPieces === null ? (
+  let markdownPieces: ReturnType<typeof resolveMarkdownPieces> | null = null;
+  if (usesIncrementalBlocks) {
+    if (
+      parseCacheKey !== null &&
+      markdownPieceCache.entries.length === 0 &&
+      markdownPieceCache.resolved === null
+    ) {
+      const cachedPiece = readParsedMarkdownCache(parseCacheKey)?.piece;
+      if (cachedPiece !== undefined) {
+        seedMarkdownPieceCache(
+          markdownPieceCache,
+          markdownPieceRenderConfig,
+          body,
+          cachedPiece,
+        );
+      }
+    }
+    markdownPieces = resolveMarkdownPieces(
+      markdownPieceCache,
+      markdownPieceRenderConfig,
+      body,
+    );
+    if (
+      parseCacheKey !== null &&
+      markdownPieceCache.entries.length === 1 &&
+      markdownPieceCache.entries[0]?.source === body &&
+      readParsedMarkdownCache(parseCacheKey)?.piece === undefined
+    ) {
+      writeParsedMarkdownCache(parseCacheKey, {
+        chars: body.length,
+        piece: markdownPieceCache.entries[0],
+      });
+    }
+  }
+
+  let renderedMarkdown: ReactNode;
+  if (markdownPieces !== null) {
+    renderedMarkdown = markdownPieces.children;
+  } else if (parseCacheKey !== null) {
+    const cachedElement = readParsedMarkdownCache(parseCacheKey)?.element;
+    if (cachedElement !== undefined) {
+      renderedMarkdown = cachedElement;
+    } else {
+      const element = ReactMarkdown({
+        children: body,
+        components: markdownComponents,
+        rehypePlugins,
+        remarkPlugins,
+        urlTransform: resolvedUrlTransform,
+      });
+      writeParsedMarkdownCache(parseCacheKey, { chars: body.length, element });
+      renderedMarkdown = element;
+    }
+  } else {
+    renderedMarkdown = (
       <ReactMarkdown
         rehypePlugins={rehypePlugins}
         remarkPlugins={remarkPlugins}
@@ -1965,9 +2229,8 @@ function MarkdownPreviewComponent({
       >
         {body}
       </ReactMarkdown>
-    ) : (
-      markdownPieces.children
     );
+  }
 
   const imageSources = expandedImage?.imageSources ?? [];
   const expandedImageIndex = expandedImage?.index ?? -1;
@@ -2000,21 +2263,23 @@ function MarkdownPreviewComponent({
         {frontmatter !== null ? (
           <MarkdownFrontmatter source={frontmatter} />
         ) : null}
-        <MessageDirectiveMountsContext.Provider
-          value={
-            markdownPieces?.mounts ??
-            messageDirectiveMounts?.mounts ??
-            EMPTY_MOUNTED_MESSAGE_DIRECTIVES
-          }
-        >
-          {threadMentions === undefined ? (
-            renderedMarkdown
-          ) : (
-            <RawThreadMentionBatchProvider>
-              {renderedMarkdown}
-            </RawThreadMentionBatchProvider>
-          )}
-        </MessageDirectiveMountsContext.Provider>
+        <MarkdownRuntimeContext.Provider value={runtimeContextValue}>
+          <MessageDirectiveMountsContext.Provider
+            value={
+              markdownPieces?.mounts ??
+              messageDirectiveMounts?.mounts ??
+              EMPTY_MOUNTED_MESSAGE_DIRECTIVES
+            }
+          >
+            {threadMentions === undefined ? (
+              renderedMarkdown
+            ) : (
+              <RawThreadMentionBatchProvider>
+                {renderedMarkdown}
+              </RawThreadMentionBatchProvider>
+            )}
+          </MessageDirectiveMountsContext.Provider>
+        </MarkdownRuntimeContext.Provider>
       </div>
 
       <ImageLightbox

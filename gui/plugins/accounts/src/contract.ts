@@ -60,7 +60,11 @@ const polled = z.object({
 
 export const accountsRpcContract = defineRpcContract({
   "accounts.list": {
-    input: z.object({ provider: providerSchema, refresh: z.boolean().optional() }),
+    input: z.object({
+      provider: providerSchema,
+      refresh: z.boolean().optional(),
+      skipLocal: z.boolean().optional(),
+    }),
     output: z.array(accountViewSchema),
   },
   "accounts.use": {

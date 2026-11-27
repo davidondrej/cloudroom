@@ -17,6 +17,7 @@ interface MarkThreadReadMutation {
 }
 
 interface UseThreadReadTrackingParams {
+  active?: boolean;
   markThreadRead: MarkThreadReadMutation;
   thread?: ThreadReadTrackingState;
 }
@@ -29,6 +30,7 @@ interface ReadTrackingSnapshot {
 }
 
 export function useThreadReadTracking({
+  active = true,
   markThreadRead,
   thread,
 }: UseThreadReadTrackingParams) {
@@ -40,11 +42,12 @@ export function useThreadReadTracking({
   const previousSnapshotRef = useRef<ReadTrackingSnapshot | null>(null);
   const visibilityRevision = useDocumentVisibilityRevision();
   // A hook, not a plain call: the React Compiler caches a plain call's result from the first render.
-  const isVisible = useSyncExternalStore(
+  const isDocumentVisible = useSyncExternalStore(
     subscribeToDocumentVisibility,
     isDocumentAttended,
     isDocumentAttended,
   );
+  const isVisible = active && isDocumentVisible;
 
   useEffect(() => {
     const controllers = pendingReadControllersRef.current;

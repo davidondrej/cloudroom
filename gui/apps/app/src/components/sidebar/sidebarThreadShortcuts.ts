@@ -209,9 +209,14 @@ function scrollProjectSectionToTop(section: HTMLElement): void {
   const stack = section.closest<HTMLElement>("[data-sidebar-sticky-stack]");
   if (!scroller || !stack) return;
   const paddingTop = parseFloat(getComputedStyle(stack).paddingTop) || 0;
+  // A plugin row (the Director) pins above the labels and covers the top.
+  const topSlot =
+    stack.querySelector<HTMLElement>("[data-sidebar-top-slot]")?.offsetHeight ??
+    0;
   const overlap =
     scroller.getBoundingClientRect().top +
-    paddingTop -
+    paddingTop +
+    topSlot -
     section.getBoundingClientRect().top;
   if (overlap > 0.5) {
     scroller.scrollTop = Math.max(0, scroller.scrollTop - overlap);

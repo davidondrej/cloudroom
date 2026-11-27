@@ -282,7 +282,7 @@ describe("PluginsOverview", () => {
     expect(screen.getByTestId("location-path").textContent).toBe("/");
   });
 
-  it("shows the Type filter on Installed instead of Category", async () => {
+  it("keeps the Type filter in the Installed options menu", async () => {
     installFetch([AUTOMATIONS_PLUGIN]);
     const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
     render(
@@ -295,8 +295,13 @@ describe("PluginsOverview", () => {
 
     expect(await screen.findByText("Automations")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Category" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Type" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New plugin" })).toBeTruthy();
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Plugin list options" }),
+    );
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Cloudroom Official" }),
+    ).toBeTruthy();
   });
 
   it("keeps the Browse filter and New plugin in the search toolbar", async () => {
@@ -377,149 +382,6 @@ describe("PluginsOverview", () => {
     );
   });
 
-  it("loads more installed plugins as the scroll sentinel is reached", async () => {
-    const plugins = Array.from({ length: 12 }, (_, index) => {
-      const ordinal = String(index + 1).padStart(2, "0");
-      return {
-        ...AUTOMATIONS_PLUGIN,
-        id: `plugin-${ordinal}`,
-        source: `builtin:plugin-${ordinal}`,
-        name: `Plugin ${ordinal}`,
-      };
-    });
-    const intersectionCallbacks = new Set<IntersectionObserverCallback>();
-    vi.stubGlobal(
-      "IntersectionObserver",
-      class IntersectionObserverMock {
-        constructor(private readonly callback: IntersectionObserverCallback) {
-          intersectionCallbacks.add(this.callback);
-        }
-        observe() {}
-        unobserve() {}
-        disconnect() {
-          intersectionCallbacks.delete(this.callback);
-        }
-      },
-    );
-    const reachSentinel = () =>
-      act(() => {
-        for (const callback of intersectionCallbacks) {
-          callback(
-            [{ isIntersecting: true } as IntersectionObserverEntry],
-            {} as IntersectionObserver,
-          );
-        }
-      });
-    installFetch(plugins);
-    const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
-    render(
-      <MemoryRouter initialEntries={["/plugins?view=installed"]}>
-        <QueryClientWrapper>
-          <PluginsOverview mode="installed" />
-        </QueryClientWrapper>
-      </MemoryRouter>,
-    );
-
-    expect(await screen.findByText("Plugin 01")).toBeTruthy();
-    expect(screen.getByText("Plugin 10")).toBeTruthy();
-    expect(screen.queryByText("Plugin 11")).toBeNull();
-    expect(
-      document.querySelector("[data-resource-infinite-sentinel]"),
-    ).not.toBeNull();
-    expect(screen.queryByRole("button", { name: "Next" })).toBeNull();
-
-    reachSentinel();
-    expect(screen.getByText("Plugin 01")).toBeTruthy();
-    expect(screen.getByText("Plugin 12")).toBeTruthy();
-    expect(
-      document.querySelector("[data-resource-infinite-sentinel]"),
-    ).toBeNull();
-
-    fireEvent.change(
-      screen.getByRole("textbox", { name: "Search installed plugins" }),
-      { target: { value: "Plugin 01" } },
-    );
-    expect(screen.getByText("Plugin 01")).toBeTruthy();
-    expect(screen.queryByText("Plugin 12")).toBeNull();
-  });
-
-  it("fits the first chunk to the viewport and keeps the list panel unstretched", async () => {
-    const plugins = Array.from({ length: 30 }, (_, index) => {
-      const ordinal = String(index + 1).padStart(2, "0");
-      return {
-        ...AUTOMATIONS_PLUGIN,
-        id: `plugin-${ordinal}`,
-        source: `builtin:plugin-${ordinal}`,
-        name: `Plugin ${ordinal}`,
-      };
-    });
-    const viewportHeight = 760;
-    const clientHeightDescriptor = Object.getOwnPropertyDescriptor(
-      HTMLElement.prototype,
-      "clientHeight",
-    );
-
-    Object.defineProperty(HTMLElement.prototype, "clientHeight", {
-      configurable: true,
-      get() {
-        return this.id === "plugins-installed-results" ? viewportHeight : 0;
-      },
-    });
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
-      function getBoundingClientRect(this: HTMLElement) {
-        const height = this.hasAttribute("data-resource-list-panel")
-          ? viewportHeight
-          : this.hasAttribute("data-resource-row")
-            ? 50
-            : 0;
-        return new DOMRect(0, 0, 800, height);
-      },
-    );
-    vi.stubGlobal(
-      "ResizeObserver",
-      class ResizeObserverMock {
-        observe() {}
-        unobserve() {}
-        disconnect() {}
-      },
-    );
-
-    try {
-      installFetch(plugins);
-      const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
-      render(
-        <MemoryRouter initialEntries={["/plugins?view=installed"]}>
-          <QueryClientWrapper>
-            <PluginsOverview mode="installed" />
-          </QueryClientWrapper>
-        </MemoryRouter>,
-      );
-
-      await waitFor(() => {
-        expect(screen.getByText("Plugin 15")).toBeTruthy();
-      });
-      expect(screen.queryByText("Plugin 16")).toBeNull();
-      expect(
-        document.querySelector("[data-resource-infinite-sentinel]"),
-      ).not.toBeNull();
-      const listPanel = document.querySelector("[data-resource-list-panel]");
-      expect(
-        document.querySelector("[data-resource-collection-content]"),
-      ).toBeNull();
-      expect(listPanel?.classList.contains("flex-1")).toBe(false);
-    } finally {
-      if (clientHeightDescriptor === undefined) {
-        Reflect.deleteProperty(HTMLElement.prototype, "clientHeight");
-      } else {
-        Object.defineProperty(
-          HTMLElement.prototype,
-          "clientHeight",
-          clientHeightDescriptor,
-        );
-      }
-    }
-  });
-
   it("sorts enabled plugins before inactive plugins and published plugins first within enabled", async () => {
     installFetch([
       {
@@ -578,16 +440,10 @@ describe("PluginsOverview", () => {
       "plugin-row-inactive-local",
       "plugin-row-inactive-official",
     ]);
-    const officialPills = screen.getAllByText("Cloudroom Official");
-    expect(officialPills).toHaveLength(2);
-    expect(screen.getAllByText("BB Community")).toHaveLength(1);
-
-    const sortTrigger = screen.getByRole("button", {
-      name: "Sort: Plugin name, ascending",
-    });
-    expect(sortTrigger.querySelector('[data-icon="ArrowUpDown"]')).toBeTruthy();
-    fireEvent.pointerDown(sortTrigger);
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "Plugin name" }));
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Plugin list options" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sort Z to A" }));
     expect(
       [...document.querySelectorAll('[data-testid^="plugin-row-"]')].map(
         (row) => row.getAttribute("data-testid"),
@@ -599,13 +455,6 @@ describe("PluginsOverview", () => {
       "plugin-row-inactive-official",
       "plugin-row-inactive-local",
     ]);
-
-    fireEvent.keyDown(
-      screen.getByRole("menu", {
-        name: "Sort: Plugin name, descending",
-      }),
-      { key: "Escape" },
-    );
   });
 
   it("gives each publisher its own Type facet, separate from User", async () => {
@@ -643,7 +492,9 @@ describe("PluginsOverview", () => {
         (row) => row.getAttribute("data-testid"),
       );
 
-    const typeTrigger = screen.getByRole("button", { name: "Type" });
+    const typeTrigger = screen.getByRole("button", {
+      name: "Plugin list options",
+    });
     expect(rowIds()).toEqual([
       "plugin-row-builtin-one",
       "plugin-row-catalog-one",
@@ -715,7 +566,9 @@ describe("PluginsOverview", () => {
     );
 
     await screen.findByText("Acme One");
-    fireEvent.pointerDown(screen.getByRole("button", { name: "Type" }));
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "Plugin list options" }),
+    );
     fireEvent.click(
       screen.getByRole("menuitemcheckbox", { name: "Acme Plugins" }),
     );
@@ -792,42 +645,9 @@ describe("PluginsOverview", () => {
     ).toBeGreaterThanOrEqual(0);
     expect(screen.getByText("Inactive Builtin")).toBeTruthy();
     expect(
-      screen.getByRole("switch", { name: "Enable inactive-builtin" }),
-    ).toBeTruthy();
+      screen.getByTestId("plugin-row-inactive-builtin").textContent,
+    ).toContain("Off");
     expect(screen.getByText("Inactive Catalog Plugin")).toBeTruthy();
     expect(screen.getByText("Inactive Local Plugin")).toBeTruthy();
-  });
-
-  it("badges a built-in plugin Cloudroom Official and a catalog install by its marketplace", async () => {
-    installFetch([
-      AUTOMATIONS_PLUGIN,
-      {
-        ...AUTOMATIONS_PLUGIN,
-        id: "github",
-        name: "GitHub",
-        source: GITHUB_CATALOG_ENTRY.source,
-        provenance: "catalog",
-        publisherKey: "bb-community",
-        publisherLabel: "BB Community",
-        catalogEntryId: GITHUB_CATALOG_ENTRY.entryId,
-        sourceDisplay: "Cloudroom Official · GitHub",
-      },
-    ]);
-    const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
-    render(
-      <MemoryRouter initialEntries={["/plugins?view=installed"]}>
-        <QueryClientWrapper>
-          <PluginsOverview mode="installed" />
-        </QueryClientWrapper>
-      </MemoryRouter>,
-    );
-
-    const official = await screen.findAllByText("Cloudroom Official");
-    expect(official).toHaveLength(1);
-    const community = screen.getAllByText("BB Community");
-    expect(community).toHaveLength(1);
-    expect(official[0]?.parentElement?.className).toBe(
-      community[0]?.parentElement?.className,
-    );
   });
 });

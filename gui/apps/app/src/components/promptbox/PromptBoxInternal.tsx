@@ -40,9 +40,10 @@ import type {
   PromptDecorationSource,
   PromptDraftObserver,
 } from "./editor/prompt-decoration-extension";
-import { MentionMenu } from "./mentions/MentionMenu";
+import { ComposerTypeaheadIsland } from "./ComposerTypeaheadIsland";
 import {
   DEFAULT_COMPOSER_SCOPE,
+  resolveTypeaheadMentionLink,
   type PromptBoxProps,
 } from "./prompt-box-types";
 import { handlePromptKey } from "./prompt-keys";
@@ -56,7 +57,6 @@ import {
   usePromptFileDrop,
   usePromptHeightAnimation,
   usePromptVoiceAction,
-  useReportTypeaheadLayout,
   type PromptSubmitState,
 } from "./PromptBoxView";
 import {
@@ -66,7 +66,7 @@ import {
   usePromptEditor,
 } from "./usePromptEditor";
 import { usePromptHistory } from "./usePromptHistory";
-import { usePromptTypeahead } from "./usePromptTypeahead";
+import { createTypeaheadBridge } from "./usePromptTypeahead";
 
 export * from "./prompt-box-types";
 export { suppressPromptEditorAnchorActivation } from "./usePromptEditor";
@@ -186,7 +186,6 @@ export function PromptBoxInternal({
   const focusShortcut = useAppCommandShortcut("composer.focus");
   const runAppShortcut = useAppCommandKeyDispatch();
   const formRef = useRef<HTMLFormElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [expandedImageIndex, setExpandedImageIndex] = useState<number | null>(
     null,
@@ -275,18 +274,10 @@ export function PromptBoxInternal({
     latestSubmit.current();
   }, [latestSubmit, submitRequested]);
 
-  // The editor's features.
-  const typeahead = usePromptTypeahead({
-    editor: doc,
-    scopeKey: composerScopeIdentity(composerView.scope),
-    typeahead: typeaheadConfig,
-    promptActions,
-    hidden: isVoiceActive,
-    reasoning,
-    fastMode,
-    modelShortcuts,
-    locationCommands,
-  });
+  // The editor's features. Typeahead state lives in `<ComposerTypeaheadIsland />`
+  // behind this stable bridge so typing `/` or `@` and arrow keys never re-render PromptBoxInternal.
+  const [typeahead] = useState(createTypeaheadBridge);
+  const composerScopeKey = composerScopeIdentity(composerView.scope);
   const history = usePromptHistory(historyConfig, (draft) => {
     historyConfig?.onSelectEntry(draft);
     requestAnimationFrame(() => {
@@ -320,11 +311,11 @@ export function PromptBoxInternal({
       minHeight,
       promptActions,
       decorations,
-      decorationScopeKey: composerScopeIdentity(composerView.scope),
+      decorationScopeKey: composerScopeKey,
       onPasteFiles: onAttachFiles
         ? (files) => trackUpload(files, onAttachFiles(files))
         : undefined,
-      onFocus: typeaheadConfig.command.onEditorFocus,
+      onFocus: typeahead.onEditorFocus,
       onBlur: typeahead.closeOnBlur,
       onCaretMove: typeahead.sync,
       onEdit: typeahead.trackEdit,
@@ -353,7 +344,6 @@ export function PromptBoxInternal({
             : undefined,
         }),
     });
-  useReportTypeaheadLayout(menuRef, typeahead.isOpen);
   useAppCommandHandler(
     "composer.hardQueue",
     ({ target }) => {
@@ -634,30 +624,24 @@ export function PromptBoxInternal({
                 }
                 minHeight={minHeight}
                 layout={editorLayout}
-                resolveMentionLink={typeaheadConfig.mention.resolveLink}
+                resolveMentionLink={resolveTypeaheadMentionLink(typeaheadConfig)}
               />
             </div>
 
-            {typeahead.isOpen ? (
-              <div
-                ref={menuRef}
-                data-promptbox-typeahead-menu=""
-                className={cn(
-                  "absolute -left-px -right-px z-20",
-                  mentionMenuPlacement === "top"
-                    ? "bottom-full mb-2"
-                    : "top-full mt-2",
-                )}
-              >
-                <MentionMenu
-                  state={typeahead.menuState}
-                  selectedIndex={typeahead.selectedIndex}
-                  onApply={typeahead.apply}
-                  onDismiss={isPointerCoarse ? typeahead.dismiss : undefined}
-                  onCommandLoadMore={typeahead.loadMore}
-                />
-              </div>
-            ) : null}
+            <ComposerTypeaheadIsland
+              bridge={typeahead}
+              editor={doc}
+              scopeKey={composerScopeKey}
+              typeahead={typeaheadConfig}
+              promptActions={promptActions}
+              hidden={isVoiceActive}
+              mentionMenuPlacement={mentionMenuPlacement}
+              isPointerCoarse={isPointerCoarse}
+              reasoning={reasoning}
+              fastMode={fastMode}
+              modelShortcuts={modelShortcuts}
+              locationCommands={locationCommands}
+            />
 
             {isCompact ? null : (
               <div data-promptbox-expanded-only="" inert={coveredByVoice}>

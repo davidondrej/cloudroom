@@ -243,14 +243,30 @@ export function recordAcceptedPromptHistoryEntry(
     requestSequence: args.requestSequence,
     input,
   });
+  commandUsageVersion += 1;
   return true;
 }
+
+const COMMAND_USAGE_CACHE_TTL_MS = 60_000;
+let commandUsageVersion = 0;
+const commandUsageCache = new WeakMap<
+  object,
+  { computedAt: number; version: number; usage: Map<string, number> }
+>();
 
 /** Recency-weighted uses per command or skill name: each use halves in weight every 14 days. */
 export function listCommandUsage(
   deps: PromptHistoryServiceDeps,
   now = Date.now(),
 ): Map<string, number> {
+  const cached = commandUsageCache.get(deps.db);
+  if (
+    cached !== undefined &&
+    cached.version === commandUsageVersion &&
+    Math.abs(now - cached.computedAt) < COMMAND_USAGE_CACHE_TTL_MS
+  ) {
+    return cached.usage;
+  }
   const usage = new Map<string, number>();
   const uses = listPromptHistoryCommandUses(
     deps.db,
@@ -261,5 +277,10 @@ export function listCommandUsage(
     const weight = 0.5 ** ((now - createdAt) / COMMAND_USAGE_HALF_LIFE_MS);
     usage.set(name, (usage.get(name) ?? 0) + weight);
   }
+  commandUsageCache.set(deps.db, {
+    computedAt: now,
+    version: commandUsageVersion,
+    usage,
+  });
   return usage;
 }

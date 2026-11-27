@@ -90,18 +90,159 @@ export function toProviderCommandSuggestion(
   };
 }
 
-function matchingCommandNames(
-  suggestions: readonly ProviderCommandSuggestion[],
-  query: string,
-): Set<ProviderCommandSuggestion> {
+// Usage only counts in steps of 3, so one stray pick never reorders the menu
+// and two equally used rows don't swap back and forth.
+const COMMAND_USAGE_STEP = 3;
+
+interface IndexedCommand {
+  suggestion: ProviderCommandSuggestion;
+  lowerName: string;
+  bareName: string | null;
+  lowerDescription: string;
+  lowerArgumentHint: string;
+  usageRank: number;
+  section: ProviderCommandSection;
+  sectionRank: number;
+}
+
+export interface CommandSearchIndex {
+  readonly entries: readonly IndexedCommand[];
+  search(query: string): ProviderCommandSuggestion[];
+}
+
+function indexCommandSuggestion(
+  suggestion: ProviderCommandSuggestion,
+): IndexedCommand {
+  const lowerName = suggestion.name.toLowerCase();
+  const separatorIndex =
+    suggestion.source === "skill" ? lowerName.lastIndexOf(":") : -1;
+  const bareName =
+    separatorIndex < 0 ? null : lowerName.slice(separatorIndex + 1);
+  return {
+    suggestion,
+    lowerName,
+    bareName,
+    lowerDescription: suggestion.description?.toLowerCase() ?? "",
+    lowerArgumentHint: suggestion.argumentHint?.toLowerCase() ?? "",
+    usageRank: Math.floor((suggestion.usage ?? 0) / COMMAND_USAGE_STEP),
+    section: providerCommandSection(suggestion),
+    sectionRank: providerCommandSectionRank(suggestion),
+  };
+}
+
+function matchingIndexedCommands(
+  entries: readonly IndexedCommand[],
+  normalizedQuery: string,
+): Set<IndexedCommand> {
   return new Set(
     fuzzyMatchText({
-      items: suggestions,
-      query,
-      getText: (suggestion) => suggestion.name,
-      limit: suggestions.length,
+      items: entries,
+      query: normalizedQuery,
+      getText: (entry) => entry.lowerName,
+      limit: entries.length,
     }).map((match) => match.item),
   );
+}
+
+function indexedMatchRank(
+  entry: IndexedCommand,
+  normalizedQuery: string,
+  nameMatches: ReadonlySet<IndexedCommand> | null,
+): number {
+  if (entry.lowerName === normalizedQuery) return 0;
+  // Keep the room-cli skill first for partial queries like "/r".
+  if (
+    (entry.lowerName === "room-cli" || entry.bareName === "room-cli") &&
+    "room-cli".startsWith(normalizedQuery)
+  ) {
+    return 0.5;
+  }
+  if (entry.bareName === normalizedQuery) return 1;
+  if (
+    entry.lowerName.startsWith(normalizedQuery) ||
+    (entry.bareName !== null && entry.bareName.startsWith(normalizedQuery))
+  ) {
+    return 2;
+  }
+  if (
+    entry.lowerName.includes(normalizedQuery) ||
+    (entry.bareName !== null && entry.bareName.includes(normalizedQuery))
+  ) {
+    return 3;
+  }
+  return nameMatches?.has(entry) ? 4 : 5;
+}
+
+function groupBySectionOrder(
+  entries: readonly IndexedCommand[],
+): ProviderCommandSuggestion[] {
+  const bySection = new Map<
+    ProviderCommandSection,
+    ProviderCommandSuggestion[]
+  >();
+  for (const entry of entries) {
+    const existing = bySection.get(entry.section);
+    if (existing) {
+      existing.push(entry.suggestion);
+      continue;
+    }
+    bySection.set(entry.section, [entry.suggestion]);
+  }
+  return [...bySection.values()].flat();
+}
+
+function rankIndexedCommands(
+  entries: readonly IndexedCommand[],
+  normalizedQuery: string,
+  filterNonMatches: boolean,
+): ProviderCommandSuggestion[] {
+  if (entries.length === 0) return [];
+  if (normalizedQuery.length === 0) {
+    const ordered = [...entries].sort(
+      (left, right) =>
+        right.usageRank - left.usageRank || left.sectionRank - right.sectionRank,
+    );
+    return groupBySectionOrder(ordered);
+  }
+
+  const nameMatches = matchingIndexedCommands(entries, normalizedQuery);
+  const scored: Array<{ entry: IndexedCommand; matchRank: number }> = [];
+  for (const entry of entries) {
+    const matchedName = nameMatches.has(entry);
+    if (
+      filterNonMatches &&
+      !matchedName &&
+      !entry.lowerDescription.includes(normalizedQuery) &&
+      !entry.lowerArgumentHint.includes(normalizedQuery)
+    ) {
+      continue;
+    }
+    scored.push({
+      entry,
+      matchRank: indexedMatchRank(entry, normalizedQuery, nameMatches),
+    });
+  }
+
+  scored.sort(
+    (left, right) =>
+      left.matchRank - right.matchRank ||
+      right.entry.usageRank - left.entry.usageRank ||
+      left.entry.sectionRank - right.entry.sectionRank,
+  );
+  return groupBySectionOrder(scored.map(({ entry }) => entry));
+}
+
+/** Precomputes lowercased fields once per catalog so each keystroke filters + ranks in a single pass. */
+export function createCommandSearchIndex(
+  suggestions: readonly ProviderCommandSuggestion[],
+): CommandSearchIndex {
+  const entries = suggestions.map(indexCommandSuggestion);
+  return {
+    entries,
+    search(query: string): ProviderCommandSuggestion[] {
+      return rankIndexedCommands(entries, query.trim().toLowerCase(), true);
+    },
+  };
 }
 
 export function filterCommandSuggestions(
@@ -109,86 +250,19 @@ export function filterCommandSuggestions(
   query: string,
 ): ProviderCommandSuggestion[] {
   const normalizedQuery = query.trim().toLowerCase();
-  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
-  return suggestions.filter(
-    (suggestion) =>
-      nameMatches.has(suggestion) ||
-      [suggestion.description ?? "", suggestion.argumentHint ?? ""].some(
-        (text) => text.toLowerCase().includes(normalizedQuery),
-      ),
-  );
-}
-
-function compareCommandSuggestionSections(
-  left: ProviderCommandSuggestion,
-  right: ProviderCommandSuggestion,
-): number {
-  return providerCommandSectionRank(left) - providerCommandSectionRank(right);
-}
-
-function commandSuggestionSearchNames(
-  suggestion: ProviderCommandSuggestion,
-): string[] {
-  const name = suggestion.name.toLowerCase();
-  if (suggestion.source !== "skill") {
-    return [name];
+  if (normalizedQuery.length === 0) {
+    return [...suggestions];
   }
-  const separatorIndex = name.lastIndexOf(":");
-  return separatorIndex < 0 ? [name] : [name, name.slice(separatorIndex + 1)];
-}
-
-function commandSuggestionMatchRank(
-  suggestion: ProviderCommandSuggestion,
-  normalizedQuery: string,
-  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
-): number {
-  const canonicalName = suggestion.name.toLowerCase();
-  if (canonicalName === normalizedQuery) {
-    return 0;
-  }
-  const names = commandSuggestionSearchNames(suggestion);
-  // Keep the room-cli skill first for partial queries like "/r".
-  if (names.includes("room-cli") && "room-cli".startsWith(normalizedQuery)) {
-    return 0.5;
-  }
-  if (names.includes(normalizedQuery)) {
-    return 1;
-  }
-  if (names.some((name) => name.startsWith(normalizedQuery))) {
-    return 2;
-  }
-  if (names.some((name) => name.includes(normalizedQuery))) {
-    return 3;
-  }
-  return nameMatches.has(suggestion) ? 4 : 5;
-}
-
-// Usage only counts in steps of 3, so one stray pick never reorders the menu
-// and two equally used rows don't swap back and forth.
-const COMMAND_USAGE_STEP = 3;
-
-function commandSuggestionUsageRank(
-  suggestion: ProviderCommandSuggestion,
-): number {
-  return Math.floor((suggestion.usage ?? 0) / COMMAND_USAGE_STEP);
-}
-
-function compareCommandSuggestions(
-  left: ProviderCommandSuggestion,
-  right: ProviderCommandSuggestion,
-  normalizedQuery: string,
-  nameMatches: ReadonlySet<ProviderCommandSuggestion>,
-): number {
-  const byMatch =
-    commandSuggestionMatchRank(left, normalizedQuery, nameMatches) -
-    commandSuggestionMatchRank(right, normalizedQuery, nameMatches);
-  if (byMatch !== 0) return byMatch;
-  // A better name match always wins; usage only breaks ties within a tier.
-  const byUsage =
-    commandSuggestionUsageRank(right) - commandSuggestionUsageRank(left);
-  return byUsage !== 0
-    ? byUsage
-    : compareCommandSuggestionSections(left, right);
+  const entries = suggestions.map(indexCommandSuggestion);
+  const nameMatches = matchingIndexedCommands(entries, normalizedQuery);
+  return entries
+    .filter(
+      (entry) =>
+        nameMatches.has(entry) ||
+        entry.lowerDescription.includes(normalizedQuery) ||
+        entry.lowerArgumentHint.includes(normalizedQuery),
+    )
+    .map((entry) => entry.suggestion);
 }
 
 export function orderCommandSuggestions(
@@ -196,25 +270,8 @@ export function orderCommandSuggestions(
   query: string,
 ): ProviderCommandSuggestion[] {
   const normalizedQuery = query.trim().toLowerCase();
-  const nameMatches = matchingCommandNames(suggestions, normalizedQuery);
-  const ranked = [...suggestions].sort((left, right) =>
-    compareCommandSuggestions(left, right, normalizedQuery, nameMatches),
-  );
-
-  const bySection = new Map<
-    ProviderCommandSection,
-    ProviderCommandSuggestion[]
-  >();
-  for (const suggestion of ranked) {
-    const section = providerCommandSection(suggestion);
-    const existing = bySection.get(section);
-    if (existing) {
-      existing.push(suggestion);
-      continue;
-    }
-    bySection.set(section, [suggestion]);
-  }
-  return [...bySection.values()].flat();
+  const entries = suggestions.map(indexCommandSuggestion);
+  return rankIndexedCommands(entries, normalizedQuery, false);
 }
 
 export type TypeaheadTrigger =

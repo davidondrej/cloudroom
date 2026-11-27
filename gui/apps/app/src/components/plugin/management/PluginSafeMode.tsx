@@ -20,7 +20,7 @@ import { pluginAdminErrorMessage } from "@/lib/plugin-admin-error";
 
 // Safe mode stops every plugin that doesn't ship with Cloudroom, so a broken
 // plugin can be ruled out in one click. Turning it off restores the rest.
-function usePluginSafeModeToggle() {
+export function usePluginSafeModeToggle() {
   const queryClient = useQueryClient();
   const safeMode = usePluginSafeMode().data;
   const toggle = useMutation({

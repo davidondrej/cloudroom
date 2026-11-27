@@ -201,15 +201,27 @@ export function watchPanelOpen(
   }, PANEL_OPEN_CHECK_MS);
 }
 
-export function useThreadOpenTiming(threadId: string, ready: boolean): void {
+export function useThreadOpenTiming(
+  threadId: string,
+  ready: boolean,
+  active = true,
+): void {
   const pending = useRef<PendingThreadOpen | null>(null);
+  const wasActiveRef = useRef(false);
   useLayoutEffect(() => {
-    if (pending.current?.threadId === threadId) return;
+    if (!active) {
+      wasActiveRef.current = false;
+      return;
+    }
+    const becameActive = !wasActiveRef.current;
+    wasActiveRef.current = true;
+    if (!becameActive && pending.current?.threadId === threadId) return;
     pending.current = startThreadOpen(threadId);
-  }, [threadId]);
+  }, [active, threadId]);
   useEffect(() => {
     const open = pending.current;
     if (
+      !active ||
       !ready ||
       open === null ||
       open.threadId !== threadId ||
@@ -226,5 +238,5 @@ export function useThreadOpenTiming(threadId: string, ready: boolean): void {
       });
       if (open.metric === "app_ready") flushPerf();
     });
-  }, [ready, threadId]);
+  }, [active, ready, threadId]);
 }

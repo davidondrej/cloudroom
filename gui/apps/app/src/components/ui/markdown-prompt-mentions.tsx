@@ -106,7 +106,7 @@ interface BuildPromptMentionComponentArgs {
   resolveMentionLink?: PromptMentionLinkResolver;
 }
 
-interface PromptMentionElementProps {
+export interface PromptMentionElementProps {
   "data-mention-index"?: string;
 }
 
@@ -131,26 +131,45 @@ function resolveThreadMentionHref(
   );
 }
 
+export type PromptMentionViewProps = PromptMentionElementProps &
+  BuildPromptMentionComponentArgs;
+
+export function PromptMentionView({
+  mentions,
+  resolveLinkHref,
+  resolveMentionLink,
+  ...props
+}: PromptMentionViewProps) {
+  const rawIndex = props["data-mention-index"];
+  if (rawIndex === undefined) {
+    return null;
+  }
+  const mention = mentions[Number(rawIndex)];
+  if (mention === undefined) {
+    return null;
+  }
+  return (
+    <PromptMentionPill
+      resource={mention.resource}
+      resolveMentionLink={resolveMentionLink}
+      serializedText={mention.serializedText}
+      linkHref={resolveThreadMentionHref(mention.resource, resolveLinkHref)}
+    />
+  );
+}
+
 export function buildPromptMentionComponent({
   mentions,
   resolveLinkHref,
   resolveMentionLink,
 }: BuildPromptMentionComponentArgs): ComponentType<PromptMentionElementProps> {
   function PromptMentionElement(props: PromptMentionElementProps) {
-    const rawIndex = props["data-mention-index"];
-    if (rawIndex === undefined) {
-      return null;
-    }
-    const mention = mentions[Number(rawIndex)];
-    if (mention === undefined) {
-      return null;
-    }
     return (
-      <PromptMentionPill
-        resource={mention.resource}
+      <PromptMentionView
+        {...props}
+        mentions={mentions}
+        resolveLinkHref={resolveLinkHref}
         resolveMentionLink={resolveMentionLink}
-        serializedText={mention.serializedText}
-        linkHref={resolveThreadMentionHref(mention.resource, resolveLinkHref)}
       />
     );
   }

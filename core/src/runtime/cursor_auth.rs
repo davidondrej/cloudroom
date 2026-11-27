@@ -136,6 +136,7 @@ struct State {
     status: Status,
     checked: Option<Instant>,
     login: Option<Login>,
+    switched: bool,
 }
 pub struct CursorAuth {
     state: AsyncMutex<State>,
@@ -147,6 +148,7 @@ impl Default for CursorAuth {
                 status: Status::new("missing", None),
                 checked: None,
                 login: None,
+                switched: false,
             }),
         }
     }
@@ -160,6 +162,7 @@ impl CursorAuth {
             }
             state.login = None;
             state.checked = None;
+            state.switched = true;
         }
         if state
             .checked
@@ -172,6 +175,9 @@ impl CursorAuth {
     }
     pub async fn status(&self, config: &Config, storage: &Guard) -> Status {
         Self::inspect(&mut *self.state.lock().await, config, storage).await
+    }
+    pub async fn take_switched(&self) -> bool {
+        std::mem::take(&mut self.state.lock().await.switched)
     }
     pub async fn login(&self, config: &Config, storage: &Guard, id: String) -> Status {
         let mut state = self.state.lock().await;
@@ -282,6 +288,7 @@ impl CursorAuth {
         }
         state.status = checked;
         state.checked = Some(Instant::now());
+        state.switched = true;
         state.status.clone()
     }
     pub async fn shutdown(&self) {

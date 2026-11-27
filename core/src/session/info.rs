@@ -127,8 +127,14 @@ async fn models(
         ));
     }
     // A saved list answers at once; the first call asks the agent itself. Antigravity's login and models change
-    // under it, so its list is at most a minute old, as in the app.
-    let lookup = m.catalog(kind, kind != runtime::Kind::Antigravity);
+    // under it, so its list uses the timed catalog (and refreshes immediately when its login/model files change).
+    let lookup = async {
+        if kind == runtime::Kind::Antigravity {
+            m.model_catalog(kind).await
+        } else {
+            m.saved_catalog(kind).await
+        }
+    };
     let found = if soft {
         tokio::time::timeout(MODELS_WAIT, lookup).await.ok()
     } else {

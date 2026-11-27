@@ -61,7 +61,7 @@ interface MarkdownElementProps {
   node?: object;
 }
 
-interface MarkdownPieceEntry {
+export interface MarkdownPieceEntry {
   children: readonly ReactNode[];
   mounts: readonly MountedMessageDirective[];
   source: string;
@@ -554,6 +554,26 @@ export function createMarkdownPieceCache(): MarkdownPieceCache {
     entries: [],
     latchedWholeDocumentPrefix: null,
     resolved: null,
+  };
+}
+
+export function seedMarkdownPieceCache(
+  cache: MarkdownPieceCache,
+  config: MarkdownPieceRenderConfig,
+  body: string,
+  entry: MarkdownPieceEntry,
+): void {
+  cache.config = config;
+  cache.entries = [entry];
+  cache.latchedWholeDocumentPrefix = entry.summary.hasGlobalConstructs
+    ? body
+    : null;
+  cache.resolved = {
+    body,
+    result: {
+      children: entry.children,
+      mounts: entry.mounts,
+    },
   };
 }
 

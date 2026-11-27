@@ -68,13 +68,14 @@ import {
   promptModelShortcuts,
   arePromptEditorValuesEqual,
   suppressPromptEditorAnchorActivation,
+  type ControlledTypeaheadConfig,
   type PromptBoxAction,
   type PromptBoxHandle,
   type PromptVoiceConfig,
-  type TypeaheadConfig,
 } from "./PromptBoxInternal";
 import {
   promptMentionClipboardDataAttributes,
+  promptMentionClipboardHtml,
   serializedTextForPromptMentionResource,
 } from "./mentions/prompt-mention-clipboard";
 import { orderPromptMentionSuggestions } from "@/hooks/promptMentionCandidates";
@@ -145,12 +146,12 @@ function buildTypeaheadConfig({
   commandSuggestions = [],
   onCommandQueryChange = () => {},
 }: {
-  mentionTriggers?: TypeaheadConfig["mention"]["triggers"];
+  mentionTriggers?: ControlledTypeaheadConfig["mention"]["triggers"];
   mentionSuggestions?: readonly PromptMentionSuggestion[];
-  onMentionQueryChange?: TypeaheadConfig["mention"]["onQueryChange"];
-  commandSuggestions?: TypeaheadConfig["command"]["suggestions"];
+  onMentionQueryChange?: ControlledTypeaheadConfig["mention"]["onQueryChange"];
+  commandSuggestions?: ControlledTypeaheadConfig["command"]["suggestions"];
   onCommandQueryChange?: (query: string | null) => void;
-} = {}): TypeaheadConfig {
+} = {}): ControlledTypeaheadConfig {
   return {
     mention: {
       triggers: mentionTriggers,
@@ -167,9 +168,6 @@ function buildTypeaheadConfig({
       suggestions: commandSuggestions,
       isLoading: false,
       isError: false,
-      hasMore: false,
-      isLoadingMore: false,
-      loadMore: () => {},
       onQueryChange: onCommandQueryChange,
     },
   };
@@ -275,13 +273,13 @@ function renderPromptBox(
   initialValue: string,
   options: {
     initialMentionRanges?: PromptTextMention[];
-    mentionTriggers?: TypeaheadConfig["mention"]["triggers"];
+    mentionTriggers?: ControlledTypeaheadConfig["mention"]["triggers"];
     mentionSuggestions?: readonly PromptMentionSuggestion[];
-    commandSuggestions?: TypeaheadConfig["command"]["suggestions"];
+    commandSuggestions?: ControlledTypeaheadConfig["command"]["suggestions"];
     reasoning?: PromptBoxProps["reasoning"];
     fastMode?: PromptBoxProps["fastMode"];
     modelShortcuts?: PromptBoxProps["modelShortcuts"];
-    commandOverrides?: Partial<TypeaheadConfig["command"]>;
+    commandOverrides?: Partial<ControlledTypeaheadConfig["command"]>;
     onAttachFiles?: (files: File[]) => Promise<void> | void;
   } = {},
 ) {
@@ -4241,6 +4239,35 @@ describe("PromptBoxInternal prompt actions", () => {
     );
   });
 
+  it("pastes a copied thread mention as a pill with a trailing space even when its title starts with >", async () => {
+    const { changes, promptBoxRef } = renderPromptBox("");
+    const resource = {
+      kind: "thread" as const,
+      threadId: "thr_copy",
+      projectId: "proj_copy",
+      label: '> Fix "bugs" & <b>stuff</b>',
+    };
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({
+      html: promptMentionClipboardHtml(resource),
+      plainText: resource.label,
+    });
+
+    await waitFor(() =>
+      expect(latestChange(changes)?.mentions).toEqual([
+        { start: 0, end: "@thread:thr_copy".length, resource },
+      ]),
+    );
+    expect(latestValue(changes)).toBe("@thread:thr_copy ");
+    expect(getPromptEditorElement().querySelector("blockquote")).toBeNull();
+    expect(
+      getPromptEditorElement().querySelector(
+        '[data-prompt-mention-serialized-text="@thread:thr_copy"]',
+      )?.textContent,
+    ).toBe(resource.label);
+  });
+
   it("opens the file picker from the prompt actions menu", async () => {
     const onAttachFiles = vi.fn();
     render(
@@ -4759,9 +4786,6 @@ describe("PromptBoxInternal command typeahead submit", () => {
               suggestions: [suggestion],
               isLoading: false,
               isError: false,
-              hasMore: false,
-              isLoadingMore: false,
-              loadMore: () => {},
               onQueryChange: () => {},
             },
           }}

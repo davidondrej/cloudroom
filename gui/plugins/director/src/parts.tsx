@@ -12,8 +12,10 @@ export type Config = View["config"];
 const CHANGED: typeof ChangedChannel = "changed";
 /** The app marks where the row goes; the plugin never targets the sidebar's own classes. */
 export const SLOT = "[data-sidebar-top-slot]";
-export const ICONS = ["Target", "Zap", "Star", "Brain", "Eye", "Explore", "Workflow", "Terminal", "Globe", "Puzzle", "Coffee", "Play"];
-export const COLORS = ["", "#7dd3fc", "#c4b5fd", "#fdba74", "#f9a8d4", "#fca5a5", "#ffffff"];
+/** "Rank" is the Director's own icon; the rest are the app's. */
+export const ICONS = ["Rank", "Target", "Zap", "Star", "Brain", "Eye", "Explore", "Workflow", "Terminal", "Globe", "Puzzle", "Coffee", "Play"];
+/** The first is the default; "" is the app's own color. */
+export const COLORS = ["#a78bfa", "", "#7dd3fc", "#fdba74", "#f9a8d4", "#fca5a5", "#ffffff"];
 export const INTERVALS: ReadonlyArray<[label: string, minutes: number]> = [["5 min", 5], ["15 min", 15], ["1 hour", 60], ["6 hours", 360]];
 export const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -48,6 +50,20 @@ function isDark(color: string): boolean {
   return dark;
 }
 
+/** The Director's icon alone: its own (a general's star over two chevrons, drawn like the app's icons), one of the app's, or an emoji. */
+export function Glyph({ icon, size }: { icon: string; size: number }) {
+  if (icon === "Rank") {
+    return (
+      <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" className="shrink-0" aria-hidden="true">
+        <path d="M12 2.5L13.23 5.8L16.76 5.95L14 8.15L14.94 11.55L12 9.6L9.06 11.55L10 8.15L7.24 5.95L10.77 5.8Z" />
+        <path d="m5 14.5 7 3.25 7-3.25" />
+        <path d="m5 18.25 7 3.25 7-3.25" />
+      </svg>
+    );
+  }
+  return ICONS.includes(icon) ? <Icon name={icon} style={{ width: size, height: size }} /> : <>{icon}</>;
+}
+
 /** The Director's icon in its small solid tile. */
 export function Tile({ icon, color, size = 20 }: { icon: string; color: string; size?: number }) {
   const ink = color ? (isDark(color) ? "#ffffff" : "#141414") : "var(--primary-foreground)";
@@ -57,7 +73,7 @@ export function Tile({ icon, color, size = 20 }: { icon: string; color: string; 
       style={{ width: size, height: size, background: color || "var(--primary)", color: ink, fontSize: size * 0.6 }}
       aria-hidden="true"
     >
-      {ICONS.includes(icon) ? <Icon name={icon} style={{ width: size * 0.65, height: size * 0.65 }} /> : icon}
+      <Glyph icon={icon} size={size * 0.65} />
     </span>
   );
 }

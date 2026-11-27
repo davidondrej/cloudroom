@@ -29,7 +29,10 @@ import type {
   PluginWebSocketRouteRecord,
 } from "../services/plugins/plugin-api.js";
 import { PluginSettingsValidationError } from "../services/plugins/plugin-settings.js";
-import { BUNDLED_PLUGINS } from "../services/plugins/builtin-registry.js";
+import {
+  ALWAYS_ENABLED_PLUGIN_ERROR,
+  BUNDLED_PLUGINS,
+} from "../services/plugins/builtin-registry.js";
 import { PLUGIN_RPC_CALLER_HEADER } from "../services/plugins/plugin-rpc-caller.js";
 import { getGateAuthKind } from "../request-context.js";
 import {
@@ -715,7 +718,7 @@ export function registerPluginRoutes(
       )
     )
       return context.json(
-        { ok: false, error: "This built-in plugin is always on." },
+        { ok: false, error: ALWAYS_ENABLED_PLUGIN_ERROR },
         409,
       );
     const plugin = await plugins.setEnabled(id, false);

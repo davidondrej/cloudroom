@@ -34,6 +34,7 @@ import {
   catalogEntryKey,
   filterPluginRows,
   groupPluginRows,
+  isAlwaysEnabledRow,
   pluginListFilter,
   pluginListRows,
   pluginRowHasUpdate,
@@ -97,12 +98,28 @@ export function BrowsePluginsTab({
       ),
     [catalogQuery.data?.entries, listQuery.data?.plugins],
   );
+  const { browsableRows, alwaysEnabledRows } = useMemo(() => {
+    const browsable: PluginListRow[] = [];
+    const alwaysOn: PluginListRow[] = [];
+    for (const row of rows) {
+      if (isAlwaysEnabledRow(row)) alwaysOn.push(row);
+      else browsable.push(row);
+    }
+    alwaysOn.sort((left, right) => left.title.localeCompare(right.title));
+    return { browsableRows: browsable, alwaysEnabledRows: alwaysOn };
+  }, [rows]);
   const catalogMatches = useCatalogSearchMatches(query);
   const updateCount = rows.filter(pluginRowHasUpdate).length;
   const groups = useMemo(
     () =>
-      groupPluginRows(filterPluginRows(rows, filter, query, catalogMatches)),
-    [catalogMatches, filter, query, rows],
+      groupPluginRows(
+        filterPluginRows(browsableRows, filter, query, catalogMatches),
+      ),
+    [browsableRows, catalogMatches, filter, query],
+  );
+  const builtInRows = useMemo(
+    () => filterPluginRows(alwaysEnabledRows, filter, query, catalogMatches),
+    [alwaysEnabledRows, catalogMatches, filter, query],
   );
 
   const setParam = (key: string, value: string | null) => {
@@ -123,10 +140,12 @@ export function BrowsePluginsTab({
         onRetry={() => void catalogQuery.refetch()}
       />
     );
-  } else if (groups.length === 0) {
+  } else if (groups.length === 0 && builtInRows.length === 0) {
     content = (
       <ResourceListState state="empty" message={EMPTY_MESSAGES[filter]} />
     );
+  } else if (groups.length === 0) {
+    content = null;
   } else if (front) {
     content = (
       <PopularPlugins
@@ -190,7 +209,7 @@ export function BrowsePluginsTab({
         ) : null}
         {front ? (
           <PluginsFeatured
-            rows={rows}
+            rows={browsableRows}
             onInstall={onInstall}
             onOpenPlugin={onOpenPlugin}
             onSeeAll={() => setParam("view", "cloudroom")}
@@ -212,6 +231,15 @@ export function BrowsePluginsTab({
           </div>
         ) : null}
         {content}
+        {builtInRows.length > 0 ? (
+          <BuiltInPluginsSection
+            rows={builtInRows}
+            forceOpen={query.trim() !== ""}
+            selectedPluginId={selectedPluginId}
+            onInstall={onInstall}
+            onOpenPlugin={onOpenPlugin}
+          />
+        ) : null}
       </div>
     </ResourceCollectionViewport>
   );
@@ -614,6 +642,72 @@ function PluginRowIcon({
   );
 }
 
+/** Always-on built-in plugins: collapsed at the bottom with no toggles so users can inspect status without disabling them. */
+function BuiltInPluginsSection({
+  rows,
+  forceOpen,
+  selectedPluginId,
+  onInstall,
+  onOpenPlugin,
+}: {
+  rows: readonly PluginListRow[];
+  forceOpen: boolean;
+  selectedPluginId: string | null;
+  onInstall: (initial: AddPluginInitial) => void;
+  onOpenPlugin: OpenPlugin;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const open = forceOpen || expanded;
+  const [setUpdateTargetId, updateDialog] = useUpdateDialog(rows);
+  return (
+    <section
+      aria-label="Built into Cloudroom"
+      className="@container border-t border-border/60 pt-4"
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setExpanded((current) => !current)}
+        className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-state-hover hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      >
+        <span className="flex items-center gap-1.5 font-medium">
+          <Icon
+            name="ChevronRight"
+            className={cn(
+              "size-3.5 transition-transform",
+              open && "rotate-90",
+            )}
+            aria-hidden
+          />
+          Built into Cloudroom
+          <span className="font-normal text-subtle-foreground">
+            {rows.length}
+          </span>
+        </span>
+        <span className="text-subtle-foreground">Always on</span>
+      </button>
+      {open ? (
+        <div
+          className="mt-2 grid grid-cols-1 gap-x-4 gap-y-0.5 @3xl:grid-cols-2"
+          data-testid="builtin-plugin-list"
+        >
+          {rows.map((row) => (
+            <PluginRow
+              key={row.key}
+              row={row}
+              selected={row.pluginId === selectedPluginId}
+              onInstall={onInstall}
+              onOpenPlugin={onOpenPlugin}
+              onUpdate={setUpdateTargetId}
+            />
+          ))}
+        </div>
+      ) : null}
+      {updateDialog}
+    </section>
+  );
+}
+
 function InstalledPluginControls({
   plugin,
   title,
@@ -634,12 +728,16 @@ function InstalledPluginControls({
           onStatusClick={() => {}}
         />
       ) : null}
-      <Switch
-        checked={enabled}
-        disabled={toggle.isPending}
-        onCheckedChange={(next) => toggle.mutate(next)}
-        aria-label={`${enabled ? "Disable" : "Enable"} ${title}`}
-      />
+      {plugin.alwaysEnabled ? (
+        <span className="text-xs text-subtle-foreground">Built in</span>
+      ) : (
+        <Switch
+          checked={enabled}
+          disabled={toggle.isPending}
+          onCheckedChange={(next) => toggle.mutate(next)}
+          aria-label={`${enabled ? "Disable" : "Enable"} ${title}`}
+        />
+      )}
     </>
   );
 }

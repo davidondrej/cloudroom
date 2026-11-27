@@ -13,6 +13,7 @@ interface ResolveSkillCatalogSourcesArgs {
   pluginSkillSelections?: ReadonlyMap<string, ReadonlySet<string>>;
   projectSkillSources?: readonly ProjectInjectedSkillSource[];
   sharedSkillSources?: readonly SharedInjectedSkillSource[];
+  includeTreeHash?: boolean;
 }
 
 export function resolveSkillCatalog(
@@ -37,6 +38,9 @@ export function resolveSkillCatalog(
       : {}),
     ...(args.sharedSkillSources !== undefined
       ? { sharedSkillSources: args.sharedSkillSources }
+      : {}),
+    ...(args.includeTreeHash !== undefined
+      ? { includeTreeHash: args.includeTreeHash }
       : {}),
     skillTreeRegistry: deps.skillTreeRegistry,
   });

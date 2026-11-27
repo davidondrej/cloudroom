@@ -97,6 +97,7 @@ import { ARCHIVED_THREADS_PAGE_SIZE } from "./archived-threads-page-size";
 import { ingestThreadDetailBootstrap } from "../cache-owners/thread-detail-cache-owner";
 import {
   RECENT_THREAD_GC_TIME,
+  rememberRecentThread,
   useRememberRecentThread,
 } from "../cache-owners/recent-thread-cache";
 
@@ -978,7 +979,9 @@ async function fetchThreadTimeline({
   );
 }
 
-const THREAD_HOVER_PREFETCH_DELAY_MS = 100;
+const THREAD_HOVER_PREFETCH_DELAY_MS = 30;
+const THREAD_PREFETCH_BOOTSTRAP_STALE_MS = 10_000;
+const THREAD_PREFETCH_TIMELINE_STALE_MS = 5_000;
 
 /** Loads a thread's messages into the cache, so opening it shows them at once.
  *  Resolves when they are there; a failed load resolves too. */
@@ -987,14 +990,43 @@ export async function prefetchThreadTimeline(
   threadId: string,
 ): Promise<void> {
   const queryKey = threadTimelineQueryKey(threadId);
-  if (queryClient.getQueryData(queryKey) !== undefined) {
-    return;
-  }
+  rememberRecentThread(queryClient, threadId);
   await queryClient.prefetchQuery({
     queryKey,
+    staleTime: THREAD_PREFETCH_TIMELINE_STALE_MS,
     queryFn: ({ signal }) =>
       fetchThreadTimeline({ queryClient, signal, threadId }),
   });
+}
+
+/** Warms both thread metadata (with environment + host) and timeline delta. */
+export async function prefetchThread(
+  queryClient: QueryClient,
+  threadId: string,
+): Promise<void> {
+  if (!threadId) return;
+  rememberRecentThread(queryClient, threadId);
+  await Promise.all([
+    queryClient.prefetchQuery({
+      queryKey: threadDetailBootstrapQueryKey(threadId),
+      staleTime: THREAD_PREFETCH_BOOTSTRAP_STALE_MS,
+      queryFn: async ({ signal }) => {
+        const thread = await sdk.threads.get({
+          include: "environment,host",
+          threadId,
+          signal,
+        });
+        ingestThreadDetailBootstrap({ queryClient, thread });
+        return thread;
+      },
+    }),
+    queryClient.prefetchQuery({
+      queryKey: threadTimelineQueryKey(threadId),
+      staleTime: THREAD_PREFETCH_TIMELINE_STALE_MS,
+      queryFn: ({ signal }) =>
+        fetchThreadTimeline({ queryClient, signal, threadId }),
+    }),
+  ]);
 }
 
 export function usePrefetchThreadOnHover(threadId: string) {
@@ -1013,10 +1045,14 @@ export function usePrefetchThreadOnHover(threadId: string) {
         cancel();
         timerRef.current = window.setTimeout(() => {
           timerRef.current = null;
-          void prefetchThreadTimeline(queryClient, threadId);
+          void prefetchThread(queryClient, threadId);
         }, THREAD_HOVER_PREFETCH_DELAY_MS);
       },
       onPointerLeave: cancel,
+      onPointerDown: () => {
+        cancel();
+        void prefetchThread(queryClient, threadId);
+      },
     }),
     [cancel, queryClient, threadId],
   );

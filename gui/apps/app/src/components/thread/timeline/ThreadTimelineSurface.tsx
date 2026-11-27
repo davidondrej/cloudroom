@@ -189,7 +189,7 @@ export function ThreadTimelineSurface({
 }: ThreadTimelineSurfaceProps) {
   const systemConfigQuery = useSystemConfig();
   const timelineWindowingEnabled =
-    systemConfigQuery.data?.experiments.timelineWindowing ?? false;
+    systemConfigQuery.data?.experiments.timelineWindowing ?? true;
   const showActiveThinking =
     activeThinking !== null && ongoingIndicatorLabel === undefined;
   const activeThinkingText = activeThinking?.text.trim() ?? "";

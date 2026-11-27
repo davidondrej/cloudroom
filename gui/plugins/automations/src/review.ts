@@ -280,6 +280,7 @@ export async function buildReview(
     }
     const thread = run.threadId ? (threads.get(run.threadId) ?? null) : null;
     const own = thread !== null && run.targetThreadId === null;
+    const out = run.output?.trim();
     items.push({
       id: `run:${run.id}`,
       at: run.startedAt,
@@ -295,7 +296,11 @@ export async function buildReview(
           status: own ? threadReviewStatus(thread, now) : runReviewStatus(run),
           report: own
             ? (clip(thread.purpose?.text) ?? clip(run.error))
-            : clip([run.error, run.output?.trim()].filter(Boolean).join("\n")),
+            : clip(
+                run.error && out && run.error.includes(out)
+                  ? run.error
+                  : [run.error, out].filter(Boolean).join("\n"),
+              ),
         },
         reports.runs.get(run.id),
       ),

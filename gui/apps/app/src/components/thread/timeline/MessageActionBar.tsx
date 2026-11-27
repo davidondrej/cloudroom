@@ -278,7 +278,7 @@ function MobileMessageOverflowPopover({
 }
 
 const ACTION_BUTTON_CLASS =
-  "inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40 aria-disabled:cursor-default aria-disabled:opacity-40 aria-disabled:hover:text-muted-foreground";
+  "inline-flex size-5 cursor-pointer items-center justify-center text-muted-foreground hover:text-foreground disabled:pointer-events-none disabled:opacity-40 aria-disabled:cursor-default aria-disabled:text-muted-foreground/40 aria-disabled:hover:text-muted-foreground/40";
 const HOVER_REVEAL_CLASS =
   "opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100";
 const MOBILE_INLINE_ACTION_CLASS =

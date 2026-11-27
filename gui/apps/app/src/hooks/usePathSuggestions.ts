@@ -7,7 +7,7 @@ import { isProjectlessProjectId } from "@/lib/route-paths";
 import type { PathListOptions } from "@/lib/path-list-options";
 import { useDebouncedValue } from "./useDebouncedValue";
 
-export const PATH_SUGGESTION_DEBOUNCE_MS = 120;
+export const PATH_SUGGESTION_DEBOUNCE_MS = 30;
 
 const DEFAULT_PATH_SUGGESTION_LIMIT = 8;
 const SOURCE_OVERSAMPLE_MULTIPLIER = 2;

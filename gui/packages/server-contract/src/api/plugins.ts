@@ -164,6 +164,7 @@ export const installedPluginSchema = z.object({
   sourceDisplay: z.string(),
   updateState: pluginUpdateStateSchema,
   enabled: z.boolean(),
+  alwaysEnabled: z.boolean().default(false),
   description: z.string().nullable(),
   name: z.string().nullable(),
   categoryId: pluginCatalogCategoryIdSchema.optional(),

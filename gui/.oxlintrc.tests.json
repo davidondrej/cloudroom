@@ -55,7 +55,7 @@
               "plugins/provider-codex/src/bridge/bridge.archived-rebuild.test.ts": 1,
               "plugins/provider-codex/src/bridge/bridge.zero-work-turn.test.ts": 1,
               "plugins/provider-pi/src/bridge/bridge.round2.test.ts": 4,
-              "plugins/tasks/editor/editor.test.tsx": 1,
+              "plugins/tasks/editor/editor.test.tsx": 2,
               "plugins/tasks/shell/shell.test.tsx": 3,
               "plugins/workflows/src/runtime.test.ts": 2,
               "plugins/workflows/src/server-harness.test.ts": 1,

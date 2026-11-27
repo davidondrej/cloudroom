@@ -150,7 +150,11 @@ impl Session {
 
 impl Manager {
     pub async fn claude_auth_status(&self) -> runtime::auth::Status {
-        self.claude_login.status(&self.config).await
+        let status = self.claude_login.status(&self.config).await;
+        if self.claude_login.take_switched().await {
+            self.invalidate_catalog(runtime::Kind::Claude);
+        }
+        status
     }
 
     pub async fn claude_account(
@@ -163,10 +167,14 @@ impl Manager {
         if self.is_stopping() {
             return Err(Error::Conflict("service is stopping"));
         }
-        Ok(self
+        let status = self
             .claude_login
             .action(&self.config, action, id, code, state)
-            .await)
+            .await;
+        if self.claude_login.take_switched().await {
+            self.invalidate_catalog(runtime::Kind::Claude);
+        }
+        Ok(status)
     }
 
     pub fn start_auth_monitor(&self) {
@@ -275,6 +283,7 @@ impl Manager {
 
     /// A new Codex login: the old account's limits and credits no longer apply, here or on the website.
     fn codex_login_changed(&self) {
+        self.invalidate_catalog(runtime::Kind::Codex);
         *self.codex_reported.lock().unwrap() = None;
         self.clear_plan("codex", true);
         self.clear_plan("pi", true);
@@ -282,6 +291,7 @@ impl Manager {
 
     /// Verify a login installed outside the core, then continue quota-stopped work.
     pub async fn codex_switched(self: &Arc<Self>) -> (runtime::auth::Status, Vec<String>) {
+        self.invalidate_catalog(runtime::Kind::Codex);
         let status = self.codex_auth.verify(&self.config).await;
         let continued = if status.state == "connected" {
             self.codex_login_changed();
@@ -295,6 +305,7 @@ impl Manager {
 
     /// The website wrote a new Claude login (ADR 0197): continue Claude work its plan limit stopped.
     pub fn claude_switched(self: &Arc<Self>) -> Vec<String> {
+        self.invalidate_catalog(runtime::Kind::Claude);
         self.clear_plan("claude-code", true);
         self.continue_limited(&[runtime::Kind::Claude])
     }
@@ -302,6 +313,7 @@ impl Manager {
     /// The website wrote a new Cursor login: continue Cursor work its plan limit stopped. Each Cursor run reads the
     /// login, so no restart is needed.
     pub fn cursor_switched(self: &Arc<Self>) -> Vec<String> {
+        self.invalidate_catalog(runtime::Kind::Cursor);
         self.continue_limited(&[runtime::Kind::Cursor])
     }
 
@@ -754,7 +766,11 @@ impl Manager {
     }
 
     pub async fn cursor_auth_status(&self) -> runtime::auth::Status {
-        self.cursor_auth.status(&self.config, &self.storage).await
+        let status = self.cursor_auth.status(&self.config, &self.storage).await;
+        if self.cursor_auth.take_switched().await {
+            self.invalidate_catalog(runtime::Kind::Cursor);
+        }
+        status
     }
     pub async fn cursor_account(
         &self,
@@ -785,7 +801,7 @@ impl Manager {
                 "close Cursor sessions before changing the cloud login",
             ));
         }
-        Ok(if let Some(key) = key {
+        let status = if let Some(key) = key {
             self.cursor_auth
                 .set_key(&self.config, &self.storage, key)
                 .await
@@ -793,7 +809,11 @@ impl Manager {
             self.cursor_auth
                 .login(&self.config, &self.storage, request)
                 .await
-        })
+        };
+        if self.cursor_auth.take_switched().await {
+            self.invalidate_catalog(runtime::Kind::Cursor);
+        }
+        Ok(status)
     }
 }
 

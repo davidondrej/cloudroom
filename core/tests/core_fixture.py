@@ -68,6 +68,8 @@ def codex():
                 login_cancelled.set()
                 result = {'status': 'canceled'}
             elif method == "model/list":
+                if Path("count-model-list").exists():
+                    with Path("model-list-calls").open("a") as file: file.write("1\n")
                 # models-fail: `exit` crashes the probe, `reject` refuses the list (#819).
                 fail = Path("models-fail").read_text() if Path("models-fail").exists() else ""
                 if fail == "exit": os._exit(1)
@@ -497,6 +499,43 @@ class ReplayTests(unittest.TestCase):
         (self.repo / 'models-fail').write_text('reject')
         self.assertEqual(start('reject')['error'], 'model catalog unavailable (agent sent an invalid model list)')
         self.assertNotIn('fixture model listing rejected', (self.root / 'service.log').read_text())
+
+    def test_capabilities_caches_models_and_failures_and_refreshes_on_login_change(self):
+        (self.repo / 'count-model-list').touch()
+        self.start()
+        calls = lambda: len((self.repo / 'model-list-calls').read_text().splitlines()) if (self.repo / 'model-list-calls').exists() else 0
+        codex_models = lambda: next(h for h in self.service.request('GET', '/v1/capabilities')['harnesses'] if h['id'] == 'codex')['models']
+
+        # Consecutive /v1/capabilities calls hit the cache.
+        self.assertTrue(codex_models())
+        self.assertTrue(codex_models())
+        self.assertEqual(calls(), 1)
+
+        # Explicit login switch forces a fresh probe.
+        self.service.request('POST', '/v1/accounts/codex/switched', {})
+        self.assertTrue(codex_models())
+        self.assertEqual(calls(), 2)
+
+        # Writing the login file outside Core invalidates via fingerprint.
+        (Path(self.env['CLOUDROOM_CODEX_HOME']) / 'auth.json').write_text('{"tokens":{}}')
+        self.assertTrue(codex_models())
+        self.assertEqual(calls(), 3)
+
+        # Failures are cached for /v1/capabilities polling...
+        (self.repo / 'models-fail').write_text('reject')
+        self.service.request('POST', '/v1/accounts/codex/switched', {})
+        self.assertIsNone(codex_models())
+        self.assertIsNone(codex_models())
+        self.assertEqual(calls(), 4)
+
+        # ...but an interactive session start retries live and repopulates the cache.
+        (self.repo / 'models-fail').unlink()
+        self.assertIsNone(codex_models())
+        self.assertEqual(calls(), 4)
+        self.service.request('POST', '/v1/sessions', {'request_id': 'after-fail', 'harness': 'codex', 'model': 'fixture', 'reasoning': 'high'}, 202)
+        self.assertEqual(calls(), 5)
+        self.assertTrue(codex_models())
+        self.assertEqual(calls(), 5)
 
     def test_restart_limits_concurrent_startup_not_loaded_sessions(self):
         total = (os.cpu_count() or 1) + 2

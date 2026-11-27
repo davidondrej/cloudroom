@@ -158,7 +158,7 @@ export const automationRpcContract = defineRpcContract({
     output: z
       .object({
         loops: z.array(pausedLoopSchema).optional(),
-        // Hover text for the sidebar's loop icon, per thread (#1136).
+        // Loop names for the purpose cards, per thread (#1136).
         threads: z.record(z.string(), z.string()),
       })
       .strict(),

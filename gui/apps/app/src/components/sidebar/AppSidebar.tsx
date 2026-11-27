@@ -1,5 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useAtomValue, useSetAtom } from "jotai";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
+import { useAtomValue, useSetAtom, useStore } from "jotai";
+import { useQueryClient } from "@tanstack/react-query";
+import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
+import { prefetchThread } from "@/hooks/queries/thread-queries";
+import { isDocumentVisible } from "@/lib/document-visibility";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
@@ -58,6 +68,126 @@ import {
 import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
+const SHORTCUT_PRELOAD_DELAY_MS = 400;
+const SHORTCUT_PRELOAD_CONCURRENCY = 2;
+
+function collectShortcutPreloadThreadIds(
+  root: HTMLElement | null,
+  activeProjectId: string | undefined,
+  activeThreadId: string | undefined,
+): string[] {
+  if (!root) return [];
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  const add = (threadId: string | undefined) => {
+    if (!threadId || threadId === activeThreadId || seen.has(threadId)) return;
+    seen.add(threadId);
+    ids.push(threadId);
+  };
+  // Priority 1: Cmd+E (last non-child pinned thread)
+  const pinnedSection = root.querySelector<HTMLElement>(
+    '[data-sidebar-section-id="pinned"]',
+  );
+  const lastPinned = getSidebarThreadNavigationTargets(pinnedSection)
+    .filter((target) => !target.isChild && target.threadId !== activeThreadId)
+    .at(-1);
+  add(lastPinned?.threadId);
+  // Priority 2: Cmd+L (oldest non-child thread in active project)
+  const allTargets = getSidebarThreadNavigationTargets(root);
+  const projectId =
+    activeProjectId ??
+    allTargets.find((target) => target.threadId === activeThreadId)?.projectId;
+  if (projectId) {
+    const oldestInProject = allTargets
+      .filter(
+        (target) =>
+          target.projectId === projectId &&
+          !target.isChild &&
+          target.threadId !== activeThreadId,
+      )
+      .at(-1);
+    add(oldestInProject?.threadId);
+  }
+  // Priority 3: Cmd+1..9 jump targets
+  for (const target of getSidebarThreadShortcutTargets(root)) {
+    add(target.threadId);
+  }
+  return ids;
+}
+
+function useShortcutTargetPreload(
+  sidebarRef: RefObject<HTMLElement | null>,
+  activeProjectId: string | undefined,
+  activeThreadId: string | undefined,
+  disabled: boolean,
+): void {
+  const queryClient = useQueryClient();
+  useEffect(() => {
+    if (disabled) return;
+    const root = sidebarRef.current;
+    if (!root) return;
+    let cancelled = false;
+    let timerId: number | null = null;
+    let idleId: number | null = null;
+    let lastSignature = "";
+
+    const runPreload = () => {
+      if (cancelled || !isDocumentVisible()) return;
+      const ids = collectShortcutPreloadThreadIds(
+        sidebarRef.current,
+        activeProjectId,
+        activeThreadId,
+      );
+      const signature = ids.join(" ");
+      if (!signature || signature === lastSignature) return;
+      lastSignature = signature;
+      let cursor = 0;
+      const worker = async () => {
+        while (!cancelled && cursor < ids.length) {
+          const threadId = ids[cursor++];
+          if (!threadId) continue;
+          await prefetchThread(queryClient, threadId).catch(() => {});
+        }
+      };
+      const workerCount = Math.min(SHORTCUT_PRELOAD_CONCURRENCY, ids.length);
+      for (let i = 0; i < workerCount; i += 1) {
+        void worker();
+      }
+    };
+
+    const schedule = () => {
+      if (cancelled) return;
+      if (timerId !== null) window.clearTimeout(timerId);
+      if (idleId !== null && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idleId);
+        idleId = null;
+      }
+      timerId = window.setTimeout(() => {
+        timerId = null;
+        if (typeof window.requestIdleCallback === "function") {
+          idleId = window.requestIdleCallback(() => {
+            idleId = null;
+            runPreload();
+          });
+        } else {
+          runPreload();
+        }
+      }, SHORTCUT_PRELOAD_DELAY_MS);
+    };
+
+    const observer = new MutationObserver(schedule);
+    observer.observe(root, { childList: true, subtree: true });
+    schedule();
+    return () => {
+      cancelled = true;
+      observer.disconnect();
+      if (timerId !== null) window.clearTimeout(timerId);
+      if (idleId !== null && typeof window.cancelIdleCallback === "function") {
+        window.cancelIdleCallback(idleId);
+      }
+    };
+  }, [activeProjectId, activeThreadId, disabled, queryClient, sidebarRef]);
+}
 
 interface AppSidebarProps {
   onResizeMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
@@ -77,6 +207,7 @@ export function AppSidebar({
   const { projectId: activeProjectId, threadId: activeThreadId } =
     useRouteState();
   const navigate = useNavigate();
+  const store = useStore();
   const newThreadSplit = usePaneContentSplitDrag({
     content: NEW_THREAD_PANE_CONTENT,
     enabled: true,
@@ -96,6 +227,12 @@ export function AppSidebar({
   >(EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS);
   const sidebarRef = useRef<HTMLDivElement | null>(null);
   useSidebarPreload(sidebarRef);
+  useShortcutTargetPreload(
+    sidebarRef,
+    activeProjectId,
+    activeThreadId,
+    mobileHosted?.hidden === true,
+  );
   const threadShortcutTargetsRef = useRef<
     readonly SidebarThreadShortcutTarget[]
   >([]);
@@ -137,23 +274,31 @@ export function AppSidebar({
   const openNavigationTarget = useCallback(
     (target: SidebarThreadShortcutTarget | undefined): boolean => {
       if (!target) return false;
-      if (target.element) {
+      const projectId =
+        target.projectId ?? target.element?.dataset.sidebarProjectId;
+      if (!projectId) {
+        if (!target.element) return false;
         target.element.click();
+        return true;
+      }
+      const collapsedAtom = getThreadConversationCollapsedAtom(target.threadId);
+      if (store.get(collapsedAtom)) {
+        store.set(collapsedAtom, false);
+      }
+      closeOnMobile();
+      if (target.threadId === activeThreadId) {
         revealSidebarThread(sidebarRef.current, target.threadId);
         return true;
       }
-      if (!target.projectId) return false;
-      closeOnMobile();
       void navigate(
         getThreadRoutePath({
-          projectId: target.projectId,
+          projectId,
           threadId: target.threadId,
         }),
       );
-      revealSidebarThread(sidebarRef.current, target.threadId);
       return true;
     },
-    [closeOnMobile, navigate],
+    [activeThreadId, closeOnMobile, navigate, store],
   );
 
   const activateThreadShortcut = useCallback(

@@ -115,7 +115,10 @@ export function experimental_createHostUsageSource<
       if (!usage) throw new Error("Provider returned no usage information.");
       const metadata = metadataSchema.parse(usage);
       const value = schemas.usageMeasurementSchema.parse({
-        accountKey: metadata.accountKey,
+        accountKey:
+          usage.status === "error"
+            ? (metadata.accountKey ?? previous?.accountKey ?? null)
+            : metadata.accountKey,
         observedAt:
           usage.status === "ok" ? Date.now() : (previous?.observedAt ?? null),
         usage: {
@@ -135,7 +138,7 @@ export function experimental_createHostUsageSource<
             : {}),
         },
       });
-      cache.set(resourceId, value);
+      if (usage.status !== "error") cache.set(resourceId, value);
       return value;
     } catch {
       return unavailable("Usage could not be collected from this machine.");

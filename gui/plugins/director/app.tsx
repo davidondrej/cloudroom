@@ -6,7 +6,7 @@ import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { COLORS, ICONS, INTERVALS, Meter, Minutes, Prompt, SLOT, Tile, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
+import { COLORS, Glyph, ICONS, INTERVALS, Meter, Minutes, Prompt, SLOT, Tile, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
 import { DirectorModal } from "./src/modal.js";
 
 /** The sidebar row above Pinned. It opens the Director's thread. */
@@ -50,22 +50,32 @@ function Row() {
       .finally(() => setOpening(false));
   };
 
+  // The row is lit from the left in the Director's color, and fades into the sidebar (David, 2026-11-27).
+  const tint = config.color || "var(--primary)";
+  const ink = `color-mix(in oklab, ${tint} 65%, var(--foreground))`;
+  const glow = (share: string) => `color-mix(in oklab, ${tint} var(${share}), var(--sidebar))`;
+  const lit = "[--director-near:46%] [--director-mid:20%]";
+
   return (
     <>
       {createPortal(
         // The mark puts the row inside the plugin's own stylesheet scope.
-        <div className="mb-2" data-room-plugin="director">
+        // 10px below: the sticky label under it paints a 10px sidebar-colored strip above itself.
+        <div className="mb-2.5" data-room-plugin="director">
           <div
-            className={`bb-sidebar-hover-actions-row group/director relative flex h-[var(--room-sidebar-row-height)] items-center rounded-md text-sm text-sidebar-foreground hover:bg-sidebar-accent max-md:pointer-coarse:h-[var(--room-sidebar-row-height-coarse)] ${active || settings ? "bg-sidebar-accent" : ""}`}
+            className={`bb-sidebar-hover-actions-row group/director relative flex h-[var(--room-sidebar-row-height)] items-center rounded-md text-sm text-sidebar-foreground max-md:pointer-coarse:h-[var(--room-sidebar-row-height-coarse)] ${active || settings ? lit : "[--director-near:34%] [--director-mid:12%] hover:[--director-near:46%] hover:[--director-mid:20%]"}`}
+            style={{ backgroundImage: `linear-gradient(90deg, ${glow("--director-near")} 0%, ${glow("--director-mid")} 55%, var(--sidebar) 100%)` }}
           >
             <button type="button" onClick={open} disabled={opening} aria-label="Open the Director" className="flex h-full min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md pl-2 pr-2.5">
-              <Tile icon={config.icon} color={config.color} />
+              <span className="flex shrink-0 items-center text-sm leading-none" style={{ color: ink }} aria-hidden="true">
+                <Glyph icon={config.icon} size={16} />
+              </span>
               <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">Director</span>
               <span className={`flex shrink-0 items-center group-hover/director:opacity-0 max-md:pointer-coarse:mr-9 ${settings ? "opacity-0" : ""}`}>
                 {view.unread && !active ? (
-                  <span className="size-1.5 rounded-full bg-primary" aria-label="New from the Director" />
+                  <span className="size-1.5 rounded-full" style={{ background: ink }} aria-label="New from the Director" />
                 ) : (
-                  <span className="font-mono text-[11px] tabular-nums text-subtle-foreground">{opening ? "…" : learning.on && learning.done < learning.goal ? `${learning.done}/${learning.goal}` : config.ping ? timeLeft(view.nextAt) : "off"}</span>
+                  <span className="font-mono text-[11px] tabular-nums" style={{ color: ink }}>{opening ? "…" : learning.on && learning.done < learning.goal ? `${learning.done}/${learning.goal}` : config.ping ? timeLeft(view.nextAt) : "off"}</span>
                 )}
               </span>
             </button>

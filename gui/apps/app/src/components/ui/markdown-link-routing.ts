@@ -50,6 +50,7 @@ export interface MarkdownLocalFileLinkRouting {
 
 export interface MarkdownLocalImageRouting {
   absolutePaths: MarkdownAbsoluteLocalFileLinkRouting;
+  cacheKey?: string;
   relativePaths?: MarkdownRelativeLocalFileLinkRouting;
   resolveSrc: (
     image: MarkdownPreviewLocalFileLink,

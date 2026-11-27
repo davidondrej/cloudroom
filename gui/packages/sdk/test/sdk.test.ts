@@ -1733,6 +1733,7 @@ describe("@cloudroom/sdk", () => {
       sourceDisplay: "npm · @bb/notes · tracks compatible",
       updateState: {},
       enabled: true,
+      alwaysEnabled: false,
       description: "Notes",
       name: "Notes",
       screenshots: [],

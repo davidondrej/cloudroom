@@ -909,7 +909,7 @@
 [data-window-blurred] .animate-shine-icon {
   animation-timing-function: steps(10) !important;
 }
-/* 10 steps divide every strip's frame count (60, 80), so each step lands on a whole frame. */
+/* 10 steps divide every strip's frame count (60, 80, 100), so each step lands on a whole frame. */
 [data-window-blurred] .harness-spinner {
   animation-timing-function: steps(10) !important;
 }

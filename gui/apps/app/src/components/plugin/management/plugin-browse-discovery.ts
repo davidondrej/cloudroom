@@ -100,6 +100,10 @@ export function pluginRowHasUpdate(row: PluginListRow): boolean {
   return row.plugin?.updateState.availableVersion != null;
 }
 
+export function isAlwaysEnabledRow(row: PluginListRow): boolean {
+  return row.plugin?.alwaysEnabled === true;
+}
+
 export function filterPluginRows(
   rows: readonly PluginListRow[],
   filter: PluginListFilter,

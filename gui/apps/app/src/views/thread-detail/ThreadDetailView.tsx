@@ -608,8 +608,15 @@ export function ThreadDetailView(props: ThreadDetailViewProps) {
 
 function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   const { projectId, threadId } = props;
-  const { isFocused, navigateInPane, onRequestClose, isBoundedPane, paneId } =
-    usePaneContext();
+  const {
+    isFocused,
+    isHidden,
+    navigateInPane,
+    onRequestClose,
+    isBoundedPane,
+    paneId,
+  } = usePaneContext();
+  const isPaneVisible = !isHidden;
   const navigate = useNavigate();
   const setSplitLayout = useSetAtom(splitLayoutAtom);
   useFixedPanelTabsStorageMaintenance();
@@ -1416,7 +1423,10 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   const hostFileLinksAvailable = isCloudThread || Boolean(thread?.environmentId);
   const { mutate: openCloudFile } = useOpenCloudFile(threadId);
   // Cloud threads have no environment, so chat resolves relative file links against the sandbox checkout.
-  const cloudThreadState = useCloudroomThread(threadId, isCloudThread);
+  const cloudThreadState = useCloudroomThread(
+    threadId,
+    isCloudThread && isPaneVisible,
+  );
   const { mutate: archiveThread } = useArchiveThreadAndChildren();
   const setRootComposeProjectId = useSetRootComposeProjectId();
   // Free's Cloud used up before this thread ever started (David, 2026-11-26): its first message moves to a new Local
@@ -1435,7 +1445,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   }, [archiveThread, displayedTimelineRows, navigate, setRootComposeProjectId, thread]);
   const cloudWorkspace = useCloudroomThreadWorkspace(
     threadId,
-    isCloudThread && Boolean(cloudThreadState.data?.sessionId),
+    isCloudThread && isPaneVisible && Boolean(cloudThreadState.data?.sessionId),
   );
   const timelineWorkspaceRootPath =
     environment?.path ?? cloudWorkspace.data?.path ?? undefined;
@@ -2029,7 +2039,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       ? workStatusResponse.failure
       : undefined;
   const pullRequestQuery = useEnvironmentPullRequest(thread?.environmentId, {
-    enabled: canUseGitUi && environment !== undefined,
+    enabled: canUseGitUi && environment !== undefined && isPaneVisible,
   });
   const queryClient = useQueryClient();
   const cloudTurnRunning =
@@ -2271,8 +2281,10 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   useThreadOpenTiming(
     threadId,
     thread !== undefined && !isThreadTimelinePending,
+    isPaneVisible,
   );
   useThreadReadTracking({
+    active: isPaneVisible,
     markThreadRead,
     thread,
   });
@@ -2722,9 +2734,12 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   );
 
   if (threadQueryState.status === "loading") {
-    return <RouteLoadingSkeleton isBoundedPane={isBoundedPane} />;
+    return isPaneVisible ? (
+      <RouteLoadingSkeleton isBoundedPane={isBoundedPane} />
+    ) : null;
   }
   if (!thread) {
+    if (!isPaneVisible) return null;
     const body =
       error instanceof BbHttpError
         ? (error.body as {
@@ -2978,7 +2993,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         return (
           <LazyThreadTerminalPanel
             autoFocus={
-              tab.id === activeFixedSecondaryTabId && shouldAutoFocusTerminal
+              isPaneVisible &&
+              tab.id === activeFixedSecondaryTabId &&
+              shouldAutoFocusTerminal
             }
             canCreateTerminal={canCreateTerminal}
             isPanelOpen={isSecondaryPanelOpen}
@@ -2995,7 +3012,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         return (
           <LazyNewTabPage
             autoFocus={
-              tab.id === activeFixedSecondaryTabId && shouldAutoFocusNewTab
+              isPaneVisible &&
+              tab.id === activeFixedSecondaryTabId &&
+              shouldAutoFocusNewTab
             }
             projectId={projectId ?? undefined}
             environmentId={thread.environmentId ?? null}

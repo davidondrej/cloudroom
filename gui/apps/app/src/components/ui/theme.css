@@ -126,7 +126,7 @@
    * never paired with a tier below --subtle-foreground or it fails AA at 10px. */
   --text-2xs: 0.625rem;
   --text-2xs--line-height: 0.875rem;
-  --animate-spin: spin 1.5s steps(30) infinite;
+  --animate-spin: spin 1.2s steps(48) infinite;
 }
 
 @media (max-width: 767px) and (pointer: coarse) {
@@ -164,7 +164,12 @@
     --room-sidebar-sticky-row-height: var(--room-sidebar-row-height);
     --room-sidebar-sticky-row-gap: 0.25rem;
     --room-sidebar-sticky-child-row-gap: 0.125rem;
-    --room-sidebar-sticky-label-top: var(--room-sidebar-sticky-stack-padding-top);
+    /* A plugin row (the Director) can pin above the labels; ProjectListShell
+       measures it into --room-sidebar-sticky-top-slot-height. */
+    --room-sidebar-sticky-label-top: calc(
+      var(--room-sidebar-sticky-stack-padding-top) +
+        var(--room-sidebar-sticky-top-slot-height, 0px)
+    );
     --room-sidebar-sticky-project-top: calc(
       var(--room-sidebar-sticky-label-top) +
         var(--room-sidebar-sticky-label-height) +
@@ -409,6 +414,24 @@
       pointer-events: auto;
       opacity: 1;
     }
+  }
+
+  /* The plugin row above the first section pins above every tier. flow-root
+     keeps its row's bottom margin inside the measured height. */
+  [data-sidebar-sticky-stack] [data-sidebar-sticky-tier="top-slot"] {
+    --room-sidebar-sticky-tier-top: var(--room-sidebar-sticky-stack-padding-top);
+    --room-sidebar-sticky-tier-height: auto;
+    --room-sidebar-sticky-tier-z-index: 70;
+    --room-sidebar-sticky-tier-shield-top-height: var(
+      --room-sidebar-sticky-stack-padding-top
+    );
+
+    display: flow-root;
+    background-color: var(--sidebar);
+  }
+
+  [data-sidebar-sticky-stack] [data-sidebar-sticky-tier="top-slot"]:empty {
+    display: none;
   }
 
   [data-sidebar-sticky-stack] [data-sidebar-sticky-tier="label"] {
@@ -1142,6 +1165,74 @@
   }
 
   /*
+   * Fusion: the harness icon and Cloudroom's grid take turns in one box. The
+   * strip plays once (40% of the cycle), its nine pieces shrink into the nine
+   * cubes, the lime wave crosses twice, and the cubes grow back into the icon.
+   * Still (reduced motion), it is the icon's first frame.
+   */
+  .harness-fusion {
+    position: relative;
+    display: inline-block;
+    flex: none;
+    width: var(--spinner-width);
+    height: 14px;
+    --fusion-duration: calc(var(--spinner-duration) * 2.5);
+    --grid-left: calc((var(--spinner-width) - 14px) / 2);
+  }
+
+  .harness-fusion .working-grid {
+    position: absolute;
+    top: 0;
+    left: var(--grid-left);
+    opacity: 0;
+    animation: harness-fusion-grid var(--fusion-duration) ease-in-out infinite;
+  }
+
+  /* Two passes, timed as fractions of the cycle: diagonal, then sideways. */
+  .harness-fusion .working-grid i::after {
+    animation: harness-fusion-pulse var(--fusion-duration) ease-in-out infinite;
+    animation-name: harness-fusion-pulse, harness-fusion-pulse;
+    animation-composition: add;
+    animation-delay:
+      calc(var(--fusion-duration) * (0.4733 + (var(--r) + var(--c)) * 0.025)),
+      calc(var(--fusion-duration) * (0.6983 + var(--c) * 0.0383));
+  }
+
+  /*
+   * Nine windows onto the icon, one mask layer each. Whole, they overlap by
+   * half a pixel so no seam shows; split, each sits exactly on a resting cube.
+   */
+  .harness-tiles {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    --tile: linear-gradient(#000 0 0);
+    --x0: -0.5px;
+    --x1: calc(var(--spinner-width) / 3 - 0.5px);
+    --x2: calc(var(--spinner-width) * 2 / 3 - 0.5px);
+    --y0: -0.5px;
+    --y1: calc(14px / 3 - 0.5px);
+    --y2: calc(28px / 3 - 0.5px);
+    --cube0: calc(var(--grid-left) + 0.8px);
+    --cube1: calc(var(--grid-left) + 5.8px);
+    --cube2: calc(var(--grid-left) + 10.8px);
+    mask-image:
+      var(--tile), var(--tile), var(--tile), var(--tile), var(--tile),
+      var(--tile), var(--tile), var(--tile), var(--tile);
+    mask-repeat: no-repeat;
+    mask-size: calc(var(--spinner-width) / 3 + 1px) calc(14px / 3 + 1px);
+    mask-position:
+      var(--x0) var(--y0), var(--x1) var(--y0), var(--x2) var(--y0),
+      var(--x0) var(--y1), var(--x1) var(--y1), var(--x2) var(--y1),
+      var(--x0) var(--y2), var(--x1) var(--y2), var(--x2) var(--y2);
+    animation: harness-fusion-tiles var(--fusion-duration) ease-in-out infinite;
+  }
+
+  .harness-fusion .harness-spinner {
+    animation: harness-fusion-strip var(--fusion-duration) steps(var(--spinner-frames)) infinite;
+  }
+
+  /*
    * A subagent's smaller cousin of the grid above: 2x2 pixels, lit one after
    * another clockwise. `--n` is a cell's place in the orbit; `--o` shifts the
    * whole cube so pills side by side don't blink in step.
@@ -1209,11 +1300,15 @@
   [inert] .working-grid i::after,
   [inert] .subagent-grid i::after,
   [inert] .harness-spinner,
+  [inert] .harness-tiles,
+  [inert] .harness-fusion .working-grid,
   [aria-hidden="true"] .animate-shine,
   [aria-hidden="true"] .animate-shine-icon,
   [aria-hidden="true"] .working-grid i::after,
   [aria-hidden="true"] .subagent-grid i::after,
-  [aria-hidden="true"] .harness-spinner {
+  [aria-hidden="true"] .harness-spinner,
+  [aria-hidden="true"] .harness-tiles,
+  [aria-hidden="true"] .harness-fusion .working-grid {
     animation-play-state: paused;
     will-change: auto;
   }
@@ -1303,6 +1398,12 @@
       animation: none;
       will-change: auto;
     }
+
+    /* The icon stays whole and the grid stays hidden. */
+    .harness-tiles,
+    .harness-fusion .working-grid {
+      animation: none;
+    }
   }
 }
 
@@ -1310,6 +1411,72 @@
   to {
     mask-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
     background-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
+  }
+}
+
+/* The strip once through, then its first frame while the grid has its turn. */
+@keyframes harness-fusion-strip {
+  0% {
+    mask-position: 0 0;
+    background-position: 0 0;
+  }
+  40% {
+    mask-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
+    background-position: calc(var(--spinner-width) * var(--spinner-frames) * -1) 0;
+  }
+  40.01%,
+  100% {
+    mask-position: 0 0;
+    background-position: 0 0;
+  }
+}
+
+@keyframes harness-fusion-tiles {
+  0%,
+  40%,
+  100% {
+    opacity: 1;
+    mask-size: calc(var(--spinner-width) / 3 + 1px) calc(14px / 3 + 1px);
+    mask-position:
+      var(--x0) var(--y0), var(--x1) var(--y0), var(--x2) var(--y0),
+      var(--x0) var(--y1), var(--x1) var(--y1), var(--x2) var(--y1),
+      var(--x0) var(--y2), var(--x1) var(--y2), var(--x2) var(--y2);
+  }
+  46.67%,
+  93.33% {
+    opacity: 0;
+    mask-size: 2.4px 2.4px;
+    mask-position:
+      var(--cube0) 0.8px, var(--cube1) 0.8px, var(--cube2) 0.8px,
+      var(--cube0) 5.8px, var(--cube1) 5.8px, var(--cube2) 5.8px,
+      var(--cube0) 10.8px, var(--cube1) 10.8px, var(--cube2) 10.8px;
+  }
+}
+
+@keyframes harness-fusion-grid {
+  0%,
+  40%,
+  100% {
+    opacity: 0;
+  }
+  46.67%,
+  93.33% {
+    opacity: 1;
+  }
+}
+
+/* working-grid-pulse, as fractions of a 6s cycle: 180ms in, 40ms hold, 560ms out. */
+@keyframes harness-fusion-pulse {
+  0%,
+  13%,
+  100% {
+    opacity: 0;
+    transform: scale(1);
+  }
+  3%,
+  3.667% {
+    opacity: 1;
+    transform: scale(1.475);
   }
 }
 

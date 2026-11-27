@@ -118,21 +118,29 @@ function withEvents(prompt: string, events: string | undefined): string {
 // Loop memory (ADR 0297): a fresh-thread run ends with a "Loop note:" line, and the next run gets the newest notes,
 // read from earlier runs' last replies. The same rules as Cloud loops (web/lib/automations.ts).
 const NOTES = 20;
+const NOTE_CHARS = 1000;
+const NOTES_BYTES = 10_000;
 const NOTE = /^[\s>*_-]*Loop note:[*_]*[ \t]*(.{3,})$/gm;
 const NOTE_ASK =
   'Loop memory: end your final message with one line that starts with "Loop note:" and says what you covered and the result, so later runs skip repeats.';
 
-/** The last "Loop note:" line in a run's reply, or null. */
+/** The last "Loop note:" line in a run's reply, or null, cut by `clip` (#672: a silent cut at 300 hid what runs had
+ *  covered). */
 export function lastNote(reply: string): string | null {
   const notes = [...reply.matchAll(NOTE)]
-    .map((match) =>
-      match[1]!
-        .replace(/[*_]+$/, "")
-        .trim()
-        .slice(0, 300),
-    )
+    .map((match) => clip(match[1]!.replace(/[*_]+$/, "").trim()))
     .filter((note) => !note.startsWith("<"));
   return notes.at(-1) ?? null;
+}
+
+/** A note's first 1,000 characters, never half an emoji, with "…". The cut goes back to a word break only while it
+ *  keeps 80%, so text without spaces (CJK, URLs, lists) keeps its 1,000. Same as Cloud loops. */
+function clip(note: string): string {
+  const chars = [...note];
+  if (chars.length <= NOTE_CHARS) return note;
+  const cut = chars.slice(0, NOTE_CHARS).join("");
+  const word = /\s/.test(chars[NOTE_CHARS]!) ? cut : cut.replace(/\s+\S*$/, "");
+  return `${(word.length >= cut.length * 0.8 ? word : cut).trimEnd()}…`;
 }
 
 // Loop run records (ADR 0298): every run reports what it did, why, and how sure it was. Same text as Cloud loops.
@@ -155,11 +163,15 @@ async function reportAsk(sdk: FallbackSdk): Promise<string> {
   return (await signedOut(sdk)) ? "" : `\n\n${REPORT_ASK}`;
 }
 
-export function memoryText(notes: string[]): string {
-  const past = notes.length
-    ? `\n\nPast runs of this loop, newest first (their Loop notes):\n${notes.map((note) => `- ${note}`).join("\n")}`
+/** The newest notes that fit in 10,000 bytes, then `runs`: the command that lists every past run. */
+export function memoryText(notes: string[], runs?: string): string {
+  let room = NOTES_BYTES;
+  const kept = notes.filter((note) => (room -= new TextEncoder().encode(note).length + 3) >= 0);
+  const past = kept.length
+    ? `\n\nPast runs of this loop, newest first (their Loop notes):\n${kept.map((note) => `- ${note}`).join("\n")}`
     : "";
-  return `${past}\n\n${NOTE_ASK}`;
+  // Local `loop runs` shows each run's status and thread, not its loop report.
+  return `${past}${runs ? `${past ? "\n" : "\n\n"}Every past run, with its thread and status: \`${runs}\`` : ""}\n\n${NOTE_ASK}`;
 }
 
 /** The newest notes from the loop's earlier runs, dated. A run whose reply can't be read is skipped. Failed, skipped,
@@ -231,7 +243,7 @@ export async function executeAgentRun(
       prompt: withEvents(
         fallbackNote(args.automation, args.execution, agent) +
           args.execution.prompt +
-          memoryText(notes) +
+          memoryText(notes, `room-cli loop runs ${args.automation.id} --project ${args.automation.projectId}`) +
           ask,
         args.events,
       ),

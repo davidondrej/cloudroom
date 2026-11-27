@@ -10,7 +10,7 @@ const commandCatalogCache = createLastKnownCache({
   prefix: "bb.command-catalog",
   version: "1",
   schema: commandListResponseSchema,
-  maxEntries: 8,
+  maxEntries: 32,
 });
 
 export function commandCatalogCacheKey(

@@ -286,13 +286,17 @@ export function TasksEditor({
         mentionItemsRef.current?.(query) ?? Promise.resolve([]),
       onChange: (props: SuggestionProps<MentionItem, MentionItem>) => {
         const previous = mentionRef.current;
+        // Tiptap sends empty items while the next lookup loads; keep the
+        // current list so the menu doesn't flicker and Enter still picks.
+        const items =
+          props.loading && previous ? previous.items : props.items;
         setMentionRef.current({
-          items: props.items,
+          items,
           clientRect: props.clientRect ?? null,
           command: props.command,
           selectedIndex: Math.min(
             previous?.selectedIndex ?? 0,
-            Math.max(0, props.items.length - 1),
+            Math.max(0, items.length - 1),
           ),
         });
       },

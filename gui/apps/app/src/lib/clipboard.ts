@@ -219,7 +219,8 @@ export async function copyToClipboardWithToast(
   return false;
 }
 
-export interface ClipboardCopyOptions extends CopyToClipboardOptions {
+export interface ClipboardCopyOptions
+  extends Omit<CopyToClipboardOptions, "html"> {
   text: string;
   /** How long `copied` stays true. */
   resetMs?: number;
@@ -230,7 +231,6 @@ export function useClipboardCopy({
   successMessage = null,
   errorMessage = "Failed to copy",
   imageUrl,
-  html,
   chatMessage,
   resetMs = 2000,
 }: ClipboardCopyOptions) {
@@ -243,16 +243,15 @@ export function useClipboardCopy({
   }, [copied, resetMs]);
 
   const copy = useCallback(async (event?: { currentTarget: EventTarget | null }) => {
-    if ((!text && !imageUrl && !html) || copied) return;
+    if ((!text && !imageUrl) || copied) return;
     const success = await copyToClipboardWithToast(text, {
       successMessage,
       errorMessage,
       imageUrl,
-      html,
       chatMessage: chatMessage || (event?.currentTarget instanceof Element && !!event.currentTarget.closest("[data-timeline-row-id]")),
     });
     if (success) setCopied(true);
-  }, [text, imageUrl, html, copied, successMessage, errorMessage, chatMessage]);
+  }, [text, imageUrl, copied, successMessage, errorMessage, chatMessage]);
 
   return { copied, copy };
 }

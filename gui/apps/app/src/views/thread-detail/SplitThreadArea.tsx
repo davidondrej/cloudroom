@@ -260,6 +260,69 @@ function usePreservedSplitScrollPositions(maximizedPaneId: string | null) {
   return { captureVisibleScrollPositions, workspaceRef };
 }
 
+const SINGLE_PANE_KEEP_ALIVE_LIMIT = 4;
+
+interface KeptSinglePaneThread {
+  projectId: string;
+  threadId: string;
+  lastUsedSeq: number;
+}
+
+interface KeptThreadPoolState {
+  seq: number;
+  entries: readonly KeptSinglePaneThread[];
+}
+
+function updateKeptSinglePaneThreads(
+  current: readonly KeptSinglePaneThread[],
+  activeThread: { projectId: string; threadId: string } | null,
+  clearAll: boolean,
+  nextSeq: number,
+): readonly KeptSinglePaneThread[] {
+  if (clearAll) {
+    return current.length === 0 ? current : [];
+  }
+  if (activeThread === null) {
+    return current;
+  }
+  const existingIndex = current.findIndex(
+    (entry) => entry.threadId === activeThread.threadId,
+  );
+  if (existingIndex !== -1) {
+    const existing = current[existingIndex]!;
+    if (
+      existing.projectId === activeThread.projectId &&
+      current.every((entry) => entry.lastUsedSeq <= existing.lastUsedSeq)
+    ) {
+      return current;
+    }
+    const next = [...current];
+    next[existingIndex] = {
+      projectId: activeThread.projectId,
+      threadId: activeThread.threadId,
+      lastUsedSeq: nextSeq,
+    };
+    return next;
+  }
+  const inserted: KeptSinglePaneThread = {
+    projectId: activeThread.projectId,
+    threadId: activeThread.threadId,
+    lastUsedSeq: nextSeq,
+  };
+  if (current.length < SINGLE_PANE_KEEP_ALIVE_LIMIT) {
+    return [...current, inserted];
+  }
+  let lruIndex = 0;
+  for (let index = 1; index < current.length; index += 1) {
+    if (current[index]!.lastUsedSeq < current[lruIndex]!.lastUsedSeq) {
+      lruIndex = index;
+    }
+  }
+  const next = [...current];
+  next[lruIndex] = inserted;
+  return next;
+}
+
 export function SplitThreadArea(props: SplitThreadAreaProps = {}) {
   return (
     <ThreadDetailWorkerPoolProvider>
@@ -319,6 +382,46 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
       : reconcileLayoutForContent(storedLayout, currentContent);
   }, [currentContent, reconciledContent, routeThread, storedLayout]);
   const panes = layout === null ? [] : listPanes(layout.root);
+  const singlePaneActiveThread =
+    splitWorkspaceActive &&
+    layout !== null &&
+    currentContent !== null &&
+    panes.length === 1 &&
+    panes[0]?.content.kind === "thread"
+      ? panes[0].content
+      : null;
+  const clearKeptPool = !splitWorkspaceActive || panes.length > 1;
+  const [keptPool, setKeptPool] = useState<KeptThreadPoolState>(() => ({
+    seq: singlePaneActiveThread ? 1 : 0,
+    entries: singlePaneActiveThread
+      ? [
+          {
+            projectId: singlePaneActiveThread.projectId,
+            threadId: singlePaneActiveThread.threadId,
+            lastUsedSeq: 1,
+          },
+        ]
+      : [],
+  }));
+  const nextKeptEntries = updateKeptSinglePaneThreads(
+    keptPool.entries,
+    singlePaneActiveThread,
+    clearKeptPool,
+    keptPool.seq + 1,
+  );
+  if (nextKeptEntries !== keptPool.entries) {
+    setKeptPool({ seq: keptPool.seq + 1, entries: nextKeptEntries });
+  }
+  const evictKeptThread = useCallback((staleThreadId: string) => {
+    setKeptPool((current) => {
+      const filtered = current.entries.filter(
+        (entry) => entry.threadId !== staleThreadId,
+      );
+      return filtered.length === current.entries.length
+        ? current
+        : { ...current, entries: filtered };
+    });
+  }, []);
   const isSplitActive = splitWorkspaceActive && panes.length > 1;
   const maximizedPane =
     layout !== null && maximizedPaneId !== null
@@ -615,24 +718,62 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
 
   const firstPane = panes[0];
   if (panes.length === 1 && firstPane !== undefined) {
+    const activeThreadId =
+      firstPane.content.kind === "thread" ? firstPane.content.threadId : null;
     return (
       <>
         {commandHandlers}
-        <WorkspacePaneContent
-          content={firstPane.content}
-          paneId={firstPane.paneId}
-          isFocused
-          isSplitPane={false}
-          secondaryPanelRegistry={null}
-          reservesWindowPanelToggle={false}
-          onRequestClose={null}
-          isMaximized={false}
-          onToggleMaximize={null}
-          isBoundedPane={false}
-          isTopRow
-          ownsWindowTopLeft
-          onNavigateInPane={navigateInPane}
-        />
+        {firstPane.content.kind !== "thread" ? (
+          <WorkspacePaneContent
+            content={firstPane.content}
+            paneId={firstPane.paneId}
+            isFocused
+            isHidden={false}
+            isSplitPane={false}
+            secondaryPanelRegistry={null}
+            reservesWindowPanelToggle={false}
+            onRequestClose={null}
+            isMaximized={false}
+            onToggleMaximize={null}
+            isBoundedPane={false}
+            isTopRow
+            ownsWindowTopLeft
+            onNavigateInPane={navigateInPane}
+          />
+        ) : null}
+        {nextKeptEntries.map((entry) => {
+          const isActive = entry.threadId === activeThreadId;
+          return (
+            <Fragment key={entry.threadId}>
+              {isActive ? null : (
+                <PaneStaleWatcher
+                  threadId={entry.threadId}
+                  onStale={() => evictKeptThread(entry.threadId)}
+                />
+              )}
+              <WorkspacePaneContent
+                content={{
+                  kind: "thread",
+                  projectId: entry.projectId,
+                  threadId: entry.threadId,
+                }}
+                paneId={firstPane.paneId}
+                isFocused={isActive}
+                isHidden={!isActive}
+                isSplitPane={false}
+                secondaryPanelRegistry={null}
+                reservesWindowPanelToggle={false}
+                onRequestClose={null}
+                isMaximized={false}
+                onToggleMaximize={null}
+                isBoundedPane={false}
+                isTopRow
+                ownsWindowTopLeft={isActive}
+                onNavigateInPane={navigateInPane}
+              />
+            </Fragment>
+          );
+        })}
       </>
     );
   }
@@ -781,6 +922,7 @@ function SplitTree(props: SplitTreeProps) {
           content={node.content}
           paneId={node.paneId}
           isFocused={isFocused}
+          isHidden={isHiddenByMaximize}
           isSplitPane
           secondaryPanelRegistry={props.secondaryPanelRegistry}
           reservesWindowPanelToggle={isMaximized || (isTopRow && isRightEdge)}
@@ -857,6 +999,7 @@ interface WorkspacePaneContentProps {
   content: PaneContent;
   paneId: string;
   isFocused: boolean;
+  isHidden?: boolean;
   isSplitPane: boolean;
   secondaryPanelRegistry: PaneSecondaryPanelRegistry | null;
   reservesWindowPanelToggle: boolean;
@@ -875,6 +1018,7 @@ function WorkspacePaneContent({
   content,
   paneId,
   isFocused,
+  isHidden = false,
   isSplitPane,
   secondaryPanelRegistry,
   reservesWindowPanelToggle,
@@ -914,6 +1058,7 @@ function WorkspacePaneContent({
     () => ({
       paneId,
       isFocused,
+      isHidden,
       isSplitPane,
       secondaryPanelHost,
       reservesWindowPanelToggle,
@@ -931,6 +1076,7 @@ function WorkspacePaneContent({
       beginPaneDrag,
       isBoundedPane,
       isFocused,
+      isHidden,
       isSplitPane,
       isTopRow,
       ownsWindowTopLeft,

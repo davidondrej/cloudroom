@@ -86,6 +86,8 @@ export interface AcpDialect {
   isNotice?(text: string): boolean;
   // Exact agent messages that mean the turn failed, mapped to a clearer error.
   errorMessages?: Readonly<Record<string, string>>;
+  // Replies that mean the plan's limit stopped the turn, when one is the turn's whole output. It fails as a limit.
+  limitNotices?: readonly string[];
   // A clearer error when the agent fails to start; `command` is the launched executable.
   startError?(message: string, command: string): string | undefined;
   stopReasons?: Readonly<Record<string, AcpStopReason>>;
@@ -526,6 +528,9 @@ export const ANTIGRAVITY_ACP_DIALECT: AcpDialect = {
   maintenance: ANTIGRAVITY_ACP_MAINTENANCE,
   prepareLaunch: prepareAntigravityLaunch,
   defaultReasoningLevel: "high",
+  // agy reports its quota as a plain reply ("⚠ Individual quota reached. … Resets in 24m24s."), not an error, so
+  // the Accounts plugin never saw the limit and its switch kept offering spent accounts.
+  limitNotices: ["Individual quota reached", "Third-party quota reached"],
 };
 
 // Agent Zero runs on its own server and reaches the thread's folder only through its `a0` bridge's host tools, which

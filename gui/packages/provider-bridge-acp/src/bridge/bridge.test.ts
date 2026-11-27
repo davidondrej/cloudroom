@@ -2981,6 +2981,22 @@ describe("acp bridge", () => {
     expect(await waitForTurnCompleted()).toMatchObject({ status: "failed" });
   });
 
+  it("fails an Antigravity turn whose reply is its quota notice, as a limit", async () => {
+    const { providerThreadId } = await startThread({ dialectId: "antigravity" });
+    await waitForResponse(
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "quota-reply", mentions: [] }],
+      }),
+    );
+
+    expect(await waitForTurnCompleted()).toMatchObject({ status: "failed" });
+    expect(agentMessageTexts().join("")).not.toContain("Individual quota");
+    expect(threadEventsOfType("provider/error").at(-1)).toMatchObject({
+      detail: "Individual quota reached. Resets in 24m24s.",
+      errorInfo: { category: "rate-limit", httpStatusCode: 429 },
+    });
+  });
+
   it("delivers stacked steers on the same turn", async () => {
     const { providerThreadId } = await startThread();
     const turnId = sendTurnRequest("turn/start", providerThreadId, {

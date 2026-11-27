@@ -29,7 +29,10 @@ interface SpinnerMeta {
   frameWidth?: number;
 }
 
-/** One 28px-per-frame strip per harness, keyed by file name: `acp-` provider ids drop the prefix. */
+/**
+ * One 28px-per-frame strip per harness, keyed by file name: `acp-` provider ids drop the prefix.
+ * No strip means the default 3x3 grid. New harnesses get the grid until David approves a custom strip.
+ */
 const SPINNER_URLS = import.meta.glob<string>("../../../assets/working-spinners/*.png", { eager: true, import: "default" });
 const SPINNER_META = import.meta.glob<SpinnerMeta>("../../../assets/working-spinners/*.json", { eager: true, import: "default" });
 
@@ -51,7 +54,14 @@ function WorkingIcon() {
     "--spinner-duration": `${spinner.frames * spinner.frameMs}ms`,
     "--spinner-color": spinner.color === "foreground" ? "var(--foreground)" : spinner.color,
   } as CSSProperties;
-  return <span className="harness-spinner" data-mode={spinner.mode} style={style} />;
+  return (
+    <span className="harness-fusion" style={style}>
+      <WorkingGrid />
+      <span className="harness-tiles">
+        <span className="harness-spinner" data-mode={spinner.mode} />
+      </span>
+    </span>
+  );
 }
 
 function WorkingGrid() {

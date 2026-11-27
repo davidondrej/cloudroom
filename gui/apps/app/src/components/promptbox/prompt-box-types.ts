@@ -20,7 +20,7 @@ import type { ComposerTextEffectSource } from "@/lib/composer-text-effects";
 import type { ComposerEditorLayout } from "./ComposerEditorSlot";
 import type { PromptMentionLinkResolver } from "./editor/prompt-mention-link";
 import type { ExecutionControlsProps } from "./ExecutionControls";
-import type { LocationCommandSuggestion } from "./mentions/MentionMenu";
+import type { LocationCommandSuggestion } from "./mentions/typeahead-types";
 import type { PromptBoxAction } from "./PromptBoxActionsMenu";
 
 export type { PromptBoxAction };
@@ -57,19 +57,46 @@ export interface TypeaheadMentionConfig {
 
 export interface TypeaheadCommandConfig {
   trigger: PromptMentionCommandTrigger | null;
+  /** Optional unfiltered catalog for single-pass indexing; falls back to `suggestions`. */
+  catalog?: readonly ProviderCommandSuggestion[];
   suggestions: readonly ProviderCommandSuggestion[];
   isLoading: boolean;
   isError: boolean;
-  hasMore: boolean;
-  isLoadingMore: boolean;
-  loadMore: () => void;
   onQueryChange: (query: string | null) => void;
   onEditorFocus?: () => void;
 }
 
-export interface TypeaheadConfig {
+export interface ControlledTypeaheadConfig {
+  kind?: "controlled";
   mention: TypeaheadMentionConfig;
   command: TypeaheadCommandConfig;
+}
+
+/**
+ * Self-contained live typeahead descriptor. `ComposerTypeaheadIsland` owns the
+ * query state and data hooks, so typing `/` or `@` never re-renders the parent composer.
+ */
+export interface LiveTypeaheadConfig {
+  kind: "live";
+  projectId: string | undefined;
+  mentionsProjectId: string | undefined;
+  providerId: string | undefined;
+  commandScope: "new-thread" | "thread";
+  environmentId: string | null;
+  hostId?: string | null;
+  currentThreadId?: string;
+  threadStorageThreadId?: string;
+  skillsTrigger: PromptMentionCommandTrigger | null;
+  promptActions?: readonly PromptBoxAction[];
+  resolveLink?: PromptMentionLinkResolver;
+}
+
+export type TypeaheadConfig = ControlledTypeaheadConfig | LiveTypeaheadConfig;
+
+export function resolveTypeaheadMentionLink(
+  config: TypeaheadConfig,
+): PromptMentionLinkResolver | undefined {
+  return config.kind === "live" ? config.resolveLink : config.mention.resolveLink;
 }
 
 /** A command config for composers that have no `/` menu. */
@@ -78,9 +105,6 @@ export const INERT_TYPEAHEAD_COMMAND_CONFIG: TypeaheadCommandConfig = {
   suggestions: [],
   isLoading: false,
   isError: false,
-  hasMore: false,
-  isLoadingMore: false,
-  loadMore: () => {},
   onQueryChange: () => {},
 };
 

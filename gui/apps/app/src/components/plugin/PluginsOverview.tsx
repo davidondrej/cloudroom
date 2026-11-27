@@ -1,53 +1,154 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { useNavigate, useSearchParams } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
+import { Button } from "@cloudroom/shared-ui/button";
 import {
-  ResourceInfiniteScrollSentinel,
-  useResourceInfiniteItems,
-  useResourceViewportPageSize,
-} from "@cloudroom/shared-ui/resource-pagination";
-import {
-  ResourceCollectionPage,
-  ResourceCollectionViewport,
-  ResourceListState,
-  ResourceMultiSelectMenu,
-  ResourceSortMenu,
-  ResourceToolbar,
-} from "@cloudroom/shared-ui/resource-list";
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@cloudroom/shared-ui/dropdown-menu";
+import { Icon } from "@cloudroom/shared-ui/icon";
+import { Input } from "@cloudroom/shared-ui/input";
+import { ResourceListState } from "@cloudroom/shared-ui/resource-list";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { CreateWithTemplatesButton } from "@/components/create-via-prompt-examples";
 import { CREATE_PLUGIN_PROMPT } from "@cloudroom/client-core";
-import { TOOLS_PAGE_BAND_CLASSES } from "@/components/tools/tools-navigation";
 import {
   AddPluginDialog,
   type AddPluginInitial,
 } from "@/components/plugin/management/AddPluginDialog";
 import { BrowsePluginsTab } from "@/components/plugin/management/BrowsePluginsTab";
-import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
+import { useCheckPluginUpdates } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import { InstalledPluginsTab } from "@/components/plugin/management/InstalledPluginsTab";
 import {
   PluginSafeModeBanner,
-  PluginSafeModeButton,
+  usePluginSafeModeToggle,
 } from "@/components/plugin/management/PluginSafeMode";
 import { PluginAuthorPage } from "@/components/plugin/management/PluginAuthorPage";
 import {
   pluginPublisherFilterId,
   pluginPublisherFilterOptions,
 } from "@/components/plugin/plugin-provenance";
-import { PLUGINS_INSTALLED_DESCRIPTION } from "@/components/plugin/plugins-collection-copy";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
 import {
   getPluginDetailRoutePath,
   getRootComposeRoutePath,
+  getSettingsRoutePath,
 } from "@/lib/route-paths";
+
+/** Everything the installed list used to keep in its toolbar, behind one button. */
+function InstalledPluginsMenu({
+  hasPlugins,
+  sortDirection,
+  onToggleSort,
+  typeOptions,
+  activeTypes,
+  onTypesChange,
+}: {
+  hasPlugins: boolean;
+  sortDirection: "asc" | "desc";
+  onToggleSort: () => void;
+  typeOptions: readonly { id: string; label: string }[];
+  activeTypes: readonly string[];
+  onTypesChange: (values: string[]) => void;
+}) {
+  const check = useCheckPluginUpdates();
+  const { safeMode, toggle } = usePluginSafeModeToggle();
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className={cn(
+            "size-7 shrink-0 p-0 text-muted-foreground hover:text-foreground",
+            activeTypes.length > 0 && "bg-state-active text-foreground",
+          )}
+          aria-label={
+            activeTypes.length > 0
+              ? `Plugin list options: ${activeTypes.length} type filters on`
+              : "Plugin list options"
+          }
+        >
+          <Icon name="MoreHorizontal" className="size-4" aria-hidden />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent
+        align="end"
+        className="min-w-44"
+        mobileTitle="Plugin list"
+      >
+        {hasPlugins ? (
+          <DropdownMenuItem
+            disabled={check.isPending}
+            onSelect={() => check.mutate()}
+          >
+            <Icon name="RotateCcw" className="size-4" aria-hidden />
+            Check for updates
+          </DropdownMenuItem>
+        ) : null}
+        {safeMode === false ? (
+          <DropdownMenuItem
+            disabled={toggle.isPending}
+            onSelect={() => toggle.mutate(true)}
+          >
+            <Icon name="SecurityCheck" className="size-4" aria-hidden />
+            Turn on safe mode
+          </DropdownMenuItem>
+        ) : null}
+        <DropdownMenuItem
+          onSelect={(event) => {
+            event.preventDefault();
+            onToggleSort();
+          }}
+        >
+          <Icon name="ArrowUpDown" className="size-4" aria-hidden />
+          {sortDirection === "asc" ? "Sort Z to A" : "Sort A to Z"}
+        </DropdownMenuItem>
+        {typeOptions.length > 0 ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-xs font-normal text-subtle-foreground">
+              Type
+            </DropdownMenuLabel>
+            {typeOptions.map((option) => (
+              <DropdownMenuCheckboxItem
+                key={option.id}
+                checked={activeTypes.includes(option.id)}
+                onSelect={(event) => event.preventDefault()}
+                onCheckedChange={(checked) =>
+                  onTypesChange(
+                    checked === true
+                      ? [...activeTypes, option.id]
+                      : activeTypes.filter((value) => value !== option.id),
+                  )
+                }
+              >
+                <span className="truncate text-xs">{option.label}</span>
+              </DropdownMenuCheckboxItem>
+            ))}
+          </>
+        ) : null}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
 
 export function PluginsOverview({
   onOpenPlugin,
   selectedPluginId = null,
   mode = "browse",
+  renderDetail,
 }: {
   mode?: "installed" | "browse";
   selectedPluginId?: string | null;
   onOpenPlugin?: (pluginId: string, trigger: HTMLButtonElement) => void;
+  /** Installed mode: the selected plugin's page, drawn beside the list. */
+  renderDetail?: (pluginId: string) => ReactNode;
 } = {}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
@@ -58,8 +159,6 @@ export function PluginsOverview({
   );
   const authorKey = searchParams.get("author");
   const [installedQuery, setInstalledQuery] = useState("");
-  const [installedViewport, setInstalledViewport] =
-    useState<HTMLDivElement | null>(null);
   const [installedSortDirection, setInstalledSortDirection] = useState<
     "asc" | "desc"
   >("asc");
@@ -73,14 +172,6 @@ export function PluginsOverview({
     return typeFilters.filter((value) => offered.has(value));
   }, [typeFilterOptions, typeFilters]);
   const normalizedInstalledQuery = installedQuery.trim().toLowerCase();
-  const installedResetKey = [
-    normalizedInstalledQuery,
-    installedSortDirection,
-    [...activeTypeFilters].sort().join(","),
-  ].join("\u0000");
-  const installedPageSize = useResourceViewportPageSize(installedViewport, {
-    resetKey: installedResetKey,
-  });
   const [addDialog, setAddDialog] = useState<{
     open: boolean;
     initial: AddPluginInitial | null;
@@ -133,11 +224,6 @@ export function PluginsOverview({
       plugins,
     ],
   );
-  const installedList = useResourceInfiniteItems(visiblePlugins, {
-    pageSize: installedPageSize,
-    resetKey: installedResetKey,
-  });
-
   const startCreatePlugin = (prompt?: string) => {
     navigate(getRootComposeRoutePath(), {
       state: {
@@ -187,93 +273,107 @@ export function PluginsOverview({
         />
       );
   } else {
+    // With no plugin in the URL, wide screens show the first one. Narrow screens show the list alone.
+    const shownPluginId = selectedPluginId ?? visiblePlugins[0]?.id ?? null;
     content = (
-      <ResourceCollectionViewport
-        scrollId="plugins-installed-results"
-        viewportRef={setInstalledViewport}
-        bandClassName={TOOLS_PAGE_BAND_CLASSES}
-        toolbar={
-          <ResourceToolbar
-            searchValue={installedQuery}
-            searchPlaceholder="Search installed plugins"
-            onSearchChange={setInstalledQuery}
-            action={createActions}
-            controls={
-              <>
-                <ResourceMultiSelectMenu
-                  label="Type"
-                  icon="SlidersHorizontal"
-                  compact
-                  selectedValues={activeTypeFilters}
-                  options={typeFilterOptions}
-                  onChange={setTypeFilters}
+      <div className="@container/plugins flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4 md:px-5">
+        <PluginSafeModeBanner />
+        <div className="flex min-h-0 flex-1 gap-3">
+          <aside
+            aria-label="Installed plugins"
+            className={cn(
+              "flex min-h-0 w-[17.5rem] shrink-0 flex-col rounded-[14px] bg-sidebar text-sidebar-foreground shadow-message @max-3xl/plugins:w-full",
+              selectedPluginId !== null && "@max-3xl/plugins:hidden",
+            )}
+          >
+            <div className="flex shrink-0 items-center gap-1 p-2">
+              <div className="relative min-w-0 flex-1">
+                <Icon
+                  name="Search"
+                  className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-sidebar-foreground"
                 />
-                <ResourceSortMenu
-                  value="alpha"
-                  direction={installedSortDirection}
-                  compact
-                  options={[{ id: "alpha", label: "Plugin name" }]}
-                  onChange={() =>
-                    setInstalledSortDirection((current) =>
-                      current === "asc" ? "desc" : "asc",
+                <Input
+                  aria-label="Search installed plugins"
+                  className="h-9 border-sidebar-border bg-sidebar-accent pl-9 text-sm"
+                  placeholder="Search plugins…"
+                  value={installedQuery}
+                  onChange={(event) => setInstalledQuery(event.target.value)}
+                />
+              </div>
+              <InstalledPluginsMenu
+                hasPlugins={plugins.length > 0}
+                sortDirection={installedSortDirection}
+                onToggleSort={() =>
+                  setInstalledSortDirection((current) =>
+                    current === "asc" ? "desc" : "asc",
+                  )
+                }
+                typeOptions={typeFilterOptions}
+                activeTypes={activeTypeFilters}
+                onTypesChange={setTypeFilters}
+              />
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+              {listQuery.isError ? (
+                <ResourceListState
+                  state="error"
+                  message="Couldn't load plugins."
+                  onRetry={() => void listQuery.refetch()}
+                />
+              ) : listQuery.isFetching && listQuery.data === undefined ? (
+                <ResourceListState state="loading" message="Loading plugins" />
+              ) : plugins.length > 0 && visiblePlugins.length === 0 ? (
+                <ResourceListState
+                  state="empty"
+                  message={
+                    normalizedInstalledQuery === ""
+                      ? "No plugins match these filters."
+                      : activeTypeFilters.length > 0
+                        ? `No plugins match "${installedQuery}" with these filters.`
+                        : `No plugins match "${installedQuery}"`
+                  }
+                />
+              ) : (
+                <InstalledPluginsTab
+                  plugins={visiblePlugins}
+                  selectedPluginId={shownPluginId}
+                  onOpenPlugin={(pluginId) =>
+                    navigate(
+                      getPluginDetailRoutePath({ pluginId, view: "installed" }),
                     )
                   }
                 />
-                {plugins.length > 0 ? <CheckPluginUpdatesButton /> : null}
-                <PluginSafeModeButton />
-              </>
-            }
-          />
-        }
-      >
-        <div className={cn("space-y-3", TOOLS_PAGE_BAND_CLASSES)}>
-          <PluginSafeModeBanner />
-          {listQuery.isError ? (
-            <ResourceListState
-              state="error"
-              message="Couldn't load plugins."
-              onRetry={() => void listQuery.refetch()}
-            />
-          ) : listQuery.isFetching && listQuery.data === undefined ? (
-            <ResourceListState state="loading" message="Loading plugins" />
-          ) : plugins.length > 0 && visiblePlugins.length === 0 ? (
-            <ResourceListState
-              state="empty"
-              message={
-                normalizedInstalledQuery === ""
-                  ? "No plugins match these filters."
-                  : activeTypeFilters.length > 0
-                    ? `No plugins match "${installedQuery}" with these filters.`
-                    : `No plugins match "${installedQuery}"`
-              }
-            />
-          ) : (
-            <>
-              <InstalledPluginsTab plugins={installedList.items} />
-              <ResourceInfiniteScrollSentinel
-                hasMore={installedList.hasMore}
-                onLoadMore={installedList.loadMore}
-              />
-            </>
-          )}
+              )}
+            </div>
+            <div className="shrink-0 border-t border-sidebar-border p-2 [&>div]:w-full [&>div>button:first-child]:flex-1">
+              {createActions}
+            </div>
+          </aside>
+          <div
+            className={cn(
+              "flex min-h-0 min-w-0 flex-1 flex-col",
+              selectedPluginId === null && "@max-3xl/plugins:hidden",
+            )}
+          >
+            <Link
+              to={getSettingsRoutePath("plugins")}
+              className="hidden shrink-0 items-center gap-1.5 px-4 pb-1 text-sm text-muted-foreground hover:text-foreground @max-3xl/plugins:flex"
+            >
+              <Icon name="ArrowLeft" className="size-4" aria-hidden />
+              Installed plugins
+            </Link>
+            {shownPluginId !== null && renderDetail
+              ? renderDetail(shownPluginId)
+              : null}
+          </div>
         </div>
-      </ResourceCollectionViewport>
+      </div>
     );
   }
 
   return (
     <>
-      {mode === "browse" ? (
-        <div className="flex h-full min-h-0 flex-col">{content}</div>
-      ) : (
-        <ResourceCollectionPage
-          id="plugins-collection"
-          description={PLUGINS_INSTALLED_DESCRIPTION}
-          bandClassName={TOOLS_PAGE_BAND_CLASSES}
-        >
-          {content}
-        </ResourceCollectionPage>
-      )}
+      <div className="flex h-full min-h-0 flex-col">{content}</div>
       <AddPluginDialog
         open={addDialog.open}
         initial={addDialog.initial}

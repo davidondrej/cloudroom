@@ -37,11 +37,11 @@ room-cli thread list [--include-archived]
 room-cli thread wait --children
 room-cli thread output CHILD_ID [--all | --input TOOL_INPUT_ID [--offset N]]
 room-cli thread log CHILD_ID
-room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message-file PATH
+room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] [--request-id ID] TEXT|--message-file PATH
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one.";
+const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one. `tell` prints a request_id: to send the same message again after an unclear answer, rerun the exact command with --request-id ID, and it is delivered once.";
 /// `room-cli thread` commands only the app on the user's computer has.
 const LOCAL_ONLY: [&str; 26] = [
     "count",
@@ -96,6 +96,10 @@ const OTHER_NOTES: [&str; 3] = [
     "Could not confirm its running turn got it. It may have, so don't send it again: it could arrive twice.",
     "Queued. It isn't your subagent, so Cloudroom won't tell you when it finishes.",
 ];
+/// A message sent again under its request ID (`tell --request-id`, or the website's own retry). `repeat` marks it,
+/// so the website keeps this note (web/lib/mobile.ts).
+const REPEAT_NOTE: &str =
+    "Not sent again: this request ID's message was already taken. The state is that message's.";
 const PAUSED_NOTE: &str = "Queued, paused by a Stop. It sends when that thread is resumed.";
 const FORK_NOTE: &str = "Forked this thread at its last finished turn: a new thread with this conversation and your code (commits and uncommitted changes, without gitignored files or dependencies; nested Git repos arrive empty or without history), on its own branch where the project uses Git. It runs on its own and doesn't report back to you; it doesn't see your later edits.";
 const TOP_NOTE: &str = "Started as a top-level thread in its own sandbox, from the project's Git repo (push your work first) and .env files. It is not your child: it doesn't report back, and you can't tell, stop or read it. It shows in the user's sidebar within a minute.";
@@ -238,6 +242,9 @@ pub struct Tell {
     /// `--mode queue`: wait for a running turn to end instead of joining it.
     #[serde(default)]
     mode: Option<String>,
+    /// `--request-id`: the ID an earlier tell printed, so the same message sent again is delivered once.
+    #[serde(default)]
+    request_id: Option<String>,
 }
 
 fn valid(title: &str) -> bool {
@@ -1086,6 +1093,7 @@ async fn tell(
             "Use a message of 1-262144 bytes",
         ));
     }
+    let key = tell_key(input.request_id)?;
     let to_parent = id == "parent";
     let queue = input.mode.as_deref() == Some("queue");
     let id = if to_parent {
@@ -1109,7 +1117,10 @@ async fn tell(
     };
     if relay::thread_id(&id) || id == "parent" {
         let text = Some(input.text.as_str());
-        return relay::command(&m, &sender, &id, "tell", text, to_parent, queue).await;
+        let relayed = format!("{key}{}", if queue { relay::QUEUE } else { "" });
+        return relay::command(&m, &sender, &id, "tell", text, to_parent, Some(&relayed))
+            .await
+            .map_err(|failure| resend(failure, &key));
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
     let text = if under {
@@ -1122,8 +1133,7 @@ async fn tell(
     if under {
         prompt["from_parent"] = json!(true);
     }
-    let request =
-        random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let request = format!("tell_{key}");
     if under {
         revive(&m, &id, &request, Some(&sender));
     }
@@ -1132,8 +1142,41 @@ async fn tell(
     } else {
         "that thread"
     };
-    (deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await)
-        .map_err(|failure| not_running(failure, told))
+    let mut answer = (deliver(&m, &id, &request, prompt, under, Some(&sender), queue).await)
+        .map_err(|failure| resend(not_running(failure, told), &key))?;
+    answer["request_id"] = json!(key);
+    Ok(answer)
+}
+
+/// A tell's request ID: the sender's (`--request-id`, one an earlier tell printed) or a new one. Short and without
+/// underscores: the relay adds its own `relay_`, `_queue` and `_steer` to it, within the 58 bytes a Core takes.
+fn tell_key(key: Option<String>) -> Result<String, Failure> {
+    let key = match key {
+        Some(key) => key,
+        None => random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?,
+    };
+    if key.is_empty()
+        || key.len() > 40
+        || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "--request-id takes the request_id an earlier tell printed: 1-40 letters, digits or hyphens",
+        ));
+    }
+    Ok(key)
+}
+
+/// A tell that failed where it may still arrive, or may go through later (a 429 or 5xx), says how to send it again
+/// without a second copy (F#6799, F#5502). A refusal stays as it is, so nobody retries it in vain.
+fn resend((status, Json(mut body)): Failure, key: &str) -> Failure {
+    let unsure = status.is_server_error() || status == StatusCode::TOO_MANY_REQUESTS;
+    if let Some(error) = body["error"].as_str().filter(|_| unsure) {
+        body["error"] = json!(format!(
+            "{error} To send it again safely, rerun this exact command with --request-id {key}: a message with the same ID is delivered once."
+        ));
+    }
+    (status, Json(body))
 }
 
 /// A tell to a thread here whose agent isn't running (lost, say, in a Core restart, and not started again) says so,
@@ -1193,11 +1236,17 @@ pub(super) async fn deliver(
     let notes = if child { CHILD_NOTES } else { OTHER_NOTES };
     let steer_id = format!("{request}_steer");
     if let Some(done) = m.receipt(id, request) {
-        return Ok(Json(json!({"id":id,"state":done.state})));
+        return Ok(Json(
+            json!({"id":id,"state":done.state,"note":REPEAT_NOTE,"repeat":true}),
+        ));
     }
     // A steer that failed falls back to the queue, even on a retry.
     let steered = match m.receipt(id, &steer_id) {
-        Some(s) if s.state != "failed" => return Ok(Json(json!({"id":id,"state":s.state}))),
+        Some(s) if s.state != "failed" => {
+            return Ok(Json(
+                json!({"id":id,"state":s.state,"note":REPEAT_NOTE,"repeat":true}),
+            ));
+        }
         Some(_) => None,
         None if queue => None,
         None => steer(m, id, &steer_id, input.clone(), sender).await,
@@ -1298,7 +1347,7 @@ async fn stop_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread stop")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "stop", None, false, false).await;
+        return relay::command(&m, &parent, &id, "stop", None, false, None).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     let key = || random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()));
@@ -1319,7 +1368,7 @@ async fn archive_child(
 ) -> Result<Json<Value>, Failure> {
     let parent = caller(&m, peer, "thread archive")?;
     if relay::thread_id(&id) {
-        return relay::command(&m, &parent, &id, "archive", None, false, false).await;
+        return relay::command(&m, &parent, &id, "archive", None, false, None).await;
     }
     m.own_child(&parent, &id).map_err(session_failure)?;
     // A child that already ended has nothing to stop. Stop it first, so it starts no new children.
@@ -1709,7 +1758,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             // empty list read as "the project has no open threads".
             if let Some(word) = unknown_word(rest, &[], &["--include-archived"]) {
                 eprintln!(
-                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived. In a loop, past runs are in the Loop notes in your prompt."
+                    "Unknown option {word}. Cloud `thread list` shows only this thread's subagents, not the project's threads, and takes only --include-archived. In a loop, past runs are in the Loop notes in your prompt and `room-cli loop runs ID`."
                 );
                 return Ok(2);
             }
@@ -1902,7 +1951,8 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             Err(code) => return Ok(code),
         },
         "tell" => {
-            let Ok(ids) = own(&["--prompt", "--message-file", "--mode"], &["--parent"]) else {
+            let values = ["--prompt", "--message-file", "--mode", "--request-id"];
+            let Ok(ids) = own(&values, &["--parent"]) else {
                 return Ok(2);
             };
             // The Local CLI's modes and their long names (#1517). Steer and auto are what Core always did, so only
@@ -1933,11 +1983,15 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                 _ => return usage(),
             };
             let path = format!("/children/{id}/messages");
-            let body = if queue {
+            let mut body = if queue {
                 json!({"text":text,"mode":"queue"})
             } else {
                 json!({"text":text})
             };
+            // The ID an earlier tell printed: the same message sent again is delivered once.
+            if let Some(key) = flag(rest, "--request-id") {
+                body["request_id"] = json!(key);
+            }
             call("POST", &path, Some(body)).await?
         }
         "update" => {

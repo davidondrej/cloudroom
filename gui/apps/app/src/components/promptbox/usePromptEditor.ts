@@ -25,6 +25,7 @@ import {
 } from "./editor/prompt-decoration-extension";
 import { promptEditorExtensions } from "./editor/prompt-editor-extensions";
 import {
+  pillSpacer,
   promptEditorClipboardTextFromSlice,
   promptEditorContentFromValue,
   promptEditorInlineContentFromValue,
@@ -400,12 +401,25 @@ export function usePromptEditor(
           const current = doc.ref.current;
           if (paste.value.text.length === 0 || !current) return true;
 
+          const [onlyMention] = paste.value.mentions;
+          const trailingSpace =
+            paste.kind === "inline" &&
+            paste.value.mentions.length === 1 &&
+            onlyMention !== undefined &&
+            onlyMention.start === 0 &&
+            onlyMention.end === paste.value.text.length
+              ? pillSpacer(view.state.doc, view.state.selection.to)
+              : "";
+          const pasteValue = trailingSpace
+            ? { ...paste.value, text: `${paste.value.text}${trailingSpace}` }
+            : paste.value;
+
           const content =
             paste.kind === "quote"
-              ? (promptEditorContentFromValue(paste.value, {
+              ? (promptEditorContentFromValue(pasteValue, {
                   richTextMarkdown: richText,
                 }).content ?? [])
-              : promptEditorInlineContentFromValue(paste.value);
+              : promptEditorInlineContentFromValue(pasteValue);
           current
             .chain()
             .focus()

@@ -49,8 +49,9 @@ export const DEFAULTS: Config = {
   projectIds: null,
   watchLoops: false,
   learning: true,
-  icon: "Target",
-  color: "",
+  // The Director's own star-and-chevrons icon, in violet (David, 2026-11-27).
+  icon: "Rank",
+  color: "#a78bfa",
 };
 
 const stateSchema = z.object({
@@ -108,7 +109,17 @@ function flag(args: string[], name: string): string | undefined {
 
 export default async function directorPlugin(room: BbPluginApi): Promise<void> {
   const kv = room.storage.kv;
-  let config = configSchema.catch(DEFAULTS).parse({ ...DEFAULTS, ...((await kv.get<object>("config")) ?? {}) });
+  const stored: Partial<Config> = (await kv.get<object>("config")) ?? {};
+  // Once: a Director still on the old default look (Target, the app's color) moves to the new default.
+  if ((await kv.get<number>("look")) !== 2) {
+    if (stored.icon === "Target" && stored.color === "") {
+      delete stored.icon;
+      delete stored.color;
+      await kv.set("config", stored);
+    }
+    await kv.set("look", 2);
+  }
+  let config = configSchema.catch(DEFAULTS).parse({ ...DEFAULTS, ...stored });
   let state: State = stateSchema
     .catch({ threadId: null, role: null, seen: {}, nextAt: Date.now() + FIRST_PING_MS, last: null, subject: null })
     .parse(await kv.get<unknown>("state"));
@@ -356,7 +367,7 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
     loops: (value) => ({ watchLoops: onOff(value) as boolean }),
     learning: (value) => ({ learning: onOff(value) as boolean }),
     icon: (icon) => ({ icon }),
-    color: (value) => ({ color: orDefault(value, "") }),
+    color: (value) => ({ color: orDefault(value, DEFAULTS.color) }),
     role: (value) => ({ role: orDefault(value, DEFAULT_ROLE) }),
     prompt: (value) => ({ prompt: orDefault(value, DEFAULT_PING) }),
   };

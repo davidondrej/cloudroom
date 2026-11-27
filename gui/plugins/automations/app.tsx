@@ -364,7 +364,7 @@ function localRun(run: AutomationRunResponse): LoopDialogRun[] {
   const line = (run.error ?? run.output)?.trim().split("\n")[0];
   return [
     {
-      id: run.id,
+      id: `run:${run.id}`,
       at: run.startedAt,
       status: run.status === "succeeded" ? "done" : run.status,
       text:
@@ -377,6 +377,8 @@ function localRun(run: AutomationRunResponse): LoopDialogRun[] {
               ? "Script ran"
               : "Agent run finished"),
       threadId: run.runMode === "agent" ? run.threadId : null,
+      output: run.runMode === "script" ? run.output : null,
+      error: run.error,
     },
   ];
 }
@@ -794,6 +796,23 @@ function LocalLoopDialog({
     () => (readable === null ? null : localLoop(readable)),
     [readable],
   );
+  const dialogRuns = useMemo(() => {
+    const byId = new Map((ownRuns ?? []).map((run) => [run.id, run]));
+    if (context.runs?.length) {
+      return context.runs.map((item) => {
+        if (item.threadId !== null || !item.id.startsWith("run:")) return item;
+        const raw = byId.get(item.id.slice(4));
+        if (!raw) return item;
+        return {
+          ...item,
+          text: raw.error ?? item.text,
+          output: raw.output,
+          error: raw.error,
+        };
+      });
+    }
+    return ownRuns ? ownRuns.flatMap(localRun) : context.runs;
+  }, [context.runs, ownRuns]);
 
   useEffect(() => stopRunThread, []);
 
@@ -943,11 +962,7 @@ function LocalLoopDialog({
         loop={loop}
         context={{
           ...context,
-          runs: context.runs?.length
-            ? context.runs
-            : ownRuns
-              ? ownRuns.flatMap(localRun)
-              : context.runs,
+          runs: dialogRuns,
         }}
         priority={priority}
         onPriorityChange={onPriorityChange}

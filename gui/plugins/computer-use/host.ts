@@ -26,6 +26,7 @@ import {
   type ExperimentalHostRpcContext,
   type ExperimentalHostWorkerLease,
 } from "@get-bb/plugin-sdk/host";
+import { z } from "zod";
 import { hostContract, type AppIdentity, type HostStatus } from "./contract.js";
 import { DRIVER, SESSION_TOOLS, assetFor } from "./driver.js";
 
@@ -388,6 +389,211 @@ async function reapOrphans() {
   }
 }
 
+type DriverCallResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+};
+
+// Cua Driver's exact bring_to_front checks WindowServer visibility and AX focus, not macOS Space
+// membership (#1625), and marks a call unverified whenever any same-app layer-0 window sits above
+// the target, even an untitled 41 px Chrome helper (#1506). Reconcile exact bring_to_front results
+// with an immediate list_windows read inside the same host call:
+// - Never report activation when list_windows shows the target on another Space (on_current_space:
+//   false) or off screen; return a recoverable off-Space or unverified failure instead.
+// - When unverified only because untitled <100 px layer-0 helpers of the same app sit above a
+//   focused, on-screen target on the current Space, report it as activated.
+// Like the driver's own verified result, this is a snapshot: another app's window may sit above
+// the target, and focus or the active Space can change after the check.
+const exactBringToFrontSchema = z
+  .object({
+    status: z.string().optional(),
+    code: z.enum([
+      "bring_to_front_exact_window_verified",
+      "bring_to_front_exact_window_unverified",
+    ]),
+    pid: z.number(),
+    window_id: z.number(),
+    exact_window_effect: z.record(z.string(), z.unknown()).optional(),
+    observed: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+const focusedWindowSchema = z
+  .object({
+    code: z.literal("bring_to_front_exact_window_unverified"),
+    pid: z.number(),
+    window_id: z.number(),
+    process_activated: z.literal(true),
+    exact_window_effect: z
+      .object({
+        focused: z.literal(true),
+        target_visible_ordinary: z.literal(true),
+      })
+      .passthrough(),
+    observed: z
+      .object({
+        front_process_matches_target: z.literal(true),
+        focused_window_id: z.number(),
+        process_front_window_on_display: z.number(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+const listedWindowsSchema = z.object({
+  current_space_id: z.number().nullable().optional(),
+  windows: z.array(
+    z.object({
+      window_id: z.number(),
+      pid: z.number(),
+      title: z.string(),
+      layer: z.number().optional(),
+      z_index: z.number().nullable().optional(),
+      is_on_screen: z.boolean().optional(),
+      on_current_space: z.boolean().nullable().optional(),
+      current_space_id: z.number().nullable().optional(),
+      space_ids: z.array(z.number()).nullable().optional(),
+      bounds: z.object({ width: z.number(), height: z.number() }),
+    }),
+  ),
+});
+
+function clearOnScreenEffects(effect: Record<string, unknown> | undefined) {
+  return {
+    target_visible_ordinary: false,
+    ...(effect && "front_in_process_on_display" in effect
+      ? { front_in_process_on_display: false }
+      : {}),
+    ...(effect && "frontmost_ordinary" in effect
+      ? { frontmost_ordinary: false }
+      : {}),
+    ...(effect && "unobstructed" in effect ? { unobstructed: false } : {}),
+  };
+}
+
+export async function reconcileBringToFront(
+  tool: string,
+  input: Record<string, unknown>,
+  result: DriverCallResult,
+  listWindows: (pid: number) => Promise<DriverCallResult>,
+): Promise<DriverCallResult> {
+  if (tool !== "bring_to_front" || typeof input.window_id !== "number") {
+    return result;
+  }
+  try {
+    const parsed = exactBringToFrontSchema.parse(JSON.parse(result.stdout));
+    if (parsed.pid !== input.pid || parsed.window_id !== input.window_id) {
+      return result;
+    }
+    const verified = parsed.code === "bring_to_front_exact_window_verified";
+    if (verified !== (result.exitCode === 0)) return result;
+    const listed = await listWindows(parsed.pid);
+    if (listed.exitCode !== 0) return result;
+    const { windows, current_space_id } = listedWindowsSchema.parse(
+      JSON.parse(listed.stdout),
+    );
+    const target = windows.find(
+      (w) => w.window_id === parsed.window_id && w.pid === parsed.pid,
+    );
+    if (target?.on_current_space === false) {
+      const offSpace = {
+        ...parsed,
+        status: parsed.status === "failed" ? "failed" : "partial",
+        activated: false,
+        code: "bring_to_front_window_off_space",
+        exact_window_effect: {
+          ...parsed.exact_window_effect,
+          ...(target.is_on_screen === false
+            ? clearOnScreenEffects(parsed.exact_window_effect)
+            : {}),
+          verified: false,
+          on_current_space: false,
+        },
+        observed: {
+          ...parsed.observed,
+          on_current_space: false,
+          ...(target.is_on_screen !== undefined
+            ? { is_on_screen: target.is_on_screen }
+            : {}),
+          current_space_id: target.current_space_id ?? current_space_id ?? null,
+          space_ids: target.space_ids ?? null,
+        },
+        message:
+          "bring_to_front: target window is still on another macOS Space (on_current_space=false), so foreground activation is not verified and foreground input may fail or end incomplete. Stay in the background, use browser-harness for Chromium browsers, or ask the user to move the window to the current Space.",
+      };
+      return {
+        ...result,
+        exitCode: 1,
+        stdout: `${JSON.stringify(offSpace, null, 2)}\n`,
+      };
+    }
+    if (verified) {
+      if (target?.is_on_screen !== false) return result;
+      const offScreen = {
+        ...parsed,
+        status: "partial",
+        activated: false,
+        code: "bring_to_front_exact_window_unverified",
+        exact_window_effect: {
+          ...parsed.exact_window_effect,
+          ...clearOnScreenEffects(parsed.exact_window_effect),
+          verified: false,
+        },
+        observed: { ...parsed.observed, is_on_screen: false },
+        message:
+          "bring_to_front: target window is not on screen immediately after activation, so foreground activation is not verified.",
+      };
+      return {
+        ...result,
+        exitCode: 1,
+        stdout: `${JSON.stringify(offScreen, null, 2)}\n`,
+      };
+    }
+    const focused = focusedWindowSchema.parse(parsed);
+    if (focused.observed.focused_window_id !== input.window_id) return result;
+    if (
+      target?.is_on_screen !== true ||
+      (target.layer ?? 0) !== 0 ||
+      typeof target.z_index !== "number"
+    ) {
+      return result;
+    }
+    const targetZ = target.z_index;
+    const above = windows.filter(
+      (w) =>
+        w.pid === focused.pid &&
+        w.is_on_screen !== false &&
+        (w.layer ?? 0) === 0 &&
+        typeof w.z_index === "number" &&
+        w.z_index > targetZ,
+    );
+    const helper = (w: (typeof windows)[number]) =>
+      !w.title &&
+      Math.min(w.bounds.width, w.bounds.height) < 100 &&
+      w.on_current_space !== false;
+    if (
+      !above.some(
+        (w) => w.window_id === focused.observed.process_front_window_on_display,
+      ) ||
+      !above.every(helper)
+    ) {
+      return result;
+    }
+    const accepted = {
+      ...focused,
+      status: "activated",
+      activated: true,
+      code: "bring_to_front_exact_window_focused",
+    };
+    return {
+      ...result,
+      exitCode: 0,
+      stdout: `${JSON.stringify(accepted, null, 2)}\n`,
+    };
+  } catch {
+    return result;
+  }
+}
+
 export function createHostEntry() {
   let daemon: ChildProcess | null = null;
   let socket: string | null = null;
@@ -571,18 +777,39 @@ export function createHostEntry() {
           await withBundleId(args).catch(() => {});
           await openWithUserHome(args).catch(() => {});
         }
-        const result = await run(binary(), ["call", "--socket", path, input.tool, JSON.stringify(args)], {
-          env: driverEnv(home()),
-          timeout: 120_000,
-          maxBuffer: 32 * 1024 * 1024,
-          signal: context.signal,
-        }).then(
-          ({ stdout, stderr }) => ({ exitCode: 0, stdout, stderr }),
-          (error: { code?: unknown; stdout?: string; stderr?: string; message: string }) => ({
-            exitCode: typeof error.code === "number" ? error.code : 1,
-            stdout: error.stdout ?? "",
-            stderr: error.stderr || error.message,
-          }),
+        const runTool = (
+          tool: string,
+          toolArgs: Record<string, unknown>,
+          timeout: number,
+        ) =>
+          run(
+            binary(),
+            ["call", "--socket", path, tool, JSON.stringify(toolArgs)],
+            {
+              env: driverEnv(home()),
+              timeout,
+              maxBuffer: 32 * 1024 * 1024,
+              signal: context.signal,
+            },
+          ).then(
+            ({ stdout, stderr }) => ({ exitCode: 0, stdout, stderr }),
+            (error: {
+              code?: unknown;
+              stdout?: string;
+              stderr?: string;
+              message: string;
+            }) => ({
+              exitCode: typeof error.code === "number" ? error.code : 1,
+              stdout: error.stdout ?? "",
+              stderr: error.stderr || error.message,
+            }),
+          );
+        const raw = await runTool(input.tool, args, 120_000);
+        const result = await reconcileBringToFront(
+          input.tool,
+          args,
+          raw,
+          (pid) => runTool("list_windows", { pid }, 30_000),
         );
         lastUsed = Date.now();
         const exits = driverExits;

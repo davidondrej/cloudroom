@@ -259,6 +259,15 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
   });
+  app.post("/api/v1/cloudroom/affiliate", async (context) => {
+    try {
+      return context.json(await cloudroom(deps).sandboxes.affiliateLink());
+    } catch (error) {
+      if (!(error instanceof CloudroomError)) throw error;
+      const status = error.status ?? 503;
+      throw new ApiError(status as ConstructorParameters<typeof ApiError>[0], error.code ?? "affiliate_request", error.message);
+    }
+  });
   // The cards at the top right (docs/scopes/corner-cards.md): claims a showing, or saves the user's answer.
   app.post("/api/v1/cloudroom/corner", async (context) => {
     const input = z.object({ card: z.enum(CORNER_CARDS), key: z.string().max(80), event: z.enum(["shown", ...CORNER_ANSWERS]), variant: z.string().regex(/^[a-z0-9_-]{1,24}$/).optional() })

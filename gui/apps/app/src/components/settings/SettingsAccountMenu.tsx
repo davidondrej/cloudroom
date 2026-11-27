@@ -250,8 +250,8 @@ export function SettingsAccountMenu() {
             }
             onSelect={() => openUrlInExternalBrowser(BILLING_URL)}
           />
-          {/* Paid plans include a 1:1 call (docs/scopes/calls.md#one-booking-page). */}
-          {status?.plan && status.plan !== "free" && (
+          {/* Paid plans and $30+ credit buyers include a 1:1 call (docs/scopes/calls.md#one-booking-page). */}
+          {((status?.plan && status.plan !== "free") || status?.planUsage?.callEligible) && (
             <MenuItem
               icon="Calendar"
               label="Book a 1:1 call"

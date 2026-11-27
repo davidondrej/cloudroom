@@ -601,9 +601,15 @@ function PluginSettingsPageSkeleton() {
 export function PluginSettingsPage({
   children,
   pluginId,
+  headerActions,
+  detailSections,
 }: {
   children?: ReactNode;
   pluginId: string;
+  /** Drawn next to the on/off switch. */
+  headerActions?: ReactNode;
+  /** Release, capabilities and the rest. When given, they replace the link to the plugin page. */
+  detailSections?: ReactNode;
 }) {
   const listQuery = usePluginList({ enabled: true });
   const plugin =
@@ -631,7 +637,12 @@ export function PluginSettingsPage({
     );
   }
   return (
-    <PluginSettingsContent key={plugin.id} plugin={plugin}>
+    <PluginSettingsContent
+      key={plugin.id}
+      plugin={plugin}
+      headerActions={headerActions}
+      detailSections={detailSections}
+    >
       {children}
     </PluginSettingsContent>
   );
@@ -640,9 +651,13 @@ export function PluginSettingsPage({
 function PluginSettingsContent({
   children,
   plugin,
+  headerActions,
+  detailSections,
 }: {
   children?: ReactNode;
   plugin: PluginListItem;
+  headerActions?: ReactNode;
+  detailSections?: ReactNode;
 }) {
   const queryClient = useQueryClient();
   const { settingsSections } = usePluginSlots();
@@ -668,6 +683,7 @@ function PluginSettingsContent({
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
   if (
+    detailSections === undefined &&
     plugin.id === ACCOUNTS_PLUGIN_ID &&
     plugin.enabled &&
     PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status)
@@ -700,12 +716,21 @@ function PluginSettingsContent({
             ) : null}
           </div>
         </div>
-        <Switch
-          checked={enabled}
-          disabled={toggle.isPending}
-          onCheckedChange={(next) => toggle.mutate(next)}
-          aria-label={`${enabled ? "Disable" : "Enable"} ${plugin.id}`}
-        />
+        <div className="flex shrink-0 items-center gap-2">
+          {plugin.alwaysEnabled ? (
+            <span className="rounded-full bg-surface-recessed px-2.5 py-1 text-xs font-medium text-muted-foreground">
+              Built in · Always on
+            </span>
+          ) : (
+            <Switch
+              checked={enabled}
+              disabled={toggle.isPending}
+              onCheckedChange={(next) => toggle.mutate(next)}
+              aria-label={`${enabled ? "Disable" : "Enable"} ${plugin.id}`}
+            />
+          )}
+          {headerActions}
+        </div>
       </header>
       <ResourceDetailStack className="mt-6">
         {enabled && plugin.enabled ? (
@@ -729,25 +754,27 @@ function PluginSettingsContent({
           </ResourceDetailConfigurationSection>
         ) : null}
         {enabled && plugin.enabled ? children : null}
-        <ResourceDetailOverviewSection label="Plugin details">
-          <p className="max-w-none text-sm leading-relaxed text-muted-foreground">
-            Release, capabilities, and health live on{" "}
-            <Link
-              to={getPluginDetailRoutePath({
-                pluginId: plugin.id,
-                view: "installed",
-              })}
-              className="inline-flex items-center gap-0.5 rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              its plugin page
-              <Icon
-                name="ChevronRight"
-                className="size-3.5 no-underline"
-                aria-hidden
-              />
-            </Link>
-          </p>
-        </ResourceDetailOverviewSection>
+        {detailSections ?? (
+          <ResourceDetailOverviewSection label="Plugin details">
+            <p className="max-w-none text-sm leading-relaxed text-muted-foreground">
+              Release, capabilities, and health live on{" "}
+              <Link
+                to={getPluginDetailRoutePath({
+                  pluginId: plugin.id,
+                  view: "installed",
+                })}
+                className="inline-flex items-center gap-0.5 rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                its plugin page
+                <Icon
+                  name="ChevronRight"
+                  className="size-3.5 no-underline"
+                  aria-hidden
+                />
+              </Link>
+            </p>
+          </ResourceDetailOverviewSection>
+        )}
       </ResourceDetailStack>
     </div>
   );

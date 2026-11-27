@@ -44,6 +44,8 @@ export interface ResolveInjectedSkillSourcesArgs {
   projectSkillSources?: readonly ProjectInjectedSkillSource[];
   sharedSkillSources?: readonly SharedInjectedSkillSource[];
   skillTreeRegistry: SkillTreeRegistry;
+  /** Skip recursive tree reads + SHA-256 hashing when only name/description metadata is needed. */
+  includeTreeHash?: boolean;
 }
 
 interface PluginSkillRoot {
@@ -147,6 +149,7 @@ interface SkillRootScanArgs extends SkillTreeCandidateSource {
   logger: ServerLogger;
   skillTreeRegistry: SkillTreeRegistry;
   skillsRootPath: string;
+  includeTreeHash?: boolean;
 }
 
 interface SkillCandidateArgs extends SkillTreeCandidateSource {
@@ -154,6 +157,7 @@ interface SkillCandidateArgs extends SkillTreeCandidateSource {
   directoryName: string;
   logger: ServerLogger;
   skillTreeRegistry: SkillTreeRegistry;
+  includeTreeHash?: boolean;
 }
 
 interface InvalidSkillLogArgs extends SkillCandidateSource {
@@ -294,6 +298,51 @@ function toSkillFilePath(candidatePath: string): string {
   return path.join(candidatePath, SKILL_FILE_NAME);
 }
 
+interface CachedSkillFrontmatter {
+  mtimeMs: number;
+  size: number;
+  name: string;
+  description: string;
+}
+
+const SKILL_FRONTMATTER_CACHE_MAX_ENTRIES = 512;
+const skillFrontmatterCache = new Map<string, CachedSkillFrontmatter>();
+
+function readCachedSkillFrontmatter(
+  skillFilePath: string,
+  stat: fs.Stats,
+): { name: string; description: string } | null {
+  const cached = skillFrontmatterCache.get(skillFilePath);
+  if (
+    cached !== undefined &&
+    cached.mtimeMs === stat.mtimeMs &&
+    cached.size === stat.size
+  ) {
+    return { name: cached.name, description: cached.description };
+  }
+  return null;
+}
+
+function writeCachedSkillFrontmatter(
+  skillFilePath: string,
+  stat: fs.Stats,
+  data: { name: string; description: string },
+): void {
+  if (
+    skillFrontmatterCache.size >= SKILL_FRONTMATTER_CACHE_MAX_ENTRIES &&
+    !skillFrontmatterCache.has(skillFilePath)
+  ) {
+    const oldestKey = skillFrontmatterCache.keys().next().value;
+    if (oldestKey !== undefined) skillFrontmatterCache.delete(oldestKey);
+  }
+  skillFrontmatterCache.set(skillFilePath, {
+    mtimeMs: stat.mtimeMs,
+    size: stat.size,
+    name: data.name,
+    description: data.description,
+  });
+}
+
 function readSkillCandidate(
   args: SkillCandidateArgs,
 ): HostDaemonInjectedSkillSource | null {
@@ -327,44 +376,63 @@ function readSkillCandidate(
     return null;
   }
 
-  const content = fs.readFileSync(skillFilePath, "utf8");
-  if (!hasSupportedFrontmatterDelimiter(content)) {
-    logInvalidSkill({
-      ...args,
-      reason: "SKILL.md frontmatter must start with a plain --- delimiter",
-    });
-    return null;
+  let validated = readCachedSkillFrontmatter(skillFilePath, skillFileStat);
+  if (validated === null) {
+    const content = fs.readFileSync(skillFilePath, "utf8");
+    if (!hasSupportedFrontmatterDelimiter(content)) {
+      logInvalidSkill({
+        ...args,
+        reason: "SKILL.md frontmatter must start with a plain --- delimiter",
+      });
+      return null;
+    }
+
+    let parsed;
+    try {
+      parsed = parseFrontmatter(content);
+    } catch (error) {
+      logInvalidSkill({
+        ...args,
+        reason:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Invalid SKILL.md frontmatter",
+      });
+      return null;
+    }
+
+    const frontmatter = skillFrontmatterSchema.safeParse(parsed);
+    if (!frontmatter.success) {
+      logInvalidSkill({
+        ...args,
+        reason: compactZodIssues(frontmatter.error.issues),
+      });
+      return null;
+    }
+    validated = {
+      name: frontmatter.data.name,
+      description: frontmatter.data.description,
+    };
+    writeCachedSkillFrontmatter(skillFilePath, skillFileStat, validated);
   }
 
-  let parsed;
-  try {
-    parsed = parseFrontmatter(content);
-  } catch (error) {
-    logInvalidSkill({
-      ...args,
-      reason:
-        error instanceof Error && error.message.trim().length > 0
-          ? error.message
-          : "Invalid SKILL.md frontmatter",
-    });
-    return null;
-  }
-
-  const frontmatter = skillFrontmatterSchema.safeParse(parsed);
-  if (!frontmatter.success) {
-    logInvalidSkill({
-      ...args,
-      reason: compactZodIssues(frontmatter.error.issues),
-    });
-    return null;
-  }
-
-  if (frontmatter.data.name !== args.directoryName) {
+  if (validated.name !== args.directoryName) {
     logInvalidSkill({
       ...args,
       reason: "Frontmatter name must match the skill directory name",
     });
     return null;
+  }
+
+  if (args.includeTreeHash === false) {
+    return {
+      kind: "tree",
+      sourceType: args.sourceType,
+      name: validated.name,
+      description: validated.description,
+      treeHash: "",
+      entryPath: SKILL_FILE_NAME,
+    };
   }
 
   let manifest: SkillTreeManifest;
@@ -382,8 +450,8 @@ function readSkillCandidate(
   return {
     kind: "tree",
     sourceType: args.sourceType,
-    name: frontmatter.data.name,
-    description: frontmatter.data.description,
+    name: validated.name,
+    description: validated.description,
     treeHash: manifest.treeHash,
     entryPath: SKILL_FILE_NAME,
   };
@@ -518,6 +586,9 @@ function readSkillsRoot(
       logger: args.logger,
       skillTreeRegistry: args.skillTreeRegistry,
       sourceType: args.sourceType,
+      ...(args.includeTreeHash !== undefined
+        ? { includeTreeHash: args.includeTreeHash }
+        : {}),
     });
     if (source) {
       sources.push(source);
@@ -618,7 +689,9 @@ export function resolveSkillCatalogEntries(
   logger: ServerLogger,
   args: ResolveInjectedSkillSourcesArgs,
 ): ResolvedSkillCatalogEntry[] {
-  const { skillTreeRegistry } = args;
+  const { skillTreeRegistry, includeTreeHash } = args;
+  const treeHashOption =
+    includeTreeHash !== undefined ? { includeTreeHash } : {};
   const builtinSources = args.builtinSkillsRootPath
     ? readSharedBuiltinSkillNames(args.builtinSkillsRootPath).map((name) => {
         const source = readSkillCandidate({
@@ -627,6 +700,7 @@ export function resolveSkillCatalogEntries(
           logger,
           skillTreeRegistry,
           sourceType: "builtin",
+          ...treeHashOption,
         });
         if (!source) throw new Error(`Invalid built-in skill: ${name}`);
         return source;
@@ -645,6 +719,7 @@ export function resolveSkillCatalogEntries(
     skillTreeRegistry,
     skillsRootPath: args.userSkillsRootPath,
     sourceType: "data-dir",
+    ...treeHashOption,
   });
   const inheritedSourceGroups = (args.additionalSkillsRootPaths ?? []).map(
     (skillsRootPath) =>
@@ -653,6 +728,7 @@ export function resolveSkillCatalogEntries(
         skillTreeRegistry,
         skillsRootPath,
         sourceType: "data-dir",
+        ...treeHashOption,
       }),
   );
 
@@ -683,6 +759,7 @@ export function resolveSkillCatalogEntries(
         skillTreeRegistry,
         skillsRootPath: rootPath,
         sourceType: "data-dir",
+        ...treeHashOption,
       }).filter(
         (source) =>
           !args.pluginSkillSelections?.has(pluginId) ||

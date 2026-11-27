@@ -99,6 +99,7 @@ struct State {
     login: Option<Login>,
     status: Status,
     checked: Option<Instant>,
+    switched: bool,
 }
 pub(crate) struct ClaudeLogin(Mutex<State>);
 impl Default for ClaudeLogin {
@@ -107,6 +108,7 @@ impl Default for ClaudeLogin {
             login: None,
             status: Status::new("missing", None),
             checked: None,
+            switched: false,
         }))
     }
 }
@@ -116,6 +118,7 @@ impl ClaudeLogin {
             let done = *login.done.borrow();
             if let Some(success) = done {
                 state.status = if success && claude::auth_ready(config).await.unwrap_or(false) {
+                    state.switched = true;
                     Status::new("connected", None)
                 } else {
                     Status::new("error", Some("Claude sign-in did not complete. Try again."))
@@ -149,6 +152,9 @@ impl ClaudeLogin {
     pub async fn status(&self, config: &Config) -> Status {
         Self::inspect(&mut *self.0.lock().await, config).await
     }
+    pub async fn take_switched(&self) -> bool {
+        std::mem::take(&mut self.0.lock().await.switched)
+    }
     pub async fn action(
         &self,
         config: &Config,
@@ -167,6 +173,7 @@ impl ClaudeLogin {
             if !saved {
                 return Status::new("error", Some("Could not save the Claude token."));
             }
+            state.switched = true;
             return Self::inspect(&mut state, config).await;
         }
         if action == "key" {
@@ -178,6 +185,7 @@ impl ClaudeLogin {
             if let Err(message) = save_key(config, &key).await {
                 return Status::new("error", Some(message));
             }
+            state.switched = true;
             return Self::inspect(&mut state, config).await;
         }
         if action == "cancel" {

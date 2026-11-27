@@ -662,6 +662,10 @@ async function handlePrompt(message) {
   } else if (text.includes("hang")) {
     // Stay pending until the client sends session/cancel.
     return;
+  } else if (text.includes("quota-reply")) {
+    // Antigravity's quota notice: a plain reply, split mid-heading, then end_turn.
+    notifyUpdate(messageChunk("\n⚠ Individual quota"));
+    notifyUpdate(messageChunk(" reached. Resets in 24m24s."));
   } else if (text.includes("no-reply")) {
     // Ends the turn without output, as Kimi does when its model request fails.
   } else if (text.includes("die")) {

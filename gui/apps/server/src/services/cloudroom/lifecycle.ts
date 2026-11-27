@@ -9,6 +9,7 @@ import { CloudroomClient, CloudroomConnectionError, CloudroomError } from "./cli
 import type { CloudChildren } from "./children.js";
 import { appendStartProgress, CLOUD_HARNESSES, HARNESS_NAMES, isCloudProvider, projectInitialPrompt, type CloudProvider } from "./events.js";
 import { cloudForkPoint, FORK_HARNESSES, localForkPoint } from "./fork.js";
+import { hedge } from "./hedge.js";
 import { copyKey, localProjectNote, planProjectCopy, workspaceId, workspaceName } from "./project-copy.js";
 import {
   assertThreadOwner,
@@ -675,7 +676,7 @@ export class CloudLifecycle {
   async startFailure(client: CloudroomClient, sessionId: string, requireReady = false): Promise<string | null> {
     const signal = AbortSignal.timeout(30_000);
     while (!signal.aborted) {
-      const session = await client.session(sessionId, signal).catch(() => null);
+      const session = await hedge((attempt) => client.session(sessionId, attempt), { signal }).catch(() => null);
       if (session?.state === "idle" || (session && Object.values(session.receipts).some((r) => r.command === "start" && r.state === "completed"))) return null;
       if (session && isDead(session.state)) {
         const receipt = Object.values(session.receipts).find((r) => r.command === "start" && r.error);

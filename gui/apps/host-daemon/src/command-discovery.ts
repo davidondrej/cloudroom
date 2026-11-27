@@ -19,6 +19,32 @@ const FRONTMATTER_PATTERN = /^\uFEFF?---([\s\S]*?)(?:\r?\n---|$)/u;
 
 const MAX_SCAN_DEPTH = 24;
 export const MAX_SCAN_ENTRY_COUNT = 5_000;
+const SCAN_CONCURRENCY = 16;
+const FRONTMATTER_READ_BYTES = 8 * 1024;
+const FRONTMATTER_CLOSED_PATTERN = /^\uFEFF?---[\s\S]*?\r?\n---(?:\r?\n|$)/u;
+const FRONTMATTER_CACHE_MAX_ENTRIES = 512;
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  concurrency: number,
+  mapper: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  if (items.length === 0) return [];
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(concurrency, items.length);
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const index = nextIndex;
+        nextIndex += 1;
+        if (index >= items.length) return;
+        results[index] = await mapper(items[index]!, index);
+      }
+    }),
+  );
+  return results;
+}
 
 interface CommandScanRootBase {
   namePrefix: string;
@@ -150,30 +176,90 @@ function readFrontmatterString(
   return trimmed.length > 0 ? trimmed : null;
 }
 
-async function parseFrontmatter(filePath: string): Promise<ParsedFrontmatter> {
+const frontmatterCache = new Map<
+  string,
+  { mtimeMs: number; size: number; frontmatter: ParsedFrontmatter }
+>();
+
+async function readFrontmatterText(filePath: string): Promise<string> {
+  const handle = await fs.open(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(FRONTMATTER_READ_BYTES);
+    const { bytesRead } = await handle.read(
+      buffer,
+      0,
+      FRONTMATTER_READ_BYTES,
+      0,
+    );
+    const head = buffer.toString("utf8", 0, bytesRead);
+    if (
+      bytesRead < FRONTMATTER_READ_BYTES ||
+      !hasSupportedFrontmatterDelimiter(head) ||
+      FRONTMATTER_CLOSED_PATTERN.test(head)
+    ) {
+      return head;
+    }
+  } finally {
+    await handle.close();
+  }
+  return fs.readFile(filePath, "utf8");
+}
+
+async function parseFrontmatter(
+  filePath: string,
+  fileStat?: { mtimeMs: number; size: number },
+): Promise<ParsedFrontmatter> {
+  const stat =
+    fileStat ?? (await fs.stat(filePath).catch(() => null));
+  if (stat !== null) {
+    const cached = frontmatterCache.get(filePath);
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.size === stat.size
+    ) {
+      return cached.frontmatter;
+    }
+  }
+
   let content: string;
   try {
-    content = await fs.readFile(filePath, "utf8");
+    content = await readFrontmatterText(filePath);
   } catch {
     return { name: null, description: null, argumentHint: null };
   }
 
+  let parsed: ParsedFrontmatter;
   if (!hasSupportedFrontmatterDelimiter(content)) {
-    return { name: null, description: null, argumentHint: null };
+    parsed = { name: null, description: null, argumentHint: null };
+  } else {
+    try {
+      const data = parseFrontmatterData(content);
+      parsed = {
+        name: readFrontmatterString(data, "name"),
+        description: readFrontmatterString(data, "description"),
+        argumentHint: readFrontmatterString(data, "argument-hint"),
+      };
+    } catch {
+      parsed = { name: null, description: null, argumentHint: null };
+    }
   }
 
-  let data: Record<string, unknown>;
-  try {
-    data = parseFrontmatterData(content);
-  } catch {
-    return { name: null, description: null, argumentHint: null };
+  if (stat !== null) {
+    if (
+      frontmatterCache.size >= FRONTMATTER_CACHE_MAX_ENTRIES &&
+      !frontmatterCache.has(filePath)
+    ) {
+      const oldestKey = frontmatterCache.keys().next().value;
+      if (oldestKey !== undefined) frontmatterCache.delete(oldestKey);
+    }
+    frontmatterCache.set(filePath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      frontmatter: parsed,
+    });
   }
-
-  return {
-    name: readFrontmatterString(data, "name"),
-    description: readFrontmatterString(data, "description"),
-    argumentHint: readFrontmatterString(data, "argument-hint"),
-  };
+  return parsed;
 }
 
 function canFollowSkillSymlink(root: CommandScanRoot): boolean {
@@ -200,17 +286,19 @@ async function isSkillDirectory(
 async function statSkillFile(
   filePath: string,
   root: CommandScanRoot,
-): Promise<{ linked: boolean } | null> {
+): Promise<{ linked: boolean; mtimeMs: number; size: number } | null> {
   try {
     const stat = await fs.lstat(filePath);
     if (stat.isFile()) {
-      return { linked: false };
+      return { linked: false, mtimeMs: stat.mtimeMs, size: stat.size };
     }
     if (!stat.isSymbolicLink() || !canFollowSkillSymlink(root)) {
       return null;
     }
     const targetStat = await fs.stat(filePath);
-    return targetStat.isFile() ? { linked: true } : null;
+    return targetStat.isFile()
+      ? { linked: true, mtimeMs: targetStat.mtimeMs, size: targetStat.size }
+      : null;
   } catch {
     return null;
   }
@@ -270,28 +358,31 @@ async function scanSkillRootFiles(
     return [];
   }
   const rootLinked = await isSymbolicLinkPath(root.rootPath);
-  const matches: SkillFileMatch[] = [];
-  for (const entry of entries) {
-    const skillDirPath = path.join(root.rootPath, entry.name);
-    if (!(await isSkillDirectory({ entry, entryPath: skillDirPath, root }))) {
-      continue;
-    }
-    if (await hasManifestMarker(root, skillDirPath)) {
-      continue;
-    }
-    const skillFilePath = path.join(skillDirPath, SKILL_FILE_NAME);
-    const skillFile = await statSkillFile(skillFilePath, root);
-    if (skillFile === null) {
-      continue;
-    }
-    matches.push({
-      filePath: skillFilePath,
-      frontmatter: await parseFrontmatter(skillFilePath),
-      linked: rootLinked || entry.isSymbolicLink() || skillFile.linked,
-      name: entry.name,
-    });
-  }
-  return matches;
+  const results = await mapWithConcurrency(
+    entries,
+    SCAN_CONCURRENCY,
+    async (entry): Promise<SkillFileMatch | null> => {
+      const skillDirPath = path.join(root.rootPath, entry.name);
+      if (!(await isSkillDirectory({ entry, entryPath: skillDirPath, root }))) {
+        return null;
+      }
+      if (await hasManifestMarker(root, skillDirPath)) {
+        return null;
+      }
+      const skillFilePath = path.join(skillDirPath, SKILL_FILE_NAME);
+      const skillFile = await statSkillFile(skillFilePath, root);
+      if (skillFile === null) {
+        return null;
+      }
+      return {
+        filePath: skillFilePath,
+        frontmatter: await parseFrontmatter(skillFilePath, skillFile),
+        linked: rootLinked || entry.isSymbolicLink() || skillFile.linked,
+        name: entry.name,
+      };
+    },
+  );
+  return results.filter((match): match is SkillFileMatch => match !== null);
 }
 
 async function walkMarkdownTree(args: WalkMarkdownTreeArgs): Promise<void> {
@@ -414,8 +505,10 @@ async function scanRecursiveSkillRootFiles(
     linked: await isSymbolicLinkPath(root.rootPath),
     matchedFiles,
   });
-  return Promise.all(
-    matchedFiles.map(async (match) => ({
+  return mapWithConcurrency(
+    matchedFiles,
+    SCAN_CONCURRENCY,
+    async (match) => ({
       filePath: path.join(
         root.rootPath,
         path.relative(rootPath, match.filePath),
@@ -423,7 +516,7 @@ async function scanRecursiveSkillRootFiles(
       frontmatter: await parseFrontmatter(match.filePath),
       linked: match.linked,
       name: path.basename(path.dirname(match.filePath)),
-    })),
+    }),
   );
 }
 
@@ -438,7 +531,7 @@ async function scanSingleSkillDirectoryFiles(
   return [
     {
       filePath: skillFilePath,
-      frontmatter: await parseFrontmatter(skillFilePath),
+      frontmatter: await parseFrontmatter(skillFilePath, skillFile),
       linked: (await isSymbolicLinkPath(root.rootPath)) || skillFile.linked,
       name: path.basename(root.rootPath),
     },
@@ -452,7 +545,7 @@ async function scanSkillFileRootFiles(
   if (skillFile === null) {
     return [];
   }
-  const frontmatter = await parseFrontmatter(root.filePath);
+  const frontmatter = await parseFrontmatter(root.filePath, skillFile);
   return [
     {
       filePath: root.filePath,
@@ -492,24 +585,27 @@ function commandNameFromPath(rootPath: string, filePath: string): string {
 async function scanCommandRoot(
   args: ScanRootArgs,
 ): Promise<HostProviderCommand[]> {
-  if (args.root.shape !== "command") {
+  const { root } = args;
+  if (root.shape !== "command") {
     throw new Error("scanCommandRoot requires a command root");
   }
   const matchedFiles: string[] = [];
   await walkMarkdownTree({
     budget: args.budget,
-    currentPath: args.root.rootPath,
+    currentPath: root.rootPath,
     depth: 0,
     matchedFiles,
     matches: (entry) => entry.name.endsWith(MARKDOWN_FILE_EXTENSION),
   });
 
-  const records: HostProviderCommand[] = [];
-  for (const filePath of matchedFiles) {
-    const name = commandNameFromPath(args.root.rootPath, filePath);
-    records.push(await buildRecord(args.root, filePath, name));
-  }
-  return records;
+  return mapWithConcurrency(
+    matchedFiles,
+    SCAN_CONCURRENCY,
+    async (filePath) => {
+      const name = commandNameFromPath(root.rootPath, filePath);
+      return buildRecord(root, filePath, name);
+    },
+  );
 }
 
 async function scanCommandFileRoot(
@@ -598,19 +694,26 @@ export async function discoverSkills(
   const records: DiscoveredSkill[] = [];
   const budget = newScanBudget();
   for (const root of args.roots) {
-    for (const match of await scanSkillFiles({ budget, root })) {
-      records.push(await buildSkillRecord(root, match));
-    }
+    const matches = await scanSkillFiles({ budget, root });
+    const built = await mapWithConcurrency(
+      matches,
+      SCAN_CONCURRENCY,
+      (match) => buildSkillRecord(root, match),
+    );
+    records.push(...built);
   }
+  const canonicalPaths = await mapWithConcurrency(
+    records,
+    SCAN_CONCURRENCY,
+    (record) => fs.realpath(record.filePath).catch(() => record.filePath),
+  );
   const uniqueRecords: DiscoveredSkill[] = [];
   const seenFiles = new Set<string>();
-  for (const record of records) {
-    const canonicalFilePath = await fs
-      .realpath(record.filePath)
-      .catch(() => record.filePath);
+  for (let index = 0; index < records.length; index += 1) {
+    const canonicalFilePath = canonicalPaths[index]!;
     if (!seenFiles.has(canonicalFilePath)) {
       seenFiles.add(canonicalFilePath);
-      uniqueRecords.push(record);
+      uniqueRecords.push(records[index]!);
     }
   }
   return uniqueRecords;

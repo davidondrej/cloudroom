@@ -61,10 +61,6 @@ export function promptMentionClipboardDataAttributes(
 
 export function promptMentionClipboardHtml(
   resource: PromptMentionResource,
-  {
-    displayText = resource.label,
-    trailingSpace = true,
-  }: { displayText?: string; trailingSpace?: boolean } = {},
 ): string {
   const serializedText = serializedTextForPromptMentionResource(resource);
   const attributes = Object.entries(
@@ -72,7 +68,7 @@ export function promptMentionClipboardHtml(
   )
     .map(([name, value]) => `${name}="${escapeHtml(value)}"`)
     .join(" ");
-  return `<span ${attributes}>${escapeHtml(displayText)}</span>${trailingSpace ? " " : ""}`;
+  return `<span ${attributes}>${escapeHtml(resource.label)}</span>`;
 }
 
 export function serializedTextForPromptMentionResource(

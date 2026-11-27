@@ -34,6 +34,7 @@ export function buildMarkdownMessageLinkRouting({
   if (threadId !== undefined) {
     routing.localImage = {
       absolutePaths: { kind: "trusted-host" },
+      cacheKey: threadId,
       resolveSrc: ({ path }) => buildThreadHostFileContentUrl(threadId, path),
       ...(workspaceRootPath === undefined
         ? {}

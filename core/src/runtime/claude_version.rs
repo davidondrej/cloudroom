@@ -31,7 +31,12 @@ async fn installed(config: &Config) -> io::Result<String> {
 
 /// Switch to `target` in the background. Switching while Claude runs can delete a live
 /// binary, so a `busy` VM waits; idle sessions sleep after 30 minutes and free it.
-pub async fn ensure(config: Config, target: String, busy: bool) -> Value {
+pub async fn ensure(
+    config: Config,
+    target: String,
+    busy: bool,
+    on_updated: impl FnOnce() + Send + 'static,
+) -> Value {
     let lock = INSTALL.get_or_init(Default::default).clone();
     let current = match installed(&config).await {
         Err(error) => return json!({"state":"failed","target":target,"error":error.to_string()}),
@@ -52,6 +57,7 @@ pub async fn ensure(config: Config, target: String, busy: bool) -> Value {
         let _guard = guard;
         // Downgrades need --force; the installer keeps newer versions otherwise.
         let result = claude::run_output(&config, &["install", &version, "--force"], 300).await;
+        on_updated();
         let error = match result {
             Ok((Some(0), _)) => match installed(&config).await {
                 Ok(now) if now == version => None,

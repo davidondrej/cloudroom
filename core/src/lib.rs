@@ -89,6 +89,8 @@ pub const FEATURES: &[&str] = &[
     "agent_limits",
     "plan_only",
     "loop_report",
+    // `room-cli loop runs ID` in Cloud threads (ADR 20261127-143904): the website then points loop runs at it.
+    "loop_runs",
     "mac_device",
     "credits_usage",
     "room_ids",

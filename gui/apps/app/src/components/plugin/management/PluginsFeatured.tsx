@@ -16,15 +16,7 @@ type Actions = {
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 };
-type Glyph =
-  | "cloud"
-  | "loops"
-  | "snippets"
-  | "merge"
-  | "cursor"
-  | "phone"
-  | "bolt"
-  | "target";
+type Glyph = "cloud" | "snippets" | "merge" | "target";
 
 /* The cards look like two-ink prints on cream paper (David's pick, 2026-11-26, docs/scopes/plugins.md). The paper
  * and inks are fixed colors on purpose: a print keeps its colors in every app theme. Text, toggles and the Install
@@ -32,13 +24,12 @@ type Glyph =
 const PAPER = "#eee6d4";
 const BLUE = "#2f4bff";
 const PINK = "#ff4f9a";
-const ORANGE = "#ff5a1f";
 const TEAL = "#00957f";
 const YELLOW = "#ffc21a";
 const RED = "#ef3b2d";
 
-/** The plugins we build ourselves, shown as cards on top of the Plugins page. `inks` are the first and second ink
- *  of the card's picture. */
+/** The optional plugins we build ourselves, shown as cards on top of the Plugins page. `inks` are the first and second
+ *  ink of the card's picture. */
 const OURS: {
   id: string;
   text: string;
@@ -52,12 +43,6 @@ const OURS: {
     inks: [BLUE, PINK],
   },
   {
-    id: "automations",
-    text: "Agents on a schedule.",
-    glyph: "loops",
-    inks: [ORANGE, BLUE],
-  },
-  {
     id: "snippets",
     text: "Keyword in, full text out.",
     glyph: "snippets",
@@ -68,24 +53,6 @@ const OURS: {
     text: "Cloud work lands on main.",
     glyph: "merge",
     inks: [PINK, TEAL],
-  },
-  {
-    id: "computer-use",
-    text: "Agents use your desktop apps.",
-    glyph: "cursor",
-    inks: [BLUE, YELLOW],
-  },
-  {
-    id: "connect",
-    text: "Cloudroom on your phone.",
-    glyph: "phone",
-    inks: [RED, TEAL],
-  },
-  {
-    id: "gpu",
-    text: "Rent a GPU from a thread.",
-    glyph: "bolt",
-    inks: [ORANGE, YELLOW],
   },
   {
     id: "director",
@@ -131,14 +98,6 @@ function Drawing({
           />
         </>
       );
-    case "loops":
-      return (
-        <path
-          d="M50 50C38 30 14 30 14 50C14 70 38 70 50 50C62 30 86 30 86 50C86 70 62 70 50 50Z"
-          {...line}
-          strokeWidth={12}
-        />
-      );
     case "snippets":
       // Scissors, the plugin's icon.
       return (
@@ -161,30 +120,6 @@ function Drawing({
           <circle cx={70} cy={24} r={8} {...shape} />
         </>
       );
-    case "cursor":
-      return (
-        <polygon
-          points="24,10 24,80 41,64 53,92 65,86 53,60 78,60"
-          {...shape}
-        />
-      );
-    case "phone":
-      return (
-        <>
-          <rect
-            x={30}
-            y={10}
-            width={40}
-            height={80}
-            rx={9}
-            {...line}
-            strokeWidth={10.5}
-          />
-          <path d="M44 78H56" {...line} strokeWidth={8.5} />
-        </>
-      );
-    case "bolt":
-      return <polygon points="60,6 22,56 46,56 38,94 78,42 54,42" {...shape} />;
     case "target":
       return (
         <>

@@ -1243,3 +1243,12 @@ export function promptCommandResourceFromSuggestion({
     argumentHint: suggestion.argumentHint,
   };
 }
+
+/** A pill needs a space after it unless one is already there. */
+export function pillSpacer(doc: ProseMirrorNode, position: number): string {
+  const next = doc.resolve(position).nodeAfter;
+  const spaced = next?.isText
+    ? /^\s/u.test(next.text ?? "")
+    : next?.type.name === "hardBreak";
+  return spaced ? "" : " ";
+}

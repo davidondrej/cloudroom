@@ -1,10 +1,10 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type ComponentType,
   type ReactNode,
   type UIEvent,
 } from "react";
@@ -12,7 +12,6 @@ import {
   providerCommandSection,
   type ProviderCommandSection,
 } from "@cloudroom/server-contract";
-import type { ReasoningLevel } from "@cloudroom/domain";
 import { directoryFromPath } from "@cloudroom/thread-view";
 import { promptMentionResourceFromSuggestion } from "@/components/promptbox/editor/prompt-editor-serialization";
 import { promptCommandIconName } from "@/components/promptbox/mentions/prompt-mention-display";
@@ -22,7 +21,6 @@ import {
 } from "@/components/promptbox/mentions/PromptMentionIcon";
 import { ThreadStatusGlyph } from "@/components/sidebar/ThreadRow";
 import { formatRelativeTime } from "@/lib/relative-time";
-import { shouldLoadMoreCommandResults } from "@/components/promptbox/mentions/mention-menu-scroll";
 import { PluginIcon } from "@/components/plugin/PluginIcon";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { TruncateStart } from "@/components/ui/truncate-start.js";
@@ -32,77 +30,43 @@ import {
   resolveThreadListIndicator,
   type OrderedMentionSuggestions,
   type PromptMentionSuggestion,
-  type ProviderCommandSuggestion,
-  type CommandMenuState,
-  type TypeaheadMenuState,
 } from "@cloudroom/client-core";
+import {
+  getMentionKey,
+  typeaheadSuggestionKey,
+  type ComposerCommandMenuState,
+  type ComposerCommandSuggestion,
+  type ComposerTypeaheadMenuState,
+  type FastModeCommandSuggestion,
+  type LocationCommandSuggestion,
+  type ModelShortcutCommandSuggestion,
+  type ReasoningCommandSuggestion,
+  type TypeaheadSuggestion,
+} from "./typeahead-types";
 
-export interface ReasoningCommandSuggestion {
-  kind: "reasoning";
-  name: ReasoningLevel;
-  description: string;
-}
+export {
+  typeaheadSuggestionKey,
+  type ComposerCommandMenuState,
+  type ComposerCommandSuggestion,
+  type ComposerTypeaheadMenuState,
+  type FastModeCommandSuggestion,
+  type LocationCommandSuggestion,
+  type ModelShortcutCommandSuggestion,
+  type ReasoningCommandSuggestion,
+  type TypeaheadSuggestion,
+};
 
-export interface FastModeCommandSuggestion {
-  kind: "fast-mode";
-  name: "fast" | "ultrafast";
-  description: string;
-}
-
-export interface ModelShortcutCommandSuggestion {
-  kind: "model-shortcut";
-  name: string;
-  description: string;
-  icon?: ComponentType<{ className?: string }>;
-}
-
-export interface LocationCommandSuggestion {
-  kind: "location";
-  name: "local" | "worktree" | "cloud";
-  description: string;
-}
-
-type ComposerCommandSuggestion =
-  | ProviderCommandSuggestion
-  | ReasoningCommandSuggestion
-  | FastModeCommandSuggestion
-  | ModelShortcutCommandSuggestion
-  | LocationCommandSuggestion;
-
-export type ComposerCommandMenuState =
-  | Exclude<CommandMenuState, { kind: "results" }>
-  | { kind: "results"; suggestions: readonly ComposerCommandSuggestion[] };
-
-export type ComposerTypeaheadMenuState =
-  | Extract<TypeaheadMenuState, { trigger: "mention" }>
-  | { trigger: "command"; state: ComposerCommandMenuState };
-
-export type TypeaheadSuggestion =
-  | PromptMentionSuggestion
-  | ComposerCommandSuggestion;
+const ROW_ICON_CLASS = "size-3.5 shrink-0 text-muted-foreground";
+const WINDOW_THRESHOLD = 40;
+const ESTIMATED_ROW_HEIGHT_PX = 29;
+const WINDOW_OVERSCAN_ROWS = 12;
+const VIEWPORT_ROWS = 8;
 
 interface MentionMenuProps {
   state: ComposerTypeaheadMenuState;
   selectedIndex: number;
   onApply: (item: TypeaheadSuggestion) => void;
   onDismiss?: () => void;
-  onCommandLoadMore?: () => void;
-}
-
-interface MentionResultsProps {
-  results: OrderedMentionSuggestions;
-  selectedIndex: number;
-  onApply: (item: TypeaheadSuggestion) => void;
-  onDismiss?: () => void;
-  itemRefs: React.MutableRefObject<Array<HTMLButtonElement | null>>;
-}
-
-interface CommandResultsProps {
-  suggestions: readonly ComposerCommandSuggestion[];
-  selectedIndex: number;
-  onApply: (item: TypeaheadSuggestion) => void;
-  onDismiss?: () => void;
-  itemRefs: React.MutableRefObject<Array<HTMLButtonElement | null>>;
 }
 
 interface MenuSectionItem<TItem> {
@@ -122,7 +86,8 @@ function groupSections<TKind extends string, TItem>(args: {
   sectionLabel: (kind: TKind) => string;
 }): MenuSection<TKind, TItem>[] {
   const sectionsByKind = new Map<TKind, MenuSection<TKind, TItem>>();
-  for (const [index, item] of args.suggestions.entries()) {
+  for (let index = 0; index < args.suggestions.length; index += 1) {
+    const item = args.suggestions[index]!;
     const kind = args.sectionKind(item);
     const existing = sectionsByKind.get(kind);
     if (existing) {
@@ -148,10 +113,7 @@ type ThreadMentionSuggestion = Extract<
 type SecondaryContextKind = "path" | "project";
 
 function getPathSectionLabel(item: PathMentionSuggestion): string {
-  if (item.source === "thread-storage") {
-    return "Thread storage";
-  }
-  return "Workspace";
+  return item.source === "thread-storage" ? "Thread storage" : "Workspace";
 }
 
 function getMentionTitle(item: PromptMentionSuggestion): string {
@@ -159,41 +121,10 @@ function getMentionTitle(item: PromptMentionSuggestion): string {
     const title = item.title || item.path;
     return item.projectName ? `${title} · ${item.projectName}` : title;
   }
-
-  if (item.kind === "project") {
-    return `Project: ${item.name}`;
-  }
-
-  if (item.kind === "section") {
-    return `Section: ${item.name}`;
-  }
-
-  if (item.kind === "plugin") {
-    return `${item.providerLabel}: ${item.title}`;
-  }
-
+  if (item.kind === "project") return `Project: ${item.name}`;
+  if (item.kind === "section") return `Section: ${item.name}`;
+  if (item.kind === "plugin") return `${item.providerLabel}: ${item.title}`;
   return `${getPathSectionLabel(item)}: ${item.path}`;
-}
-
-function getMentionKey(item: PromptMentionSuggestion): string {
-  if (item.kind === "path") {
-    return JSON.stringify([item.kind, item.source, item.entryKind, item.path]);
-  }
-  if (item.kind === "plugin") {
-    return JSON.stringify([
-      item.kind,
-      item.pluginId,
-      item.providerId,
-      item.itemId,
-    ]);
-  }
-  if (item.kind === "thread") {
-    return JSON.stringify([item.kind, item.threadId]);
-  }
-  if (item.kind === "project") {
-    return JSON.stringify([item.kind, item.projectId]);
-  }
-  return JSON.stringify([item.kind, item.sectionId]);
 }
 
 type CommandSectionKind =
@@ -203,25 +134,23 @@ type CommandSectionKind =
   | "location";
 
 function getCommandSectionLabel(kind: CommandSectionKind): string {
-  if (kind === "location") {
-    return "Location";
+  switch (kind) {
+    case "location":
+      return "Location";
+    case "fast-mode":
+      return "Fast mode";
+    case "reasoning":
+      return "Reasoning";
+    case "agent-command":
+      return "Commands";
+    case "skill":
+      return "Skills";
+    case "project-command":
+      return "Project commands";
+    case "user-command":
+      return "User commands";
   }
-  if (kind === "fast-mode") {
-    return "Fast mode";
-  }
-  if (kind === "reasoning") {
-    return "Reasoning";
-  }
-  if (kind === "agent-command") {
-    return "Commands";
-  }
-  if (kind === "skill") {
-    return "Skills";
-  }
-  return kind === "project-command" ? "Project commands" : "User commands";
 }
-
-const ROW_ICON_CLASS = "size-3.5 shrink-0 text-muted-foreground";
 
 function getCommandIcon(item: ComposerCommandSuggestion): ReactNode {
   if (item.kind === "location") {
@@ -265,28 +194,6 @@ function getCommandIcon(item: ComposerCommandSuggestion): ReactNode {
   );
 }
 
-function getCommandKey(item: ProviderCommandSuggestion): string {
-  return JSON.stringify([
-    item.kind,
-    item.source,
-    item.origin,
-    item.pluginId ?? null,
-    item.name,
-  ]);
-}
-
-export function typeaheadSuggestionKey(item: TypeaheadSuggestion): string {
-  if (
-    item.kind === "reasoning" ||
-    item.kind === "fast-mode" ||
-    item.kind === "model-shortcut" ||
-    item.kind === "location"
-  ) {
-    return JSON.stringify([item.kind, item.name]);
-  }
-  return item.kind === "command" ? getCommandKey(item) : getMentionKey(item);
-}
-
 function MutedTrailing({ children }: { children: string }) {
   return (
     <span className="truncate text-subtle-foreground [flex-shrink:9999]">
@@ -295,8 +202,13 @@ function MutedTrailing({ children }: { children: string }) {
   );
 }
 
-function ThreadSuggestionTrailing({ item }: { item: ThreadMentionSuggestion }) {
-  const [now] = useState(Date.now);
+function ThreadSuggestionTrailing({
+  item,
+  now,
+}: {
+  item: ThreadMentionSuggestion;
+  now: number;
+}) {
   const indicator = item.indicator;
   const hasStatus =
     indicator !== undefined && resolveThreadListIndicator(indicator) !== "none";
@@ -334,38 +246,33 @@ function MutedTrailingPath({ children }: { children: string }) {
 
 interface SuggestionRowProps {
   index: number;
-  selectedIndex: number;
+  isSelected: boolean;
   icon: ReactNode;
   primary: string;
   trailing: ReactNode;
   title: string;
-  onApply: () => void;
-  itemRefs: React.MutableRefObject<Array<HTMLButtonElement | null>>;
+  onSelectIndex: (index: number) => void;
 }
 
-function SuggestionRow({
+const SuggestionRow = memo(function SuggestionRow({
   index,
-  selectedIndex,
+  isSelected,
   icon,
   primary,
   trailing,
   title,
-  onApply,
-  itemRefs,
+  onSelectIndex,
 }: SuggestionRowProps) {
-  const isSelected = index === selectedIndex;
   return (
     <button
-      ref={(element) => {
-        itemRefs.current[index] = element;
-      }}
+      data-suggestion-index={index}
       type="button"
       onMouseDown={(event) => {
         event.preventDefault();
-        onApply();
+        onSelectIndex(index);
       }}
       className={cn(
-        "w-full scroll-mt-7 rounded px-2 py-1.5 text-left text-xs",
+        "w-full scroll-mt-7 rounded-lg px-2 py-1.5 text-left text-xs",
         isSelected ? "bg-state-active text-foreground" : "hover:bg-state-hover",
       )}
       title={title}
@@ -377,7 +284,7 @@ function SuggestionRow({
       </div>
     </button>
   );
-}
+});
 
 function CloseSuggestionsButton({ onDismiss }: { onDismiss: () => void }) {
   return (
@@ -443,10 +350,16 @@ function MenuSectionHeader({
 function MentionResults({
   results,
   selectedIndex,
-  onApply,
+  onSelectIndex,
   onDismiss,
-  itemRefs,
-}: MentionResultsProps) {
+}: {
+  results: OrderedMentionSuggestions;
+  selectedIndex: number;
+  onSelectIndex: (index: number) => void;
+  onDismiss?: () => void;
+}) {
+  const [now] = useState(Date.now);
+
   if (results.groups.length === 0) {
     return (
       <MenuStatusRow onDismiss={onDismiss} className="text-muted-foreground">
@@ -472,9 +385,7 @@ function MentionResults({
 
               if (item.kind === "thread") {
                 primary = item.title || "Untitled thread";
-              } else if (item.kind === "project") {
-                primary = item.name;
-              } else if (item.kind === "section") {
+              } else if (item.kind === "project" || item.kind === "section") {
                 primary = item.name;
               } else if (item.kind === "plugin") {
                 primary = item.title;
@@ -492,7 +403,7 @@ function MentionResults({
                 <SuggestionRow
                   key={getMentionKey(item)}
                   index={index}
-                  selectedIndex={selectedIndex}
+                  isSelected={index === selectedIndex}
                   icon={
                     item.kind === "thread" ? (
                       <ThreadLocationIcon
@@ -512,7 +423,7 @@ function MentionResults({
                   primary={primary}
                   trailing={
                     item.kind === "thread" ? (
-                      <ThreadSuggestionTrailing item={item} />
+                      <ThreadSuggestionTrailing item={item} now={now} />
                     ) : secondaryContext ===
                       null ? null : secondaryContextKind === "path" ? (
                       <MutedTrailingPath>{secondaryContext}</MutedTrailingPath>
@@ -521,8 +432,7 @@ function MentionResults({
                     )
                   }
                   title={getMentionTitle(item)}
-                  onApply={() => onApply(item)}
-                  itemRefs={itemRefs}
+                  onSelectIndex={onSelectIndex}
                 />
               );
             })}
@@ -533,13 +443,57 @@ function MentionResults({
   );
 }
 
+/** Computes a windowed slice for a long command section while always keeping `selectedIndex` mounted. */
+function sectionWindow(
+  items: readonly MenuSectionItem<ComposerCommandSuggestion>[],
+  scrollTop: number,
+  sectionTopOffsetPx: number,
+  selectedIndex: number,
+): { start: number; end: number; topSpacerPx: number; bottomSpacerPx: number } {
+  const count = items.length;
+  if (count <= WINDOW_THRESHOLD) {
+    return { start: 0, end: count, topSpacerPx: 0, bottomSpacerPx: 0 };
+  }
+  const relativeScrollPx = Math.max(0, scrollTop - sectionTopOffsetPx);
+  const firstVisible = Math.floor(relativeScrollPx / ESTIMATED_ROW_HEIGHT_PX);
+  let start = Math.max(0, firstVisible - WINDOW_OVERSCAN_ROWS);
+  let end = Math.min(
+    count,
+    firstVisible + VIEWPORT_ROWS + WINDOW_OVERSCAN_ROWS,
+  );
+  const firstIndex = items[0]!.index;
+  const lastIndex = items[count - 1]!.index;
+  if (selectedIndex >= firstIndex && selectedIndex <= lastIndex) {
+    const localSelected = selectedIndex - firstIndex;
+    if (localSelected < start) {
+      start = Math.max(0, localSelected - WINDOW_OVERSCAN_ROWS);
+      end = Math.min(count, localSelected + VIEWPORT_ROWS + WINDOW_OVERSCAN_ROWS);
+    } else if (localSelected >= end) {
+      end = Math.min(count, localSelected + WINDOW_OVERSCAN_ROWS + 1);
+      start = Math.max(0, end - (VIEWPORT_ROWS + WINDOW_OVERSCAN_ROWS * 2));
+    }
+  }
+  return {
+    start,
+    end,
+    topSpacerPx: start * ESTIMATED_ROW_HEIGHT_PX,
+    bottomSpacerPx: (count - end) * ESTIMATED_ROW_HEIGHT_PX,
+  };
+}
+
 function CommandResults({
   suggestions,
   selectedIndex,
-  onApply,
+  scrollTop,
+  onSelectIndex,
   onDismiss,
-  itemRefs,
-}: CommandResultsProps) {
+}: {
+  suggestions: readonly ComposerCommandSuggestion[];
+  selectedIndex: number;
+  scrollTop: number;
+  onSelectIndex: (index: number) => void;
+  onDismiss?: () => void;
+}) {
   const sections = useMemo(
     () =>
       groupSections({
@@ -559,53 +513,74 @@ function CommandResults({
     return null;
   }
 
+  let runningOffsetPx = 0;
   return (
     <div className="pb-1">
-      {sections.map((section, sectionIndex) => (
-        <div key={section.kind}>
-          <MenuSectionHeader
-            label={section.label}
-            onDismiss={sectionIndex === 0 ? onDismiss : undefined}
-          />
-          <div className="flex flex-col gap-px px-1">
-            {section.items.map(({ item, index }) => (
-              <SuggestionRow
-                key={typeaheadSuggestionKey(item)}
-                index={index}
-                selectedIndex={selectedIndex}
-                icon={getCommandIcon(item)}
-                primary={item.name}
-                trailing={
-                  <>
-                    {item.description !== null ? (
-                      <MutedTrailing>{item.description}</MutedTrailing>
-                    ) : null}
-                    {item.kind === "command" && item.argumentHint !== null ? (
-                      <span className="shrink-0 text-subtle-foreground">
-                        {item.argumentHint}
-                      </span>
-                    ) : null}
-                  </>
-                }
-                title={item.description ?? item.name}
-                onApply={() => onApply(item)}
-                itemRefs={itemRefs}
-              />
-            ))}
+      {sections.map((section, sectionIndex) => {
+        const sectionTopOffsetPx = runningOffsetPx;
+        runningOffsetPx += 24 + section.items.length * ESTIMATED_ROW_HEIGHT_PX;
+        const { start, end, topSpacerPx, bottomSpacerPx } = sectionWindow(
+          section.items,
+          scrollTop,
+          sectionTopOffsetPx,
+          selectedIndex,
+        );
+        const visibleItems =
+          start === 0 && end === section.items.length
+            ? section.items
+            : section.items.slice(start, end);
+
+        return (
+          <div key={section.kind}>
+            <MenuSectionHeader
+              label={section.label}
+              onDismiss={sectionIndex === 0 ? onDismiss : undefined}
+            />
+            <div className="flex flex-col gap-px px-1">
+              {topSpacerPx > 0 ? (
+                <div style={{ height: topSpacerPx }} aria-hidden />
+              ) : null}
+              {visibleItems.map(({ item, index }) => (
+                <SuggestionRow
+                  key={typeaheadSuggestionKey(item)}
+                  index={index}
+                  isSelected={index === selectedIndex}
+                  icon={getCommandIcon(item)}
+                  primary={item.name}
+                  trailing={
+                    <>
+                      {item.description !== null ? (
+                        <MutedTrailing>{item.description}</MutedTrailing>
+                      ) : null}
+                      {item.kind === "command" && item.argumentHint !== null ? (
+                        <span className="shrink-0 text-subtle-foreground">
+                          {item.argumentHint}
+                        </span>
+                      ) : null}
+                    </>
+                  }
+                  title={item.description ?? item.name}
+                  onSelectIndex={onSelectIndex}
+                />
+              ))}
+              {bottomSpacerPx > 0 ? (
+                <div style={{ height: bottomSpacerPx }} aria-hidden />
+              ) : null}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
 
-function typeaheadResultsLength(state: ComposerTypeaheadMenuState): number {
-  if (state.trigger === "mention") {
-    return state.state.kind === "results"
-      ? state.state.results.suggestions.length
-      : 0;
-  }
-  return state.state.kind === "results" ? state.state.suggestions.length : 0;
+function flatSuggestions(
+  state: ComposerTypeaheadMenuState,
+): readonly TypeaheadSuggestion[] {
+  if (state.state.kind !== "results") return [];
+  return state.trigger === "mention"
+    ? state.state.results.suggestions
+    : state.state.suggestions;
 }
 
 function mentionResults(
@@ -624,51 +599,59 @@ function commandSuggestions(
     : [];
 }
 
-export function MentionMenu({
+export const MentionMenu = memo(function MentionMenu({
   state,
   selectedIndex,
   onApply,
   onDismiss,
-  onCommandLoadMore,
 }: MentionMenuProps) {
-  const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const items = flatSuggestions(state);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const onApplyRef = useRef(onApply);
+  onApplyRef.current = onApply;
+
+  const isWindowed =
+    state.trigger === "command" && items.length > WINDOW_THRESHOLD;
+  const [scrollTop, setScrollTop] = useState(0);
   const handleScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
-      if (onCommandLoadMore === undefined) {
-        return;
-      }
-      const target = event.currentTarget;
-      if (
-        shouldLoadMoreCommandResults({
-          trigger: state.trigger,
-          scrollHeight: target.scrollHeight,
-          scrollTop: target.scrollTop,
-          clientHeight: target.clientHeight,
-        })
-      ) {
-        onCommandLoadMore();
-      }
+      if (!isWindowed) return;
+      const nextTop = event.currentTarget.scrollTop;
+      setScrollTop((current) =>
+        Math.abs(current - nextTop) >= ESTIMATED_ROW_HEIGHT_PX
+          ? nextTop
+          : current,
+      );
     },
-    [onCommandLoadMore, state.trigger],
+    [isWindowed],
   );
 
-  const innerState = state.state;
-  const resultsLength = typeaheadResultsLength(state);
+  const handleSelectIndex = useCallback((index: number) => {
+    const item = itemsRef.current[index];
+    if (item) onApplyRef.current(item);
+  }, []);
 
-  useEffect(() => {
-    itemRefs.current = itemRefs.current.slice(0, resultsLength);
-  }, [resultsLength]);
-
+  const resultsLength = items.length;
   useEffect(() => {
     if (resultsLength === 0) return;
-    const selectedItem = itemRefs.current[selectedIndex];
-    if (!selectedItem) return;
-    selectedItem.scrollIntoView({ block: "nearest" });
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const selectedItem = container.querySelector<HTMLElement>(
+      `[data-suggestion-index="${selectedIndex}"]`,
+    );
+    selectedItem?.scrollIntoView({ block: "nearest" });
   }, [resultsLength, selectedIndex]);
 
+  const innerState = state.state;
   return (
-    <div className="overflow-hidden rounded-md border border-border bg-popover text-popover-foreground">
-      <div className="max-h-48 overflow-y-auto" onScroll={handleScroll}>
+    <div className="overflow-hidden rounded-xl border border-foreground/[0.11] bg-popover text-popover-foreground">
+      <div
+        ref={scrollContainerRef}
+        className="max-h-48 overflow-y-auto"
+        onScroll={isWindowed ? handleScroll : undefined}
+      >
         {innerState.kind === "hint" ? (
           <MenuStatusRow
             onDismiss={onDismiss}
@@ -698,20 +681,19 @@ export function MentionMenu({
           <CommandResults
             suggestions={commandSuggestions(state)}
             selectedIndex={selectedIndex}
-            onApply={onApply}
-            itemRefs={itemRefs}
+            scrollTop={scrollTop}
+            onSelectIndex={handleSelectIndex}
             onDismiss={onDismiss}
           />
         ) : (
           <MentionResults
             results={mentionResults(state)}
             selectedIndex={selectedIndex}
-            onApply={onApply}
-            itemRefs={itemRefs}
+            onSelectIndex={handleSelectIndex}
             onDismiss={onDismiss}
           />
         )}
       </div>
     </div>
   );
-}
+});

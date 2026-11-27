@@ -582,9 +582,10 @@ export class CloudroomClient {
     body: { request_id: string } & Record<string, Json>,
     sessionId?: string,
     headers: Record<string, string> = {},
+    signal?: AbortSignal,
   ): Promise<Acceptance> {
     requestId(body.request_id);
-    const value = await this.#json(path, body, undefined, undefined, undefined, { ...(this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {}), ...headers });
+    const value = await this.#json(path, body, signal, undefined, undefined, { ...(this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {}), ...headers });
     const accepted = {
       session_id: text(value.session_id),
       receipt: receipt(value.receipt),
@@ -684,10 +685,10 @@ export class CloudroomClient {
     await this.#json(`/v1/workspaces/${id}/alive`, {}, signal);
   }
 
-  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; through?: string; last_turn_id?: string }; continue_from?: string } = {}) {
+  start(id: string, harness: Harness = "codex", options: { model?: string; reasoning?: string; workspace?: string; workspace_name?: string; provider?: string; command_guard_enabled?: boolean; strip_ai_co_authors?: boolean; system_prompt?: string; parent_session?: string; parent_thread?: string; thread_id?: string; project_id?: string; prompt?: string; title?: string; fork?: { session: string; fresh?: boolean; before?: string; through?: string; last_turn_id?: string }; continue_from?: string } = {}, signal?: AbortSignal) {
     if (harness !== "codex" && harness !== "pi" && harness !== "cursor" && harness !== "claude-code" && harness !== "fx" && harness !== "opencode" && harness !== "hermes" && harness !== "devin" && harness !== "droid" && harness !== "kimi" && harness !== "antigravity" && harness !== "openclaw" && harness !== "agent-zero")
       throw new CloudroomError("Unsupported Cloudroom harness");
-    return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body));
+    return withoutIds({ request_id: id, harness, ...options }, body => this.#command("/v1/sessions", "start", body, undefined, {}, signal));
   }
 
   /** An agent switch or project move through Core (`cloud_threads`, #237): a new session that continues `from` with Core's
@@ -707,6 +708,7 @@ export class CloudroomClient {
     prompt: string,
     reasoning?: string,
     extra: { content?: Json; attachments?: Json; service_tier?: string; sender?: string } = {},
+    signal?: AbortSignal,
   ) {
     if ((!prompt.trim() && extra.attachments === undefined) || new TextEncoder().encode(prompt).length > 256 * 1024) {
       throw new CloudroomError("Prompt must contain 1–262144 bytes of text", 400);
@@ -726,6 +728,7 @@ export class CloudroomClient {
       // Another thread's tell: Core notes when it took it (#2633). A header, as older Cores refuse unknown body fields.
       // Only a thread ID, so the header can never fail the send.
       extra.sender && /^thr_[\w-]{1,60}$/.test(extra.sender) ? { "X-Cloudroom-Sender": extra.sender } : {},
+      signal,
     );
   }
 
@@ -779,7 +782,7 @@ export class CloudroomClient {
     );
   }
 
-  steer(sessionId: string, id: string, targetRequestId: string, text: string) {
+  steer(sessionId: string, id: string, targetRequestId: string, text: string, signal?: AbortSignal) {
     if (!text.trim() || new TextEncoder().encode(text).length > 256 * 1024) {
       throw new CloudroomError("Prompt must contain 1–262144 bytes of text", 400);
     }
@@ -788,6 +791,8 @@ export class CloudroomClient {
       "steer",
       { request_id: id, target_request_id: requestId(targetRequestId), text },
       sessionId,
+      {},
+      signal,
     );
   }
 
@@ -875,8 +880,8 @@ export class CloudroomClient {
 
   /** `after`: a Stop held while the sandbox slept stops only that turn (Cores with `cloud_threads`, #237). Its receipt
    *  says `ignored` when another turn runs. */
-  stop(sessionId: string, id: string, after?: string) {
-    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id, ...(after ? { after } : {}) }, sessionId);
+  stop(sessionId: string, id: string, after?: string, signal?: AbortSignal) {
+    return this.#command(`${sessionPath(sessionId)}/stop`, "stop", { request_id: id, ...(after ? { after } : {}) }, sessionId, {}, signal);
   }
 
   /** Holds the session for Teleport to Local (#237): until `release`, a close, or 5 minutes without renewal, Core refuses
@@ -915,12 +920,12 @@ export class CloudroomClient {
     return archived;
   }
 
-  resume(sessionId: string, id: string, keepPaused = false) {
-    return this.#command(`${sessionPath(sessionId)}/resume`, "resume", { request_id: id, ...(keepPaused ? { keep_paused: true } : {}) }, sessionId);
+  resume(sessionId: string, id: string, keepPaused = false, signal?: AbortSignal) {
+    return this.#command(`${sessionPath(sessionId)}/resume`, "resume", { request_id: id, ...(keepPaused ? { keep_paused: true } : {}) }, sessionId, {}, signal);
   }
 
-  sleep(sessionId: string, id: string) {
-    return this.#command(`${sessionPath(sessionId)}/sleep`, "sleep", { request_id: id }, sessionId);
+  sleep(sessionId: string, id: string, signal?: AbortSignal) {
+    return this.#command(`${sessionPath(sessionId)}/sleep`, "sleep", { request_id: id }, sessionId, {}, signal);
   }
 
   /** Makes a child session top-level, so its parent hears no more about it. */

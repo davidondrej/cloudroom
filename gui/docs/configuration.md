@@ -260,8 +260,7 @@ provider, how a finished turn appears in the thread timeline. Collapsed, the
 turn's work folds into one "Worked for" row and the final answer stays
 visible. Flat, every step of the finished turn stays visible, as it was while
 the turn ran, under a "Worked for" row that only shows the duration. Each provider declares its default (`completedTurnDisplay` on
-its registration): Claude Code defaults to flat, and every other first-party
-provider defaults to collapsed. Your choice is stored in
+its registration): every first-party provider defaults to collapsed. Your choice is stored in
 `providerCompletedTurnDisplay`, a map of provider id to `collapse` or `flat`;
 a provider without an entry uses its default. The display applies to existing
 threads as well as new ones, and to the conversation outline and

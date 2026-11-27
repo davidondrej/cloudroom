@@ -108,6 +108,7 @@ import {
 import { CLOUDROOM_CLOUD_PRIMARY } from "@/lib/cloudroom-environment-label";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
 import { useCloudThreadWake } from "@/hooks/useCloudThreadWake";
+import { useOptionalPaneContext } from "./PaneContext";
 import { useLatestRef } from "@/hooks/useLatestRef";
 import { useThreadCreationOptions } from "@/hooks/useThreadCreationOptions";
 import { resolveModelReasoningLevel } from "@/hooks/thread-creation-options/model-catalog-selection";
@@ -445,6 +446,7 @@ export function ThreadDetailPromptArea({
   composerFocusRequestNonce,
   thread,
 }: ThreadDetailPromptAreaProps) {
+  const isPaneVisible = !(useOptionalPaneContext()?.isHidden ?? false);
   const isCloud = thread.executionTarget === "cloud";
   // Background commands show as bubbles in the chat; this card keeps only background agents.
   const backgroundAgents = useMemo(
@@ -458,7 +460,7 @@ export function ThreadDetailPromptArea({
   const transferredChild = Boolean(thread.teleport?.phase === "complete" && thread.teleport.owner !== thread.id);
   const remoteMac = viewingOtherMac();
   const macLostAt = useSyncExternalStore(onMacConnectionChange, otherMacLostAt, () => null);
-  const cloudState = useCloudroomThread(thread.id, isCloud);
+  const cloudState = useCloudroomThread(thread.id, isCloud && isPaneVisible);
   const onVps = isCloud && cloudState.data?.vps === true;
   const cloudPlace = onVps ? "VPS" : CLOUDROOM_CLOUD_PRIMARY;
   const teleport = useTeleportThread(thread.id);
@@ -477,7 +479,7 @@ export function ThreadDetailPromptArea({
   useEffect(() => { if (teleport.error) openTeleportLogin(teleport.error, thread.providerId); }, [teleport.error, thread.providerId]);
   const cloudWorkspace = useCloudroomThreadWorkspace(
     thread.id,
-    isCloud && Boolean(cloudState.data?.sessionId),
+    isCloud && isPaneVisible && Boolean(cloudState.data?.sessionId),
   );
   const cloudCheckout = useMemo(() => {
     // Hide the chip until the branch is known; after a failed refresh keep the last one, marked stale.
@@ -1512,7 +1514,7 @@ export function ThreadDetailPromptArea({
   const handleInlineComposerSubmit = useCallback(() => {
     void handleSaveInlineQueuedMessage();
   }, [handleSaveInlineQueuedMessage]);
-  const wakeCloudThread = useCloudThreadWake(thread.id, isCloud, Boolean(cloudState.data?.waiting));
+  const wakeCloudThread = useCloudThreadWake(thread.id, isCloud && isPaneVisible, Boolean(cloudState.data?.waiting));
   const setBottomComposerText = promptDraft.setTextAndMentions;
   const handleBottomComposerMessageChange = useCallback<FollowUpComposerProps["onChangeMessage"]>(
     (text, mentions) => {
@@ -1524,7 +1526,8 @@ export function ThreadDetailPromptArea({
 
   const promptSuggestion = usePromptSuggestion(
     thread.id,
-    runtimeDisplayStatus === "idle" &&
+    isPaneVisible &&
+      runtimeDisplayStatus === "idle" &&
       !isStopRequested &&
       currentPromptDraft.text.trim() === "",
     thread.updatedAt,

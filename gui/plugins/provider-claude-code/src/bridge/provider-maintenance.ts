@@ -3,6 +3,7 @@ import {
   execFile,
   spawn,
 } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -47,6 +48,85 @@ const CLAUDE_NATIVE_RELEASES_URL =
 const CLAUDE_MINIMUM_SUPPORTED_VERSION = "2.1.280";
 const CLAUDE_RENEWS_MESSAGE =
   "Claude renews its sign-in on its next reply. Usage shows after that.";
+const CLAUDE_THROTTLED_MESSAGE =
+  "Anthropic temporarily throttled this usage check. This does not mean your Claude limit is exhausted. Try again later.";
+const USAGE_THROTTLE_MIN_MS = 15_000;
+const USAGE_THROTTLE_BASE_MS = 30_000;
+const USAGE_THROTTLE_MAX_MS = 5 * 60_000;
+
+const usageThrottleSchema = z.object({
+  tokenHash: z.string().min(1),
+  until: z.number().finite(),
+  streak: z.number().int().positive(),
+});
+type UsageThrottleState = z.infer<typeof usageThrottleSchema>;
+
+let cachedUserAgent: { command: string; value: string } | null = null;
+let usageThrottle: UsageThrottleState | null | undefined = undefined;
+
+function throttleFilePath(): string {
+  const uid = process.getuid?.();
+  return path.join(
+    os.tmpdir(),
+    `cloudroom-claude-usage-throttle${uid === undefined ? "" : `-${uid}`}.json`,
+  );
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+async function readUsageThrottle(): Promise<UsageThrottleState | null> {
+  if (usageThrottle !== undefined) return usageThrottle;
+  try {
+    const raw = await fs.readFile(throttleFilePath(), "utf8");
+    const parsed = usageThrottleSchema.safeParse(JSON.parse(raw));
+    usageThrottle = parsed.success ? parsed.data : null;
+  } catch {
+    usageThrottle = null;
+  }
+  return usageThrottle;
+}
+
+async function writeUsageThrottle(next: UsageThrottleState): Promise<void> {
+  usageThrottle = next;
+  try {
+    await fs.writeFile?.(throttleFilePath(), JSON.stringify(next), {
+      mode: 0o600,
+    });
+  } catch {}
+}
+
+async function clearUsageThrottle(): Promise<void> {
+  const had = usageThrottle !== null && usageThrottle !== undefined;
+  usageThrottle = null;
+  if (!had) return;
+  try {
+    await fs.unlink?.(throttleFilePath());
+  } catch {}
+}
+
+async function claudeUserAgent(command: string): Promise<string> {
+  if (cachedUserAgent?.command === command) return cachedUserAgent.value;
+  const version = await readCliVersion(command).catch(() => null);
+  const value = `claude-code/${version ?? CLAUDE_MINIMUM_SUPPORTED_VERSION}`;
+  if (version !== null) cachedUserAgent = { command, value };
+  return value;
+}
+
+function parseRetryAfterMs(
+  header: string | null | undefined,
+  now = Date.now(),
+): number | null {
+  const value = header?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds)
+    ? seconds * 1_000
+    : Date.parse(value) - now;
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return Math.min(USAGE_THROTTLE_MAX_MS, Math.max(USAGE_THROTTLE_MIN_MS, ms));
+}
 // bin/claude.exe is Claude Code's own 500-byte placeholder until its
 // postinstall (install.cjs) puts the native binary there. npm 12 skips install
 // scripts it wasn't told to allow, so `npm install -g` can leave it (#1074).
@@ -805,7 +885,20 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
     usage: { status: "error", message: CLAUDE_RENEWS_MESSAGE, ...known },
   };
   if (login === "renewable") return renewing;
+  const throttled: ProviderUsageResult = {
+    supported: true,
+    usage: { status: "error", message: CLAUDE_THROTTLED_MESSAGE, ...known },
+  };
+  const tokenHash = hashToken(credentials.accessToken);
+  const currentThrottle = await readUsageThrottle();
+  if (
+    currentThrottle?.tokenHash === tokenHash &&
+    Date.now() < currentThrottle.until
+  ) {
+    return throttled;
+  }
   try {
+    const userAgent = await claudeUserAgent(command);
     const response = await fetchWithProxyFallback((init) =>
       fetch(CLAUDE_USAGE_URL, {
         ...init,
@@ -814,7 +907,7 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
           Accept: "application/json",
           "Content-Type": "application/json",
           "anthropic-beta": "oauth-2025-04-20",
-          "User-Agent": "claude-code/2.1.0",
+          "User-Agent": userAgent,
         },
         signal: AbortSignal.timeout(USAGE_FETCH_TIMEOUT_MS),
       }),
@@ -822,19 +915,35 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
     // Claude Code answers a 401 by renewing, so only a login it can't renew is expired.
     if (response.status === 401)
       return canRenew(credentials) ? renewing : expired;
+    if (response.status === 429) {
+      const streak =
+        currentThrottle?.tokenHash === tokenHash
+          ? currentThrottle.streak + 1
+          : 1;
+      const retryAfterMs =
+        parseRetryAfterMs(response.headers?.get?.("retry-after")) ??
+        Math.min(
+          USAGE_THROTTLE_BASE_MS * 2 ** (streak - 1),
+          USAGE_THROTTLE_MAX_MS,
+        );
+      await writeUsageThrottle({
+        tokenHash,
+        until: Date.now() + retryAfterMs,
+        streak,
+      });
+      return throttled;
+    }
     if (!response.ok) {
       return {
         supported: true,
         usage: {
           status: "error",
-          message:
-            response.status === 429
-              ? "Anthropic temporarily throttled this usage check. This does not mean your Claude limit is exhausted. Try again later."
-              : `Claude usage request failed (HTTP ${response.status}).`,
+          message: `Claude usage request failed (HTTP ${response.status}).`,
           ...known,
         },
       };
     }
+    await clearUsageThrottle();
     return {
       supported: true,
       usage: {
@@ -861,4 +970,8 @@ export const __testing = {
   claudeInstallation,
   claudeUpdatePlan,
   normalizeUsage,
+  resetUsageThrottle: (clearDisk = true) => {
+    usageThrottle = clearDisk ? null : undefined;
+    cachedUserAgent = null;
+  },
 };

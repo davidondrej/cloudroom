@@ -19,6 +19,7 @@ import type { SplitSide } from "@/lib/split-layout";
 export interface PaneContextValue {
   paneId: string;
   isFocused: boolean;
+  isHidden?: boolean;
   isSplitPane: boolean;
   secondaryPanelHost: PaneSecondaryPanelRegistration | null;
   reservesWindowPanelToggle: boolean;
@@ -151,6 +152,7 @@ export function DefaultPaneContextProvider({
     () => ({
       paneId: "main",
       isFocused: true,
+      isHidden: false,
       isSplitPane: false,
       secondaryPanelHost: null,
       reservesWindowPanelToggle: false,

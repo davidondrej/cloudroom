@@ -42,6 +42,7 @@ import {
   useIsBrowserDimmingModalOpen,
   useNativeBrowserViewShown,
 } from "@/hooks/useBrowserDimmingModal";
+import { useOptionalPaneContext } from "@/views/thread-detail/PaneContext";
 import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 import {
   useBrowserHistory,
@@ -766,7 +767,9 @@ export function BrowserTabContent({
     };
   }, [desktopBrowser, syncBoundsIfChanged]);
 
+  const isPaneHidden = useOptionalPaneContext()?.isHidden ?? false;
   const isViewVisible =
+    !isPaneHidden &&
     canShowNativeBrowserView &&
     (canHandleBrowserCommands || supportsUnfocusedShow) &&
     hasPage &&

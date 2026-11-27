@@ -525,11 +525,12 @@ pub struct Manager {
     pub(crate) terminals: runtime::terminal::Terminals,
     pub(crate) mac: crate::mac::Mac,
     pub(crate) secrets: crate::secrets::Secrets,
-    codex_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
-    claude_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
-    cursor_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
-    opencode_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
-    antigravity_models: tokio::sync::Mutex<Option<(Instant, Vec<runtime::Model>)>>,
+    codex_models: catalog::CatalogSlot,
+    claude_models: catalog::CatalogSlot,
+    cursor_models: catalog::CatalogSlot,
+    opencode_models: catalog::CatalogSlot,
+    antigravity_models: catalog::CatalogSlot,
+    claude_probes: catalog::ClaudeProbes,
     codex_auth: runtime::auth::CodexAuth,
     claude_auth: Arc<runtime::claude_auth::ClaudeAuth>,
     claude_login: runtime::claude_login::ClaudeLogin,
@@ -722,11 +723,12 @@ impl Manager {
             terminals: Default::default(),
             mac: crate::mac::Mac::default(),
             secrets: crate::secrets::Secrets::default(),
-            codex_models: tokio::sync::Mutex::new(None),
-            claude_models: tokio::sync::Mutex::new(None),
-            cursor_models: tokio::sync::Mutex::new(None),
-            opencode_models: tokio::sync::Mutex::new(None),
-            antigravity_models: tokio::sync::Mutex::new(None),
+            codex_models: catalog::CatalogSlot::default(),
+            claude_models: catalog::CatalogSlot::default(),
+            cursor_models: catalog::CatalogSlot::default(),
+            opencode_models: catalog::CatalogSlot::default(),
+            antigravity_models: catalog::CatalogSlot::default(),
+            claude_probes: catalog::ClaudeProbes::default(),
             codex_auth: runtime::auth::CodexAuth::default(),
             claude_auth: Arc::new(runtime::claude_auth::ClaudeAuth::default()),
             claude_login: runtime::claude_login::ClaudeLogin::default(),
@@ -1007,7 +1009,7 @@ impl Manager {
     }
 
     /// Match cloud Claude Code to the Mac's version (ADR 0133); waits while Claude runs.
-    pub async fn match_claude_version(&self, version: String) -> Result<Value> {
+    pub async fn match_claude_version(self: &Arc<Self>, version: String) -> Result<Value> {
         if !runtime::claude_version::valid(&version) {
             return Err(Error::Conflict("invalid version"));
         }
@@ -1019,7 +1021,13 @@ impl Manager {
                 && (s.handle.is_some()
                     || matches!(s.state, SessionState::Starting | SessionState::Resuming))
         });
-        Ok(runtime::claude_version::ensure(self.config.clone(), version, busy).await)
+        let manager = self.clone();
+        Ok(
+            runtime::claude_version::ensure(self.config.clone(), version, busy, move || {
+                manager.invalidate_catalog(runtime::Kind::Claude);
+            })
+            .await,
+        )
     }
 
     /// Account checks shared by new sessions and Teleport's preflight.

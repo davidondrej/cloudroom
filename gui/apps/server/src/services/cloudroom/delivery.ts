@@ -11,6 +11,7 @@ import { appRequestId } from "./cloud-threads.js";
 import { CLOUD_HARNESSES, HARNESS_NAMES, isCloudProvider, projectFollowUp, projectInitialPrompt, type StartStep } from "./events.js";
 import { CHILD_HINT, cloudForkOf, codeFromOf, FORK_HINT, startCloudFork, threadCode } from "./fork.js";
 import { macHarnessVersions } from "./harness-versions.js";
+import { hedge } from "./hedge.js";
 import type { CloudLifecycle } from "./lifecycle.js";
 import type { CloudMessaging } from "./messaging.js";
 import { helperDevice } from "./previews.js";
@@ -324,84 +325,105 @@ export class CloudDelivery {
     // Recovering a thread whose previous session vanished on a fresh sandbox: never re-run old fork/side-chat/code_from,
     // and fall back to the thread's current project & settings when there is no local first command (e.g. adopted loops).
     const recovering = recovery || !initial || (initial.command === "prompt" && initial.state !== "sending");
-    if (!recovering) this.messaging.progress(threadId, [cloudStep(Boolean(sandbox), "completed"), { key: "agent", text: `Starting ${HARNESS_NAMES[harness]}`, status: "started" }]);
-    const { model, provider } = coreModel(harness, saved.model, capabilities);
-    const options = initial ? z.object({ workspace: z.string().optional(), workspace_name: z.string().optional(), provider: z.string().optional(), command_guard_enabled: z.boolean().optional(), strip_ai_co_authors: z.boolean().optional(), system_prompt: z.string().optional() }).parse(JSON.parse(initial.input)) : {};
-    if (recovering && thread) {
-      const project = this.rt.host.getProject(thread.projectId);
-      if (!options.workspace && project) {
-        Object.assign(options, project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) });
-      }
-      const settings = this.rt.host.getAppSettings();
-      options.command_guard_enabled ??= settings.commandGuardEnabled;
-      options.strip_ai_co_authors ??= settings.stripAiCoAuthorsEnabled;
-      if (!options.system_prompt) {
-        const projectNote = project && project.id !== PERSONAL_PROJECT_ID ? await localProjectNote(this.rt.host.deps, project.id) : undefined;
-        options.system_prompt = this.rt.host.buildSystemPrompt(threadId, thread.projectId, this.rt.sandboxes.vpsConnected, projectNote);
-      }
+    const label = `Starting ${HARNESS_NAMES[harness]}`;
+    let slowTimer: ReturnType<typeof setTimeout> | undefined;
+    let slowNoted = false;
+    const markSlow = (note: string) => {
+      slowNoted = true;
+      if (!recovering) this.messaging.progress(threadId, [{ key: "agent", text: `${label} (${note})`, status: "started" }]);
+    };
+    if (!recovering) {
+      this.messaging.progress(threadId, [cloudStep(Boolean(sandbox), "completed"), { key: "agent", text: label, status: "started" }]);
+      // A status note only: a failed write must never escape the timer and crash the server.
+      slowTimer = setTimeout(() => { try { if (!slowNoted) markSlow("taking longer than usual"); } catch { /* ignore */ } }, 8_000);
+      slowTimer.unref?.();
     }
-    if (!capabilities.command_guard) delete options.command_guard_enabled;
-    if (!capabilities.strip_ai_co_authors) delete options.strip_ai_co_authors;
-    if (!capabilities.system_prompt) delete options.system_prompt;
-    if (!capabilities.direct_workspaces) throw new ApiError(503, "cloudroom_update", "Update the cloud core to start agents without copying files. Your message is saved.");
-    if (options.workspace === ROOT_WORKSPACE && !capabilities.root_workspace) throw new ApiError(503, "cloudroom_update", "Update the cloud core to start agents outside a project. Your message is saved.");
-    if (harness === "codex" && capabilities.codex_auth_import && !sandbox) await importCodexLogin(this.rt.host.deps);
-    if (harness === "pi") await this.auth.copyPiSetup(client, Boolean(sandbox));
-    const fork = recovering ? null : cloudForkOf(initial?.input);
-    const sideChat = !recovering && initial?.command === "side_chat" ? z.object({ side_chat: z.string() }).parse(JSON.parse(initial.input)).side_chat : null;
-    const codeFrom = recovering ? undefined : codeFromOf(initial?.input);
-    // A Cloud parent's child reports its own turns, and takes tell, stop and archive, through the website (ADR 0259).
-    // Only a parent with a sandbox of its own has a link there; children of one sharing a sandbox keep the app's path.
-    const relayed = Boolean(codeFrom && this.rt.host.getThread(threadId)?.parentThreadId === codeFrom && capabilities.relay && binding(this.rt.host.db, codeFrom)?.coreUrl === SANDBOX_PREFIX + codeFrom);
-    if (relayed && initial && !JSON.parse(initial.input).parent_thread) {
-      this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(initial.input), parent_thread: codeFrom }) }).where(eq(cloudroomCommands.id, initial.id)).run();
-    }
-    const parentThread = relayed ? { parent_thread: codeFrom } : {};
-    const target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
-    if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
-    const plan = { key: copyKey(sandbox, target ?? ""), branch: recovering ? undefined : baseBranch(initial?.input) };
-    // The project's loops get its current .env files (ADR 20261101-004659).
-    if (target) syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
-    const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
-    // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
-    const [planned, started] = await Promise.all([
-      target ? planNewProjectCopy(this.rt.host.deps, client, threadId, target, plan).catch(failure) : null,
-      sideChat
-        ? this.lifecycle.startSideChat(client, threadId, saved, capabilities, harness, sideChat)
-        : fork
-          ? startCloudFork(this.rt.host.deps, client, threadId, fork, {
-              model, provider: provider ?? null, reasoning: saved.reasoning, service_tier: z.object({ service_tier: z.string().optional() }).parse(JSON.parse(initial!.input)).service_tier ?? null,
-              workspace: options.workspace ?? ROOT_WORKSPACE, workspace_name: options.workspace_name ?? ROOT_WORKSPACE,
-              ...(options.command_guard_enabled === undefined ? {} : { command_guard_enabled: options.command_guard_enabled }),
-              ...(options.strip_ai_co_authors === undefined ? {} : { strip_ai_co_authors: options.strip_ai_co_authors }),
-              ...(options.system_prompt ? { system_prompt: options.system_prompt } : {}),
-              ...roomIds(capabilities, threadId, thread?.projectId),
-            }, (patch) => {
-              const latest = command(this.rt.host.db, `first_${threadId}`)!;
-              this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
-            })
-          : client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: !recovering && initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) }).then((accepted) => {
-              const transfer = `child_${threadId}`;
-              return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
-            }),
-    ]);
-    // A side chat switched agent or model while this start ran: drop the old session; the next tick starts the new one.
-    const now = binding(this.rt.host.db, threadId);
-    if (sideChat && (this.rt.host.getThread(threadId)?.providerId !== harness || now?.model !== saved.model || now?.startRequestId !== saved.startRequestId)) {
-      void client.close(started.sessionId, randomUUID()).catch(() => {});
-      return null;
-    }
-    if (harness === "acp-antigravity" && !fork) {
-      const failure = await this.lifecycle.startFailure(client, started.sessionId, true);
-      if (failure) {
-        // Core stored a terminal receipt for this start. Retry with a fresh ID, preserving the first prompt.
-        saveBinding(this.rt.host.db, threadId, { startRequestId: randomUUID() });
-        if (cloudLoginProvider(failure) === harness)
-          throw new CloudroomError(antigravitySignInRequired, 409, "antigravity_auth_required");
-        if (failure.includes("Antigravity no longer offers the selected model"))
-          void this.rt.sandboxes.antigravityLogin({ action: "refresh", rejectedModel: true }).catch(() => {});
-        throw new ApiError(400, "cloudroom_start_failed", failure);
+    let planned: Awaited<ReturnType<typeof planNewProjectCopy>> | Error | null;
+    let started: { sessionId: string; transfer: string; code: ReturnType<typeof threadCode> | null };
+    let target: string | null;
+    try {
+      const { model, provider } = coreModel(harness, saved.model, capabilities);
+      const options = initial ? z.object({ workspace: z.string().optional(), workspace_name: z.string().optional(), provider: z.string().optional(), command_guard_enabled: z.boolean().optional(), strip_ai_co_authors: z.boolean().optional(), system_prompt: z.string().optional() }).parse(JSON.parse(initial.input)) : {};
+      if (recovering && thread) {
+        const project = this.rt.host.getProject(thread.projectId);
+        if (!options.workspace && project) {
+          Object.assign(options, project.id === PERSONAL_PROJECT_ID ? { workspace: ROOT_WORKSPACE } : { workspace: workspaceId(project.id), workspace_name: workspaceName(project.name) });
+        }
+        const settings = this.rt.host.getAppSettings();
+        options.command_guard_enabled ??= settings.commandGuardEnabled;
+        options.strip_ai_co_authors ??= settings.stripAiCoAuthorsEnabled;
+        if (!options.system_prompt) {
+          const projectNote = project && project.id !== PERSONAL_PROJECT_ID ? await localProjectNote(this.rt.host.deps, project.id) : undefined;
+          options.system_prompt = this.rt.host.buildSystemPrompt(threadId, thread.projectId, this.rt.sandboxes.vpsConnected, projectNote);
+        }
       }
+      if (!capabilities.command_guard) delete options.command_guard_enabled;
+      if (!capabilities.strip_ai_co_authors) delete options.strip_ai_co_authors;
+      if (!capabilities.system_prompt) delete options.system_prompt;
+      if (!capabilities.direct_workspaces) throw new ApiError(503, "cloudroom_update", "Update the cloud core to start agents without copying files. Your message is saved.");
+      if (options.workspace === ROOT_WORKSPACE && !capabilities.root_workspace) throw new ApiError(503, "cloudroom_update", "Update the cloud core to start agents outside a project. Your message is saved.");
+      if (harness === "codex" && capabilities.codex_auth_import && !sandbox) await importCodexLogin(this.rt.host.deps);
+      if (harness === "pi") await this.auth.copyPiSetup(client, Boolean(sandbox));
+      const fork = recovering ? null : cloudForkOf(initial?.input);
+      const sideChat = !recovering && initial?.command === "side_chat" ? z.object({ side_chat: z.string() }).parse(JSON.parse(initial.input)).side_chat : null;
+      const codeFrom = recovering ? undefined : codeFromOf(initial?.input);
+      // A Cloud parent's child reports its own turns, and takes tell, stop and archive, through the website (ADR 0259).
+      // Only a parent with a sandbox of its own has a link there; children of one sharing a sandbox keep the app's path.
+      const relayed = Boolean(codeFrom && this.rt.host.getThread(threadId)?.parentThreadId === codeFrom && capabilities.relay && binding(this.rt.host.db, codeFrom)?.coreUrl === SANDBOX_PREFIX + codeFrom);
+      if (relayed && initial && !JSON.parse(initial.input).parent_thread) {
+        this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(initial.input), parent_thread: codeFrom }) }).where(eq(cloudroomCommands.id, initial.id)).run();
+      }
+      const parentThread = relayed ? { parent_thread: codeFrom } : {};
+      target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
+      if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
+      const plan = { key: copyKey(sandbox, target ?? ""), branch: recovering ? undefined : baseBranch(initial?.input) };
+      // The project's loops get its current .env files (ADR 20261101-004659).
+      if (target) syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
+      const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
+      // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
+      [planned, started] = await Promise.all([
+        target ? planNewProjectCopy(this.rt.host.deps, client, threadId, target, plan).catch(failure) : null,
+        sideChat
+          ? this.lifecycle.startSideChat(client, threadId, saved, capabilities, harness, sideChat)
+          : fork
+            ? startCloudFork(this.rt.host.deps, client, threadId, fork, {
+                model, provider: provider ?? null, reasoning: saved.reasoning, service_tier: z.object({ service_tier: z.string().optional() }).parse(JSON.parse(initial!.input)).service_tier ?? null,
+                workspace: options.workspace ?? ROOT_WORKSPACE, workspace_name: options.workspace_name ?? ROOT_WORKSPACE,
+                ...(options.command_guard_enabled === undefined ? {} : { command_guard_enabled: options.command_guard_enabled }),
+                ...(options.strip_ai_co_authors === undefined ? {} : { strip_ai_co_authors: options.strip_ai_co_authors }),
+                ...(options.system_prompt ? { system_prompt: options.system_prompt } : {}),
+                ...roomIds(capabilities, threadId, thread?.projectId),
+              }, (patch) => {
+                const latest = command(this.rt.host.db, `first_${threadId}`)!;
+                this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(latest.input), fork: { ...fork, ...patch } }) }).where(eq(cloudroomCommands.id, latest.id)).run();
+              })
+            : hedge((signal) => client.start(saved.startRequestId, CLOUD_HARNESSES[harness], { model, reasoning: !recovering && initial && JSON.parse(initial.input).default_reasoning ? undefined : saved.reasoning, ...options, ...parentThread, ...roomIds(capabilities, threadId, thread?.projectId), ...(provider ? { provider } : {}) }, signal), {
+                onHedge: () => markSlow("retrying connection"),
+              }).then((accepted) => {
+                const transfer = `child_${threadId}`;
+                return { sessionId: accepted.session_id, transfer, code: codeFrom ? threadCode(this.rt.host.deps, codeFrom, transfer) : null };
+              }),
+      ]);
+      // A side chat switched agent or model while this start ran: drop the old session; the next tick starts the new one.
+      const now = binding(this.rt.host.db, threadId);
+      if (sideChat && (this.rt.host.getThread(threadId)?.providerId !== harness || now?.model !== saved.model || now?.startRequestId !== saved.startRequestId)) {
+        void client.close(started.sessionId, randomUUID()).catch(() => {});
+        return null;
+      }
+      if (harness === "acp-antigravity" && !fork) {
+        const failure = await this.lifecycle.startFailure(client, started.sessionId, true);
+        if (failure) {
+          // Core stored a terminal receipt for this start. Retry with a fresh ID, preserving the first prompt.
+          saveBinding(this.rt.host.db, threadId, { startRequestId: randomUUID() });
+          if (cloudLoginProvider(failure) === harness)
+            throw new CloudroomError(antigravitySignInRequired, 409, "antigravity_auth_required");
+          if (failure.includes("Antigravity no longer offers the selected model"))
+            void this.rt.sandboxes.antigravityLogin({ action: "refresh", rejectedModel: true }).catch(() => {});
+          throw new ApiError(400, "cloudroom_start_failed", failure);
+        }
+      }
+    } finally {
+      clearTimeout(slowTimer);
     }
     const copy = planned instanceof Error ? null : planned;
     // Like any failed copy, the card shows only for a project with no folder on the Mac; otherwise only the agent
@@ -416,7 +438,7 @@ export class CloudDelivery {
     const copying = copy?.clone && copy.repository ? `Cloning ${copy.repository.replace(/^https:\/\/(?:github\.com\/)?/, "")}` : copy?.copyAll ? `Copying project from your ${COMPUTER}` : null;
     const files: StartStep[] = copying ? [{ key: "files", text: copying, status: "started" }] : [];
     const forkCode: StartStep[] = started.code ? [{ key: "fork", text: "Copying the source thread's code", status: "started" }] : [];
-    if (!recovering) this.messaging.progress(threadId, [{ key: "agent", status: "completed" }, ...files, ...forkCode], "completed");
+    if (!recovering) this.messaging.progress(threadId, [{ key: "agent", text: label, status: "completed" }, ...files, ...forkCode], "completed");
     const firstSent = new Promise<void>((resolve) => { ctx.releaseCopy = resolve; });
     ctx.step = "workspace";
     const entry = this.rt.state(threadId);
@@ -429,7 +451,7 @@ export class CloudDelivery {
     // After 3 failed tries the start fails where the user sees it; a permanent error fails it at once.
     const workspace = await (async () => {
       // Core's 404 means no workspace, like `client.workspace`; any other error tries again.
-      const lookup = () => client.sessionWorkspace(started.sessionId).catch((error: unknown) => {
+      const lookup = () => hedge((signal) => client.sessionWorkspace(started.sessionId, signal)).catch((error: unknown) => {
         if (error instanceof CloudroomError && error.status === 404) return null;
         throw error;
       });
@@ -564,7 +586,7 @@ export class CloudDelivery {
       const options = { ...(capabilities.structured_prompt && content !== undefined ? { content: content as never } : {}), ...(attachments.length ? { attachments: attachments as never } : {}), ...(parsed.service_tier ? { service_tier: parsed.service_tier } : {}) };
       return fork
         ? client.rewind(sessionId, `fork_${threadId}`, fork.before, fork.last_turn_id, { request_id: pending.id, text, ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}), ...options }, true)
-        : client.prompt(sessionId, pending.id, text, parsed.reasoning, { ...options, ...(parsed.sender_thread_id ? { sender: parsed.sender_thread_id } : {}) });
+        : hedge((signal) => client.prompt(sessionId, pending.id, text, parsed.reasoning, { ...options, ...(parsed.sender_thread_id ? { sender: parsed.sender_thread_id } : {}) }, signal));
     }
     if (pending.command === "edit") {
       const parsed = z.object({
@@ -597,7 +619,7 @@ export class CloudDelivery {
       // Core steers text only, so files go up first and the agent gets their paths, as Core does for prompt files.
       const uploaded = await this.queue.uploadAttachments(client, sessionId, pending.id, parsed.attachments, this.rt.host.getThread(threadId)?.projectId ?? "", capabilities.upload_parts);
       const text = [this.rt.host.prepareInstructionInput(parsed, parsed.customInstructions, cloudPromptLimit(capabilities)).text, ...uploaded.map((file) => `[Attached ${file.kind}: ${file.path}]`)].join("\n");
-      return client.steer(sessionId, pending.id, parsed.target_request_id, text);
+      return hedge((signal) => client.steer(sessionId, pending.id, parsed.target_request_id, text, signal));
     }
     if (pending.command === "compact") return client.compact(sessionId, pending.id, z.object({ then: z.string().optional() }).parse(JSON.parse(pending.input)).then);
     if (pending.command === "goal") return client.goal(sessionId, pending.id, JSON.parse(pending.input));
@@ -612,14 +634,14 @@ export class CloudDelivery {
       const keepPaused = JSON.parse(pending.input).keep_paused === true;
       // Cached capabilities can describe another sandbox or an older Core; never fall back to releasing Stop.
       if (keepPaused && !feature(await this.rt.capabilities(client), "resume_keep_paused")) throw new ApiError(503, "cloudroom_update", "Update the cloud core to restart this stopped agent safely. Your message is saved.");
-      return client.resume(sessionId, pending.id, keepPaused);
+      return hedge((signal) => client.resume(sessionId, pending.id, keepPaused, signal));
     }
     if (pending.command === "stop" || pending.command === "sleep") {
       const { after, guarded } = pending.command === "stop" ? z.object({ after: z.string().optional(), guarded: z.boolean().optional() }).catch({}).parse(JSON.parse(pending.input)) : {};
       const scoped = after && feature(await this.rt.capabilities(client), "cloud_threads") ? after : null;
       // A stop held while the sandbox was unreachable (#1699) never goes out without its turn: it could stop a newer one.
       if (guarded && !scoped) { saveCommandState(this.rt.host.db, threadId, pending.id, "cancelled"); return null; }
-      return scoped ? client.stop(sessionId, pending.id, scoped) : client[pending.command](sessionId, pending.id);
+      return hedge((signal) => scoped ? client.stop(sessionId, pending.id, scoped, signal) : pending.command === "stop" ? client.stop(sessionId, pending.id, undefined, signal) : client.sleep(sessionId, pending.id, signal));
     }
     throw new CloudroomError(`Unsupported cloud command ${pending.command}`, 400);
   }

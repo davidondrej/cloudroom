@@ -39,9 +39,30 @@ export async function codexLinuxSandboxError(args: {
         resolve(typeof error?.code === "number" ? String(output) : ""),
     );
   });
-  const failure = stderr
-    .split("\n")
-    .find((line) => USER_NAMESPACE_FAILURES.some((known) => line.includes(known)));
+  const failure = userNamespaceFailure(stderr);
   if (failure === undefined) return null;
-  return `Codex can't start its command sandbox on this Linux computer (${failure.trim()}). Follow Codex's Linux setup at https://developers.openai.com/codex/concepts/sandboxing#prerequisites, or switch this thread to Full access.`;
+  return `Codex can't start its command sandbox on this Linux computer (${failure}). Follow Codex's Linux setup at ${LINUX_SETUP_URL}, or switch this thread to Full access.`;
+}
+
+// Codex 0.172 reads AGENTS.md in a network-isolated sandbox whenever
+// Cloudroom's deny profile is on, in every permission mode (#2828). A host that
+// can't set up loopback passes the probe above, then fails thread creation with
+// the raw error. Full access hits it too, so the guidance leaves it out.
+export function codexLinuxThreadStartError(message: string): string | null {
+  const failure = userNamespaceFailure(message);
+  if (failure === undefined) return null;
+  // Link first: batched parent notices keep only 300 characters.
+  return `Codex can't start its sandbox on this Linux computer. Follow Codex's Linux setup at ${LINUX_SETUP_URL}. Cause: ${failure}`;
+}
+
+const LINUX_SETUP_URL =
+  "https://developers.openai.com/codex/concepts/sandboxing#prerequisites";
+
+function userNamespaceFailure(output: string): string | undefined {
+  return output
+    .split("\n")
+    .find((line) =>
+      USER_NAMESPACE_FAILURES.some((known) => line.includes(known)),
+    )
+    ?.trim();
 }

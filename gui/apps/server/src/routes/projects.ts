@@ -738,6 +738,17 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     return context.json({ paths: result.paths, truncated: result.truncated });
   });
 
+  const COMMAND_CATALOG_CACHE_TTL_MS = 20_000;
+  const COMMAND_CATALOG_CACHE_MAX_ENTRIES = 32;
+  type DiscoveredCommandCatalog = {
+    commands: Parameters<typeof buildCommandListResponse>[0]["commands"];
+    skillCatalog: ReturnType<typeof resolveSkillCatalog>;
+  };
+  const commandCatalogCache = new Map<
+    string,
+    { expiresAt: number; promise: Promise<DiscoveredCommandCatalog> }
+  >();
+
   get(routes.commands, async (context, query) => {
     const projectId = context.req.param("id");
     requirePublicProject(deps.db, projectId);
@@ -752,37 +763,82 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       environmentId: query.environmentId,
       hostId: query.hostId,
     });
-    const listProviderCommands = async () => {
-      if (!providerHasNativeRootSurface(registration)) {
-        return { commands: [] };
-      }
-      return scanProviderNativeRoots(deps, {
-        type: "host.list_commands",
-        registration,
-        hostId: workspace.hostId,
-        cwd: workspace.cwd,
-      });
-    };
-    const [result, projectSkillSources, sharedSkills] = await Promise.all([
-      listProviderCommands(),
-      workspace.cwd === null
-        ? Promise.resolve([])
-        : resolveWorkspaceProjectSkills(deps, {
-            hostId: workspace.hostId,
-            workspacePath: workspace.cwd,
-          }),
-      resolveSharedSkills(deps, {
-        hostId: workspace.hostId,
-        cwd: workspace.cwd,
-      }),
+    const cacheKey = JSON.stringify([
+      projectId,
+      query.provider,
+      workspace.hostId,
+      workspace.cwd ?? "",
+      deps.providerRegistry.getRegistrationRevision(),
     ]);
-    const skillCatalog = resolveSkillCatalog(deps, {
-      projectSkillSources,
-      sharedSkillSources: sharedSkills.runtimeSources,
-    });
+    const now = Date.now();
+    const cached = commandCatalogCache.get(cacheKey);
+    let catalogPromise: Promise<DiscoveredCommandCatalog>;
+    if (cached !== undefined && cached.expiresAt > now) {
+      catalogPromise = cached.promise;
+    } else {
+      const loadCatalog = async (): Promise<DiscoveredCommandCatalog> => {
+        const listProviderCommands = async () => {
+          if (!providerHasNativeRootSurface(registration)) {
+            return { commands: [] };
+          }
+          return scanProviderNativeRoots(deps, {
+            type: "host.list_commands",
+            registration,
+            hostId: workspace.hostId,
+            cwd: workspace.cwd,
+          });
+        };
+        const [result, projectSkillSources, sharedSkills] = await Promise.all([
+          listProviderCommands(),
+          workspace.cwd === null
+            ? Promise.resolve([])
+            : resolveWorkspaceProjectSkills(deps, {
+                hostId: workspace.hostId,
+                workspacePath: workspace.cwd,
+              }),
+          resolveSharedSkills(deps, {
+            hostId: workspace.hostId,
+            cwd: workspace.cwd,
+          }),
+        ]);
+        const skillCatalog = resolveSkillCatalog(deps, {
+          projectSkillSources,
+          sharedSkillSources: sharedSkills.runtimeSources,
+          includeTreeHash: false,
+        });
+        return { commands: result.commands, skillCatalog };
+      };
+      catalogPromise = loadCatalog();
+      const entry = {
+        expiresAt: now + COMMAND_CATALOG_CACHE_TTL_MS,
+        promise: catalogPromise,
+      };
+      if (
+        commandCatalogCache.size >= COMMAND_CATALOG_CACHE_MAX_ENTRIES &&
+        !commandCatalogCache.has(cacheKey)
+      ) {
+        const oldestKey = commandCatalogCache.keys().next().value;
+        if (oldestKey !== undefined) commandCatalogCache.delete(oldestKey);
+      }
+      commandCatalogCache.set(cacheKey, entry);
+      void catalogPromise.then(
+        () => {
+          if (commandCatalogCache.get(cacheKey) === entry) {
+            entry.expiresAt = Date.now() + COMMAND_CATALOG_CACHE_TTL_MS;
+          }
+        },
+        () => {
+          if (commandCatalogCache.get(cacheKey) === entry) {
+            commandCatalogCache.delete(cacheKey);
+          }
+        },
+      );
+    }
+
+    const { commands, skillCatalog } = await catalogPromise;
     return context.json(
       buildCommandListResponse({
-        commands: result.commands,
+        commands,
         commandUsage: listCommandUsage(deps),
         includeBuiltinCompact: deps.providerRegistry.supportsManualCompaction(
           query.provider,
@@ -829,6 +885,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       skillId: payload.skillId,
       workspace,
     });
+    commandCatalogCache.clear();
     return context.json({ deletedPath });
   });
 
@@ -869,6 +926,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       revision: payload.revision,
       workspace,
     });
+    commandCatalogCache.clear();
     return context.json(result);
   });
 

@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from "react";
 
-/** Hover text for the sidebar's loop icon, per thread a loop started or wakes (#1136). Each Loops sidebar label sends
+/** Loop names for the purpose cards (sidebar strip, title chip), per thread a loop started or wakes (#1136). Each Loops sidebar label sends
  *  its whole set, as `{ owner, threads }`, with each read (about once a minute, and right after a loop changes here),
  *  and `threads: null` when it unmounts (Loops turned off or hidden). Rows show what the mounted labels sent. */
 const LOOP_THREADS_EVENT = "cloudroom:loop-threads";

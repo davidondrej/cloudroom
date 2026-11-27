@@ -34,7 +34,7 @@ const unavailableSystemConfig: SystemConfigResponse = {
     mobileApp: false,
     multiMachinePicker: false,
     sidebarProgressiveDisclosure: false,
-    timelineWindowing: false,
+    timelineWindowing: true,
   },
   appearance: defaultAppTheme,
   customThemes: [],

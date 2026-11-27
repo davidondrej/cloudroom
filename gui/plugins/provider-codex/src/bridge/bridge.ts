@@ -100,7 +100,10 @@ import {
   type CodexAppServerExitInfo,
   type CodexAppServerRequestResponder,
 } from "./app-server-connection.js";
-import { codexLinuxSandboxError } from "./linux-sandbox.js";
+import {
+  codexLinuxSandboxError,
+  codexLinuxThreadStartError,
+} from "./linux-sandbox.js";
 import {
   codexBrokenInstallHint,
   getCodexProviderHealth,
@@ -1412,7 +1415,13 @@ async function constructThreadSession(
       (delayMs) =>
         `codex thread has another active writer; retrying ${method} in ${delayMs}ms.`,
       session.stopRequested.signal,
-    );
+    ).catch((error: unknown) => {
+      const guidance =
+        error instanceof Error
+          ? codexLinuxThreadStartError(error.message)
+          : null;
+      throw guidance === null ? error : new Error(guidance);
+    });
     const codexThreadId = result.thread.id;
     session.codexThreadId = codexThreadId;
     if (args.request.kind !== "start") {

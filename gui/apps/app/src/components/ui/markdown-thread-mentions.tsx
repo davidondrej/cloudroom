@@ -344,7 +344,7 @@ interface BuildThreadMentionComponentArgs {
   resolveSegmentLinkHref?: TimelineTitleLinkResolver;
 }
 
-interface ThreadMentionElementProps {
+export interface ThreadMentionElementProps {
   "data-raw-thread-id"?: string;
   "data-raw-thread-inline-code"?: string;
   "data-thread-id"?: string;
@@ -369,72 +369,103 @@ function resolveThreadMentionHref(
   return resolveSegmentLinkHref(link) ?? undefined;
 }
 
+function RawThreadMentionPillWithQuery({
+  inlineCode,
+  threadId,
+}: {
+  inlineCode: boolean;
+  threadId: string;
+}) {
+  const resource = useRawThreadMentionResource(threadId);
+  if (resource === null) {
+    return inlineCode ? (
+      <code className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs">
+        {threadId}
+      </code>
+    ) : (
+      threadId
+    );
+  }
+  return <PromptMentionPill resource={resource} serializedText={threadId} />;
+}
+
+function ThreadMentionPillWithQuery({
+  mentions,
+  resolveSegmentLinkHref,
+  threadId,
+}: {
+  mentions: readonly PromptTextMention[];
+  resolveSegmentLinkHref?: TimelineTitleLinkResolver;
+  threadId: string;
+}) {
+  const liveResource = useThreadMentionResource(threadId);
+  const resource =
+    liveResource ?? resolveThreadMentionResource(mentions, threadId);
+  return (
+    <PromptMentionPill
+      resource={resource}
+      serializedText={`@thread:${threadId}`}
+      linkHref={resolveThreadMentionHref(threadId, resolveSegmentLinkHref)}
+    />
+  );
+}
+
+export type ThreadMentionViewProps = ThreadMentionElementProps &
+  BuildThreadMentionComponentArgs;
+
+export function ThreadMentionView({
+  mentions,
+  resolveSegmentLinkHref,
+  ...props
+}: ThreadMentionViewProps) {
+  const threadId = props["data-thread-id"] ?? "";
+  const rawThreadId = props["data-raw-thread-id"];
+  const sidebarResource = useSidebarThreadMentionResource(threadId);
+  if (threadId.length === 0) {
+    return null;
+  }
+  if (rawThreadId !== undefined) {
+    return (
+      <RawThreadMentionPillWithQuery
+        inlineCode={props["data-raw-thread-inline-code"] !== undefined}
+        threadId={threadId}
+      />
+    );
+  }
+  const persistedResource = mentions.find(
+    (mention) =>
+      mention.resource.kind === "thread" &&
+      mention.resource.threadId === threadId,
+  )?.resource;
+  const resource = sidebarResource ?? persistedResource;
+  if (resource === undefined) {
+    return (
+      <ThreadMentionPillWithQuery
+        mentions={mentions}
+        resolveSegmentLinkHref={resolveSegmentLinkHref}
+        threadId={threadId}
+      />
+    );
+  }
+  return (
+    <PromptMentionPill
+      resource={resource}
+      serializedText={`@thread:${threadId}`}
+      linkHref={resolveThreadMentionHref(threadId, resolveSegmentLinkHref)}
+    />
+  );
+}
+
 export function buildThreadMentionComponent({
   mentions,
   resolveSegmentLinkHref,
 }: BuildThreadMentionComponentArgs): ComponentType<ThreadMentionElementProps> {
-  function RawThreadMentionPillWithQuery({
-    inlineCode,
-    threadId,
-  }: {
-    inlineCode: boolean;
-    threadId: string;
-  }) {
-    const resource = useRawThreadMentionResource(threadId);
-    if (resource === null) {
-      return inlineCode ? (
-        <code className="rounded bg-muted/70 px-1.5 py-0.5 font-mono text-xs">
-          {threadId}
-        </code>
-      ) : (
-        threadId
-      );
-    }
-    return <PromptMentionPill resource={resource} serializedText={threadId} />;
-  }
-
-  function ThreadMentionPillWithQuery({ threadId }: { threadId: string }) {
-    const liveResource = useThreadMentionResource(threadId);
-    const resource =
-      liveResource ?? resolveThreadMentionResource(mentions, threadId);
-    return (
-      <PromptMentionPill
-        resource={resource}
-        serializedText={`@thread:${threadId}`}
-        linkHref={resolveThreadMentionHref(threadId, resolveSegmentLinkHref)}
-      />
-    );
-  }
-
   function ThreadMentionElement(props: ThreadMentionElementProps) {
-    const threadId = props["data-thread-id"] ?? "";
-    const rawThreadId = props["data-raw-thread-id"];
-    const sidebarResource = useSidebarThreadMentionResource(threadId);
-    if (threadId.length === 0) {
-      return null;
-    }
-    if (rawThreadId !== undefined) {
-      return (
-        <RawThreadMentionPillWithQuery
-          inlineCode={props["data-raw-thread-inline-code"] !== undefined}
-          threadId={threadId}
-        />
-      );
-    }
-    const persistedResource = mentions.find(
-      (mention) =>
-        mention.resource.kind === "thread" &&
-        mention.resource.threadId === threadId,
-    )?.resource;
-    const resource = sidebarResource ?? persistedResource;
-    if (resource === undefined) {
-      return <ThreadMentionPillWithQuery threadId={threadId} />;
-    }
     return (
-      <PromptMentionPill
-        resource={resource}
-        serializedText={`@thread:${threadId}`}
-        linkHref={resolveThreadMentionHref(threadId, resolveSegmentLinkHref)}
+      <ThreadMentionView
+        {...props}
+        mentions={mentions}
+        resolveSegmentLinkHref={resolveSegmentLinkHref}
       />
     );
   }

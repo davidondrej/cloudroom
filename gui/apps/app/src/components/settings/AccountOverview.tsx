@@ -49,6 +49,7 @@ export function AccountOverview({ email: real, onSignOut }: { email: string; onS
   const codex = useCloudLogin("codex").data?.state;
   const lab = useGitlabConnection().state;
   const paid = Boolean(status?.plan && status.plan !== "free");
+  const callEligible = paid || Boolean(status?.planUsage?.callEligible);
   return <>
     <div className="grid gap-4 sm:grid-cols-[minmax(0,1.45fr)_minmax(0,1fr)]">
       <MembershipCard email={email} plan={status?.plan ?? null} login={githubUser?.login ?? null} usage={status?.planUsage ?? null} />
@@ -58,7 +59,7 @@ export function AccountOverview({ email: real, onSignOut }: { email: string; onS
           : <ActionRow icon="Zap" title="Upgrade to Pro" detail="55,000 Cloud Credits every month" external onClick={openBilling} />}
         <ActionRow icon="Plus" title="Buy credits" detail="From $5 · $1 = 1,000 credits" external onClick={openBilling} />
         <ActionRow icon="FileText" title="Invoices" detail="Receipts for every payment" external onClick={openBilling} />
-        {paid && <ActionRow icon="Calendar" title="Book a 1:1 call" detail="30 minutes with our team" external onClick={() => openUrlInExternalBrowser(CALL_URL)} />}
+        {callEligible && <ActionRow icon="Calendar" title="Book a 1:1 call" detail="30 minutes with our team" external onClick={() => openUrlInExternalBrowser(CALL_URL)} />}
         <ActionRow icon="LogOut" title="Sign out" detail="Cloud agents keep running" onClick={onSignOut} />
       </div>
     </div>

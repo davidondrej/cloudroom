@@ -143,7 +143,7 @@ export type CloudCapacity = "paid" | "priority";
 /** The account's Cloud Credits in the rolling 30 days (ADR 0307), for the sidebar card; null credits while metering is stale. */
 /** Plan credits used this credit period, when they refill (ADR 20261108-142517; null from older websites), and credits
  *  left in live packs (ADR 0317): 0 from older websites. */
-export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number;
+export type PlanUsage = { plan: string; credits: number | null; creditsLimit: number; resetsAt: string | null; extraCredits: number; extraCreditsTotal: number; callEligible?: boolean;
   /** Free's new Cloud threads left this month and in the rolling hour, null when uncapped or from older websites (scans fit in them, #2645). */
   threadsLeft?: number | null; threadsHourLeft?: number | null };
 /** A thread family burning credits fast, shown under its top thread in the sidebar (docs/scopes/credit-burn.md): credits
@@ -1089,6 +1089,11 @@ export class SandboxDirectory {
     return this.call(body, "popups");
   }
 
+  /** Creates or fetches this account's instant Dub affiliate link (`go.cloudroom.dev/...`), or falls back to Dub's portal (docs/scopes/affiliate.md). */
+  async affiliateLink(): Promise<{ url: string; instant: boolean }> {
+    return z.object({ url: z.string().url(), instant: z.boolean().default(true) }).parse(await this.call({}, "affiliate"));
+  }
+
   /** Monthly Wrapped: this account's "Top N%" by agents started in a finished month, or null (docs/scopes/wrapped.md). */
   async wrappedTop(month: string): Promise<number | null> {
     return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
@@ -1185,11 +1190,17 @@ export class SandboxDirectory {
   /** `known`: the view is the website's answer, so it says whether the thread runs on the VPS. */
   private remember(view: View, known = true): View {
     this.views.set(view.thread, view);
-    if (known) this.placed.set(view.thread, view.vps === true);
+    if (known) {
+      this.placed.set(view.thread, view.vps === true);
+      this.forgotten.delete(view.thread);
+      this.awakeConfirmedAt.delete(view.thread);
+    }
     return view;
   }
 
   private awake = new Map<string, { origin: string; token: string }>();
+  private awakeConfirmedAt = new Map<string, number>();
+  private readonly forgotten = new Set<string>();
   awakeSandboxes(): { thread: string; url: string; token: string }[] {
     const awake = new Map([...this.awake].map(([thread, { origin, token }]) => [thread, { thread, url: origin, token }]));
     for (const view of this.views.values()) {
@@ -1210,17 +1221,22 @@ export class SandboxDirectory {
   private async awakeList(fresh = false): Promise<Map<string, { origin: string; token: string }>> {
     if (!fresh && Date.now() < this.awakeNext) return this.awake;
     if (!this.awakeCheck) {
+      const checked = new Set(this.forgotten);
       const check: Promise<void> = this.call({ action: "awake" }).then(value => awakeSchema.parse(value)).then(listed => {
         if (this.awakeCheck !== check) return;
         const before = this.awake.size;
+        const now = Date.now();
         this.awake = new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { origin, token }]));
+        this.awakeConfirmedAt = new Map(listed.sandboxes.map(({ thread }) => [thread, now]));
+        for (const thread of checked) this.forgotten.delete(thread);
+        for (const { thread } of listed.sandboxes) this.forgotten.delete(thread);
         if (this.refused && (this.awake.has(this.refused.thread) || (this.refused.code === CONCURRENT_LIMIT && this.awake.size < before))) this.refused = null;
         if (this.awake.size < before) for (const [thread, waiting] of this.backoff) if (waiting.refusal?.code === CONCURRENT_LIMIT) this.backoff.delete(thread);
         this.awakeChecks++;
         if (listed.runs.length) this.onRuns(listed.runs);
         this.awakeEvery = listed.recheck_ms;
         this.awakeIssue = null;
-        this.awakeNext = Date.now() + (Date.now() < this.soonUntil ? SOON_MS : listed.recheck_ms);
+        this.awakeNext = now + (now < this.soonUntil ? SOON_MS : listed.recheck_ms);
       }, (error: unknown) => {
         if (this.awakeCheck !== check) return;
         this.awakeIssue = error instanceof CloudroomError ? error : new CloudroomError("The website's list of awake cloud sandboxes was unreadable.");
@@ -1264,7 +1280,13 @@ export class SandboxDirectory {
     let view = this.views.get(thread);
     const place = placeOf(thread, project);
     if (!wake && view?.state !== "awake") {
-      const found = (await this.awakeList(fresh)).get(thread);
+      // A locally forgotten sandbox (e.g. after a transient 502) must recheck with the website before being treated as asleep,
+      // rate-limited to at most once per 10 s after a recent awake confirmation so a 502 storm can't hammer /sandboxes.
+      const forgotten = this.forgotten.has(thread);
+      if (forgotten && !fresh && Date.now() - (this.awakeConfirmedAt.get(thread) ?? 0) < 10_000) {
+        throw new CloudroomConnectionError("Waiting to recheck the cloud sandbox.");
+      }
+      const found = (await this.awakeList(fresh || forgotten)).get(thread);
       if (found) view = this.remember({ thread, state: "awake", generation: view?.generation ?? 0, issue: null, ...found }, false);
       else if (this.awakeIssue) throw this.awakeIssue;
     }
@@ -1448,7 +1470,7 @@ export class SandboxDirectory {
     this.usageRefresh = this.call({ action: "usage" }).then((value) => {
       // A website without credits (say, rolled back) shows no card rather than old units.
       const parsed = z.object({ plan: z.string(), credits: z.number().nullable(), credits_limit: z.number(), resets_at: z.string().nullable().catch(null),
-        extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0), threads_left: z.number().nullable().catch(null), threads_hour_left: z.number().nullable().catch(null) }).safeParse(value);
+        extra_credits: z.number().catch(0), extra_credits_total: z.number().catch(0), call_eligible: z.boolean().optional(), threads_left: z.number().nullable().catch(null), threads_hour_left: z.number().nullable().catch(null) }).safeParse(value);
       const recheck = z.object({ recheck_seconds: z.number().default(600) }).parse(value).recheck_seconds;
       // The website returns awake families above its low mark, and marks the hot ones. A line, once shown, stays
       // until its family drops below that mark, so it never blinks on and off. Older websites send none; `null` means
@@ -1459,7 +1481,8 @@ export class SandboxDirectory {
       if (parsed.success && parsed.data.plan === "free" && parsed.data.extra_credits > 0) this.liftFreeCap();
       this.usage = {
         value: parsed.success ? { plan: parsed.data.plan, credits: parsed.data.credits, creditsLimit: parsed.data.credits_limit, resetsAt: parsed.data.resets_at,
-          extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total, threadsLeft: parsed.data.threads_left, threadsHourLeft: parsed.data.threads_hour_left } : null,
+          extraCredits: parsed.data.extra_credits, extraCreditsTotal: parsed.data.extra_credits_total, callEligible: parsed.data.call_eligible ?? parsed.data.plan !== "free",
+          threadsLeft: parsed.data.threads_left, threadsHourLeft: parsed.data.threads_hour_left } : null,
         next: Date.now() + Math.max(recheck, 60) * 1000,
       };
     }, () => { this.usage = { value: this.usage?.value ?? null, next: Date.now() + RECHECK_MS }; }).finally(() => { this.usageRefresh = null; });
@@ -1538,6 +1561,8 @@ export class SandboxDirectory {
     this.views.clear();
     this.burning.clear();
     this.awake = new Map();
+    this.awakeConfirmedAt.clear();
+    this.forgotten.clear();
     this.awakeNext = 0;
     this.awakeIssue = null;
     this.awakeCheck = null;
@@ -1568,7 +1593,17 @@ export class SandboxDirectory {
   }
 
   /** A broken stream or failed request may mean the sandbox went to sleep; look it up again next time. */
-  forget(thread: string): void { this.views.delete(thread); this.awake.delete(thread); }
+  forget(thread: string): void {
+    this.views.delete(thread);
+    this.awake.delete(thread);
+    this.forgotten.add(thread);
+  }
+  private drop(thread: string): void {
+    this.views.delete(thread);
+    this.awake.delete(thread);
+    this.forgotten.delete(thread);
+    this.awakeConfirmedAt.delete(thread);
+  }
   /** What the website says the thread's sandbox is doing. Never wakes it; the answer isn't kept. */
   async state(thread: string): Promise<View["state"]> { return viewSchema.parse(await this.call({ action: "lookup", thread })).state; }
 
@@ -1667,12 +1702,12 @@ export class SandboxDirectory {
   async markLocal(thread: string, session: string): Promise<boolean> {
     return z.object({ saved: z.boolean() }).catch({ saved: false }).parse(await this.call({ action: "local", thread, session })).saved;
   }
-  async archive(thread: string): Promise<void> { this.forget(thread); await this.call({ action: "archive", thread }); }
+  async archive(thread: string): Promise<void> { this.drop(thread); await this.call({ action: "archive", thread }); }
   async refreshCodex(thread: string): Promise<void> { await this.call({ action: "codex", thread }); }
   async refreshGithub(thread: string): Promise<void> { await this.call({ action: "github", thread }); }
   /** An unarchive right after an archive finds the sandbox busy until the archive ends (up to ~60 s), so keep trying. */
   async restore(thread: string, session?: string): Promise<void> {
-    this.forget(thread);
+    this.drop(thread);
     this.backoff.delete(thread);
     for (let tries = 1; ; tries++) {
       // `session`: the one the user restored, so its loops the archive paused run again (#237; older websites ignore it).
@@ -1682,7 +1717,7 @@ export class SandboxDirectory {
     }
   }
   async remove(thread: string): Promise<void> {
-    this.forget(thread);
+    this.drop(thread);
     const reply = await this.call({ action: "remove", thread }) as { thread?: unknown; state?: unknown };
     if (reply.thread !== thread || reply.state !== "deleted") {
       throw new CloudroomConnectionError("The website returned an unexpected sandbox removal reply.");

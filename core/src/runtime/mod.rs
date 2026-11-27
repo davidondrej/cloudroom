@@ -1451,10 +1451,16 @@ fn plan_credits(harness: &str, resets: Option<u64>) -> Event {
     }
 }
 
+/// Claude Code's login file paths (API key, then token).
+pub(crate) fn claude_login_paths(config: &Config) -> [PathBuf; 2] {
+    [claude::key_path(config), claude::token_path(config)]
+}
+
 /// Claude Code's login files (API key, then token), so a credits hold can tell its login changed (ADR 0292).
 pub(crate) fn claude_login(config: &Config) -> Vec<u8> {
-    let mut bytes = std::fs::read(claude::key_path(config)).unwrap_or_default();
-    bytes.extend(std::fs::read(claude::token_path(config)).unwrap_or_default());
+    let [key, token] = claude_login_paths(config);
+    let mut bytes = std::fs::read(key).unwrap_or_default();
+    bytes.extend(std::fs::read(token).unwrap_or_default());
     bytes
 }
 

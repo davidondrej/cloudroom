@@ -27,9 +27,37 @@ import { readReset, SignInAgainError, type Secret } from "./tokens.js";
 const YEAR_MS = 365 * 24 * 60 * 60_000;
 const LIMITS = "anthropic-ratelimit-unified";
 const windows = process.platform === "win32";
+const USAGE_THROTTLE_MIN_MS = 15_000;
+const USAGE_THROTTLE_BASE_MS = 30_000;
+const USAGE_THROTTLE_MAX_MS = 5 * 60_000;
+const FALLBACK_CLAUDE_USER_AGENT = "claude-code/2.1.280";
 
 // The same lookup as Harness detection, so every install it finds (~/.npm-global/bin, #1686) works here too.
 const claudeBinary = () => findCliExecutable("claude");
+
+let cachedClaudeUserAgent: { binary: string; value: string } | null = null;
+const usageThrottle = new Map<string, { until: number; streak: number }>();
+
+async function claudeUserAgent(): Promise<string> {
+  const binary = claudeBinary();
+  if (!binary) return FALLBACK_CLAUDE_USER_AGENT;
+  if (cachedClaudeUserAgent?.binary === binary) return cachedClaudeUserAgent.value;
+  const version = await execClaude(binary, ["--version"])
+    .then(({ stdout }) => /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1] ?? null)
+    .catch(() => null);
+  const value = version ? `claude-code/${version}` : FALLBACK_CLAUDE_USER_AGENT;
+  if (version) cachedClaudeUserAgent = { binary, value };
+  return value;
+}
+
+function parseRetryAfterMs(header: string | null | undefined, now = Date.now()): number | null {
+  const value = header?.trim();
+  if (!value) return null;
+  const seconds = Number(value);
+  const ms = Number.isFinite(seconds) ? seconds * 1_000 : Date.parse(value) - now;
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  return Math.min(USAGE_THROTTLE_MAX_MS, Math.max(USAGE_THROTTLE_MIN_MS, ms));
+}
 
 // A stray token or API key would win over the account's own login. No profile means the Mac's own login.
 export function profileEnv(profile?: string): NodeJS.ProcessEnv {
@@ -328,20 +356,36 @@ export async function profileUsage(profile?: string): Promise<ClaudeUsage | null
   const token = await profileToken(profile);
   if (token === false) return { windows: [], credits: null, loginEnded: true };
   if (!token) return null;
+  const throttled = usageThrottle.get(token);
+  if (throttled && Date.now() < throttled.until) {
+    throw new Error("Claude usage failed (HTTP 429).");
+  }
   const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
     headers: {
       authorization: `Bearer ${token}`,
       accept: "application/json",
       "anthropic-beta": "oauth-2025-04-20",
-      "user-agent": "claude-code/2.1.0",
+      "user-agent": await claudeUserAgent(),
     },
     signal: AbortSignal.timeout(15_000),
   });
   if (!response.ok) {
     await response.body?.cancel();
     if (response.status === 401 || response.status === 403) return null;
+    if (response.status === 429) {
+      const now = Date.now();
+      for (const [key, entry] of usageThrottle) {
+        if (entry.until <= now) usageThrottle.delete(key);
+      }
+      const streak = (throttled?.streak ?? 0) + 1;
+      const retryAfterMs =
+        parseRetryAfterMs(response.headers?.get?.("retry-after"), now) ??
+        Math.min(USAGE_THROTTLE_BASE_MS * 2 ** (streak - 1), USAGE_THROTTLE_MAX_MS);
+      usageThrottle.set(token, { until: now + retryAfterMs, streak });
+    }
     throw new Error(`Claude usage failed (HTTP ${response.status}).`);
   }
+  usageThrottle.delete(token);
   const usage = usageSchema.parse(await response.json());
   const hasWindows = "five_hour" in usage || "seven_day" in usage || Array.isArray(usage.limits);
   if (!hasWindows && !usage.extra_usage && !usage.seven_day_overage_included)
@@ -444,7 +488,7 @@ export async function profilePlan(
       authorization: `Bearer ${token}`,
       accept: "application/json",
       "anthropic-beta": "oauth-2025-04-20",
-      "user-agent": "claude-code/2.1.0",
+      "user-agent": await claudeUserAgent(),
     },
     signal: AbortSignal.timeout(15_000),
   });

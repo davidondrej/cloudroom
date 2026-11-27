@@ -10,8 +10,15 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { assetFor } from "./driver.js";
-import { driverEnv, install, pruneOldVersions, unsupportedGnomeHint, workingXauthority } from "./host.js";
-import computerUsePlugin, { acceptFocusedWindow, decideGate, takesForeground } from "./server.js";
+import {
+  driverEnv,
+  install,
+  pruneOldVersions,
+  reconcileBringToFront,
+  unsupportedGnomeHint,
+  workingXauthority,
+} from "./host.js";
+import computerUsePlugin, { decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
 vi.mock("node:fs", async (actual) => {
@@ -134,7 +141,7 @@ it("lets approved threads read the clipboard without Accessibility", async () =>
     expect((await fake.harness.runCli(read, { threadId })).exitCode).toBe(0);
 });
 
-// Cua Driver 0.35.2's exact_result for #1506: focused, but a 41 px Chrome helper is front in-process.
+// Cua Driver exact_result for #1506 / #1625: focused under a helper, or verified while off-Space.
 const unverified = {
   status: "partial",
   code: "bring_to_front_exact_window_unverified",
@@ -142,30 +149,263 @@ const unverified = {
   window_id: 7,
   activated: false,
   process_activated: true,
-  exact_window_effect: { verified: false, focused: true, front_in_process_on_display: false, target_visible_ordinary: true },
-  observed: { frontmost_pid: 42, front_process_matches_target: true, focused_window_id: 7, process_front_window_on_display: 9 },
+  exact_window_effect: {
+    verified: false,
+    focused: true,
+    front_in_process_on_display: false,
+    target_visible_ordinary: true,
+  },
+  observed: {
+    frontmost_pid: 42,
+    front_process_matches_target: true,
+    focused_window_id: 7,
+    process_front_window_on_display: 9,
+  },
 };
-const win = (window_id: number, z_index: number, title: string, width: number, height: number) => ({
-  window_id, pid: 42, title, z_index, is_on_screen: true, layer: 0, bounds: { x: 0, y: 0, width, height },
+const verified = {
+  ...unverified,
+  status: "activated",
+  code: "bring_to_front_exact_window_verified",
+  activated: true,
+  exact_window_effect: {
+    ...unverified.exact_window_effect,
+    verified: true,
+    front_in_process_on_display: true,
+    frontmost_ordinary: true,
+    unobstructed: true,
+  },
+  observed: { ...unverified.observed, process_front_window_on_display: 7 },
+};
+const win = (
+  window_id: number,
+  z_index: number | null,
+  title: string,
+  width: number,
+  height: number,
+) => ({
+  window_id,
+  pid: 42,
+  title,
+  z_index,
+  is_on_screen: z_index !== null,
+  layer: 0,
+  bounds: { x: 0, y: 0, width, height },
 });
 const document = win(7, 5, "Docs", 1400, 900);
 const helpers = [document, win(8, 6, "", 1400, 41), win(9, 7, "", 1400, 41)];
 
 it.each([
-  ["only 41 px untitled helpers on top", {}, { pid: 42, window_id: 7 }, helpers, 0],
-  ["full titled sibling on top", {}, { pid: 42, window_id: 7 }, [document, win(9, 7, "Other tab", 1400, 900)], 1],
-  ["target off screen", {}, { pid: 42, window_id: 7 }, [{ ...document, is_on_screen: false }, ...helpers.slice(1)], 1],
-  ["not focused", { exact_window_effect: { ...unverified.exact_window_effect, focused: false } }, { pid: 42, window_id: 7 }, helpers, 1],
-  ["another window focused", { observed: { ...unverified.observed, focused_window_id: 9 } }, { pid: 42, window_id: 7 }, helpers, 1],
-  ["front process unknown", { observed: { ...unverified.observed, front_process_matches_target: null } }, { pid: 42, window_id: 7 }, helpers, 1],
-  ["another window requested", {}, { pid: 42, window_id: 8 }, helpers, 1],
-])("bring_to_front unverified: %s", async (_name, patch, input, windows, exitCode) => {
-  const stdout = JSON.stringify({ ...unverified, ...patch });
-  const list = async () => ({ exitCode: 0, stdout: JSON.stringify({ windows }) });
-  const result = await acceptFocusedWindow("bring_to_front", input, { exitCode: 1, stdout, stderr: "" }, list);
+  [
+    "only 41 px untitled helpers on top",
+    {},
+    { pid: 42, window_id: 7 },
+    helpers,
+    0,
+    "bring_to_front_exact_window_focused",
+  ],
+  [
+    "41 px helpers with off-Space sibling (null z_index) and non-layer-0 window",
+    {},
+    { pid: 42, window_id: 7 },
+    [
+      ...helpers,
+      { ...win(10, null, "Other Space", 1400, 900), on_current_space: false },
+      { ...win(11, 8, "Overlay", 300, 300), layer: 25 },
+    ],
+    0,
+    "bring_to_front_exact_window_focused",
+  ],
+  [
+    "full titled sibling on top",
+    {},
+    { pid: 42, window_id: 7 },
+    [document, win(9, 7, "Other tab", 1400, 900)],
+    1,
+    null,
+  ],
+  [
+    "larger untitled companion layer-0 surface on top",
+    {},
+    { pid: 42, window_id: 7 },
+    [document, win(9, 7, "", 400, 300)],
+    1,
+    null,
+  ],
+  [
+    "target off screen",
+    {},
+    { pid: 42, window_id: 7 },
+    [{ ...document, is_on_screen: false }, ...helpers.slice(1)],
+    1,
+    null,
+  ],
+  [
+    "target on another Space even while on screen",
+    {},
+    { pid: 42, window_id: 7 },
+    [
+      {
+        ...document,
+        on_current_space: false,
+        current_space_id: 1,
+        space_ids: [4],
+      },
+      ...helpers.slice(1),
+    ],
+    1,
+    "bring_to_front_window_off_space",
+  ],
+  [
+    "not focused",
+    {
+      exact_window_effect: {
+        ...unverified.exact_window_effect,
+        focused: false,
+      },
+    },
+    { pid: 42, window_id: 7 },
+    helpers,
+    1,
+    null,
+  ],
+  [
+    "another window focused",
+    { observed: { ...unverified.observed, focused_window_id: 9 } },
+    { pid: 42, window_id: 7 },
+    helpers,
+    1,
+    null,
+  ],
+  [
+    "front process unknown",
+    {
+      observed: { ...unverified.observed, front_process_matches_target: null },
+    },
+    { pid: 42, window_id: 7 },
+    helpers,
+    1,
+    null,
+  ],
+  ["another window requested", {}, { pid: 42, window_id: 8 }, helpers, 1, null],
+])(
+  "bring_to_front unverified: %s",
+  async (_name, patch, input, windows, exitCode, expectedCode) => {
+    const stdout = JSON.stringify({ ...unverified, ...patch });
+    const list = async () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ windows }),
+      stderr: "",
+    });
+    const result = await reconcileBringToFront(
+      "bring_to_front",
+      input,
+      { exitCode: 1, stdout, stderr: "" },
+      list,
+    );
+    expect(result.exitCode).toBe(exitCode);
+    if (expectedCode === null) expect(result.stdout).toBe(stdout);
+    else if (exitCode === 0)
+      expect(JSON.parse(result.stdout ?? "")).toMatchObject({
+        status: "activated",
+        activated: true,
+        code: expectedCode,
+        exact_window_effect: { verified: false },
+      });
+    else
+      expect(JSON.parse(result.stdout ?? "")).toMatchObject({
+        status: "partial",
+        activated: false,
+        code: expectedCode,
+        exact_window_effect: { verified: false, on_current_space: false },
+        observed: {
+          on_current_space: false,
+          current_space_id: 1,
+          space_ids: [4],
+        },
+      });
+  },
+);
+
+it.each([
+  [
+    "target on current Space stays verified",
+    [
+      {
+        ...document,
+        on_current_space: true,
+        current_space_id: 1,
+        space_ids: [1],
+      },
+    ],
+    0,
+    "bring_to_front_exact_window_verified",
+  ],
+  [
+    "target on another Space (off screen) fails as off-Space",
+    [
+      {
+        ...win(7, null, "Docs", 1400, 900),
+        on_current_space: false,
+        current_space_id: 1,
+        space_ids: [4],
+      },
+    ],
+    1,
+    "bring_to_front_window_off_space",
+  ],
+  [
+    "target on another Space while on screen fails as off-Space",
+    [
+      {
+        ...document,
+        on_current_space: false,
+        current_space_id: 1,
+        space_ids: [4],
+      },
+    ],
+    1,
+    "bring_to_front_window_off_space",
+  ],
+  [
+    "target off screen with unknown Space fails as unverified",
+    [{ ...win(7, null, "Docs", 1400, 900), on_current_space: null }],
+    1,
+    "bring_to_front_exact_window_unverified",
+  ],
+])("bring_to_front verified: %s", async (_name, windows, exitCode, code) => {
+  const stdout = JSON.stringify(verified);
+  const list = async () => ({
+    exitCode: 0,
+    stdout: JSON.stringify({ windows, current_space_id: 1 }),
+    stderr: "",
+  });
+  const result = await reconcileBringToFront(
+    "bring_to_front",
+    { pid: 42, window_id: 7 },
+    { exitCode: 0, stdout, stderr: "" },
+    list,
+  );
   expect(result.exitCode).toBe(exitCode);
-  if (exitCode === 1) expect(result.stdout).toBe(stdout);
-  else expect(JSON.parse(result.stdout ?? "")).toMatchObject({ status: "activated", activated: true, code: "bring_to_front_exact_window_focused", exact_window_effect: { verified: false } });
+  if (exitCode === 0) expect(result.stdout).toBe(stdout);
+  else {
+    const offScreen = windows[0]?.is_on_screen === false;
+    expect(JSON.parse(result.stdout ?? "")).toMatchObject({
+      status: "partial",
+      activated: false,
+      code,
+      exact_window_effect: {
+        verified: false,
+        ...(offScreen
+          ? {
+              target_visible_ordinary: false,
+              front_in_process_on_display: false,
+              frontmost_ordinary: false,
+              unobstructed: false,
+            }
+          : {}),
+      },
+    });
+  }
 });
 
 // Cua Driver 0.35.2's real refusal when Cloudroom starts it without --grant existing-profile (#1555).
@@ -422,7 +662,12 @@ describe("foreground focus gate", () => {
       prepare: { ...readyStatus, installMs: null },
       status: readyStatus,
       appForPid: { key: "com.brave.Browser", name: "Brave" },
-      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+      call: {
+        exitCode: 0,
+        stdout: JSON.stringify(verified),
+        stderr: "",
+        driverExits: 0,
+      },
     };
     const fake = createFakePluginHost({
       sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
@@ -444,11 +689,19 @@ describe("foreground focus gate", () => {
 
     // Allow once succeeds, and a second foreground call still asks again.
     for (let i = 0; i < 2; i++) {
-      const allowedCall = fake.harness.runCli(["call", "bring_to_front", '{"pid":42}'], { threadId: "thr_1" });
+      const allowedCall = fake.harness.runCli(
+        ["call", "bring_to_front", '{"pid":42,"window_id":7}'],
+        { threadId: "thr_1" },
+      );
       await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
       fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "thread" });
       expect((await allowedCall).exitCode).toBe(0);
     }
+    expect(
+      fake.harness.experimental_hostRpcCalls
+        .filter((call) => call.method === "call")
+        .map((call) => (call.input as { tool: string }).tool),
+    ).toEqual(["bring_to_front", "bring_to_front"]);
   });
 });
 
