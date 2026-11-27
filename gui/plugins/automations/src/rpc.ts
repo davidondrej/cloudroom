@@ -71,8 +71,9 @@ const cloudTemplateInputSchema = z
 const scanSourceSchema = z.literal("new_thread").optional();
 const scanKindSchema = z.enum(["workflow", "cyber"]);
 const scanStartInputSchema = z.object({ kind: scanKindSchema, source: scanSourceSchema }).strict().nullable();
-/** Per kind: the last scan thread started on this computer, if it still exists, and whether one ever started here. */
-const scanStateSchema = z.object({ thread: z.string().nullable(), used: z.boolean() }).strict();
+/** Per kind: the last scan thread started on this computer, if it still exists, whether it is still running,
+ *  and whether one ever started here. */
+const scanStateSchema = z.object({ thread: z.string().nullable(), running: z.boolean(), used: z.boolean() }).strict();
 
 export const automationRpcContract = defineRpcContract({
   automations_overview: {
@@ -297,8 +298,9 @@ const scanThreadKey = (kind: ScanKind) => `scans.thread.${kind}`;
 
 async function scanState(sdk: Sdk, kv: Kv, kind: ScanKind): Promise<z.output<typeof scanStateSchema>> {
   const id = await kv.get<string>(scanThreadKey(kind)).catch(() => undefined);
-  if (typeof id !== "string") return { thread: null, used: false };
-  return { thread: await sdk.threads.get({ threadId: id }).then(() => id, () => null), used: true };
+  if (typeof id !== "string") return { thread: null, running: false, used: false };
+  const status = await sdk.threads.get({ threadId: id }).then((thread) => thread.status, () => null);
+  return { thread: status === null ? null : id, running: status === "starting" || status === "active", used: true };
 }
 
 /** When the last Workflow scan started on this computer, or 0. A scan from before this was saved is found once, by its thread. */
@@ -408,7 +410,7 @@ export function createRpcHandlers(
       return null;
     },
     async scans_state() {
-      const none = { thread: null, used: false };
+      const none = { thread: null, running: false, used: false };
       if (!sdk || !scans) return { workflow: none, cyber: none };
       const [workflow, cyber] = await Promise.all([scanState(sdk, scans.kv, "workflow"), scanState(sdk, scans.kv, "cyber")]);
       return { workflow, cyber };

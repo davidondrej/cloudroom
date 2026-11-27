@@ -156,7 +156,9 @@ export function buildClaudeUserQuestionPayload(
         options: question.options.map((option, optionIndex) => ({
           value: buildClaudeUserQuestionOptionValue(questionId, optionIndex),
           label: option.label,
-          description: option.description,
+          ...(option.description.trim()
+            ? { description: option.description }
+            : {}),
         })),
         allowFreeText: true,
       };

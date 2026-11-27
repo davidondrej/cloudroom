@@ -2535,12 +2535,15 @@ function attachThreadSession(
   sessionOptions.canUseTool = createCanUseTool(threadIdRef);
   sessionOptions.onElicitation = createOnElicitation(threadIdRef);
   if (params.dynamicTools && params.dynamicTools.length > 0) {
-    const mcpServer = buildBridgeMcpServer(
-      params.dynamicTools,
-      createForwardToolCall(() => threadIdRef.current),
-    );
-    sessionOptions.mcpServers = { [ROOM_BRIDGE_MCP_SERVER_NAME]: mcpServer };
-    sessionOptions.allowedTools = getAllowedToolNames(params.dynamicTools);
+    const dynamicTools = params.dynamicTools;
+    const forwardToolCall = createForwardToolCall(() => threadIdRef.current);
+    sessionOptions.mcpServers = () => ({
+      [ROOM_BRIDGE_MCP_SERVER_NAME]: buildBridgeMcpServer(
+        dynamicTools,
+        forwardToolCall,
+      ),
+    });
+    sessionOptions.allowedTools = getAllowedToolNames(dynamicTools);
   }
 
   const attachment = createThreadAttachment({

@@ -7,6 +7,7 @@ import {
   listQueuedThreadMessages,
   reorderQueuedThreadMessage,
   updateQueuedThreadMessage,
+  type QueuedThreadMessageRow,
 } from "@cloudroom/db";
 import { isStandaloneBuiltinCompactCommand, type PromptInput } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
@@ -71,18 +72,46 @@ export function settleCompactFollowUp(
       and(eq(events.threadId, args.threadId), eq(events.turnId, args.turnId), eq(events.type, "thread/compacted")),
     )
     .get();
-  const outcome = compacted
-    ? "Your context was compacted."
-    : `Context compaction failed: ${args.error ?? "the agent didn't compact it"}. Your context is unchanged.`;
+  tellFollowUp(
+    deps,
+    row,
+    compacted
+      ? "Your context was compacted."
+      : failed(args.error ?? "the agent didn't compact it"),
+  );
+  return true;
+}
+
+/** The agent refused the compaction, say because a Goal began its next turn first, so it never runs (#2640). */
+export function failRefusedCompactFollowUp(
+  deps: Deps,
+  args: { threadId: string; error: string },
+): void {
+  const id = held.get(args.threadId);
+  // A queued compaction still to come is the one its follow-up waits for.
+  if (id === undefined || hasQueuedCompaction(deps, args.threadId)) return;
+  held.delete(args.threadId);
+  const row = getQueuedThreadMessage(deps.db, id);
+  if (row?.threadId === args.threadId)
+    tellFollowUp(deps, row, failed(args.error));
+}
+
+const failed = (error: string) =>
+  `Context compaction failed: ${error}. Your context is unchanged.`;
+
+function tellFollowUp(
+  deps: Deps,
+  row: QueuedThreadMessageRow,
+  outcome: string,
+): void {
   const [first, ...rest] = JSON.parse(row.content) as PromptInput[];
-  if (first?.type !== "text") return true;
+  if (first?.type !== "text") return;
   const prefix = `${outcome}\n\n`;
   const mentions = first.mentions.map((m) => ({ ...m, start: m.start + prefix.length, end: m.end + prefix.length }));
   updateQueuedThreadMessage(deps.db, deps.hub, {
-    id,
-    threadId: args.threadId,
+    id: row.id,
+    threadId: row.threadId,
     expectedUpdatedAt: row.updatedAt,
     content: [{ ...first, text: prefix + first.text, mentions }, ...rest],
   });
-  return true;
 }

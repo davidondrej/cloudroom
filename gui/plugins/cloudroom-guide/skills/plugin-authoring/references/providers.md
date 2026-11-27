@@ -97,7 +97,8 @@ import { definePluginApp } from "@get-bb/plugin-sdk/app";
 
 function EchoIcon({ className }: { className?: string }) {
   return (
-    <svg fill="currentColor" viewBox="0 0 24 24" className={className}>
+    // width/height are needed: without them Safari draws the icon 300px wide.
+    <svg fill="currentColor" viewBox="0 0 24 24" width="12" height="12" className={className}>
       <path d="…" />
     </svg>
   );

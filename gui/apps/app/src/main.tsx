@@ -2,7 +2,7 @@ import { StrictMode, useEffect } from "react";
 import { COMPUTER } from "@cloudroom/domain";
 import { createRoot } from "react-dom/client";
 import { QueryClientProvider } from "@tanstack/react-query";
-import { BrowserRouter } from "react-router";
+import { AppBrowserRouter } from "./components/ui/app-route-anchor";
 import { App } from "./App";
 import {
   isPhoneRelay,
@@ -116,7 +116,7 @@ function render() {
     <StrictMode>
       <AppErrorBoundary>
         <QueryClientProvider client={appQueryClient}>
-          <BrowserRouter>
+          <AppBrowserRouter>
             <App />
             <AppToaster />
             {macIsOff() ? (
@@ -125,7 +125,7 @@ function render() {
               // Only the desktop app on this computer can answer, so a phone or another Mac never asks.
               !isPhoneRelay() && !viewingOtherMac() && <HumanClickRequests />
             )}
-          </BrowserRouter>
+          </AppBrowserRouter>
         </QueryClientProvider>
       </AppErrorBoundary>
     </StrictMode>,

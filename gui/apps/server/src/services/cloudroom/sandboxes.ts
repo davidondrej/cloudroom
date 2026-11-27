@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
-import { access, chmod, constants, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { access, chmod, constants, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { gzipSync } from "node:zlib";
 import type { HostDaemonContributedEnvEntry } from "@cloudroom/host-daemon-contract";
@@ -184,6 +184,7 @@ const CONFIG_TAR_BUDGET = CONFIG_TAR_LIMIT - 1024 * 1024;
 const CONFIG_TAR_TIMEOUT_MS = 60_000;
 // Mac-built dependency and cache folders: useless on Linux, and tens of thousands of files that made tar time out (#214).
 const CONFIG_SKIP_DIRS = new Set([".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".next", ".turbo"]);
+const configSkipped = (name: string, isDir: boolean) => [".git", "node_modules", ".DS_Store"].includes(name) || (isDir && CONFIG_SKIP_DIRS.has(name));
 const codexAuthPath = () => join(process.env.CODEX_HOME || join(homedir(), ".codex"), "auth.json");
 export const hasMacCodexLogin = () => access(codexAuthPath()).then(() => true, () => false);
 /** Zero-process check for a local `gh` login on github.com; returns the handle when present in hosts.yml, never tokens. */
@@ -742,7 +743,7 @@ export async function macSkills(): Promise<MacSkill[]> {
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-type ConfigPathFiles = { files: string[]; bytes: number; skipped: number };
+type ConfigPathFiles = { files: string[]; bytes: number; skipped: number; leftOut: string[] };
 
 class ConfigTarError extends CloudroomError {
   constructor(message: string, readonly transient: boolean) { super(message); }
@@ -766,6 +767,7 @@ async function configFiles(home: string, paths: string[]): Promise<ConfigPathFil
   const files: string[] = [];
   let bytes = 0;
   let skipped = 0;
+  const leftOut: string[] = [];
   for (const path of paths) {
     const root = await realpath(join(home, path)).catch(() => null);
     if (!root) { skipped += 1; continue; }
@@ -777,6 +779,12 @@ async function configFiles(home: string, paths: string[]): Promise<ConfigPathFil
       const info = await stat(full).catch(() => null);
       if (!info) { skipped += 1; return; }
       if (!info.isFile() && !info.isDirectory()) return;
+      // A link such as `env -> .venv` resolves into a skipped folder, so it stays out like the folder; Settings names both (#214).
+      const real = relative(root, target).split(sep);
+      if (entry !== path && (configSkipped(basename(entry), info.isDirectory()) || real.some((part, i) => configSkipped(part, i < real.length - 1 || info.isDirectory())))) {
+        leftOut.push(basename(entry));
+        return;
+      }
       const tarPath = entry.split(sep).join("/");
       if (info.isFile()) {
         if (!fitsUstarPath(tarPath) || !await access(full, constants.R_OK).then(() => true, () => false)) { skipped += 1; return; }
@@ -784,7 +792,6 @@ async function configFiles(home: string, paths: string[]): Promise<ConfigPathFil
         bytes += 512 + Math.ceil(info.size / 512) * 512;
         return;
       }
-      if (entry !== path && CONFIG_SKIP_DIRS.has(basename(entry))) return;
       const names = await readdir(full).catch(() => null);
       if (!names) { skipped += 1; return; }
       if (fitsUstarPath(tarPath)) {
@@ -793,13 +800,13 @@ async function configFiles(home: string, paths: string[]): Promise<ConfigPathFil
       }
       ancestors.add(target);
       for (const name of names) {
-        if (![".git", "node_modules", ".DS_Store"].includes(name)) await visit(join(entry, name));
+        if (![".git", ".DS_Store"].includes(name)) await visit(join(entry, name));
       }
       ancestors.delete(target);
     };
     await visit(path);
   }
-  return { files, bytes, skipped };
+  return { files, bytes, skipped, leftOut };
 }
 
 type ExecFileError = Error & {
@@ -970,7 +977,7 @@ export class SandboxDirectory {
   /** Gets the token the website refused as signed out, so the app signs out too and asks to sign in again. */
   onSignedOut: (token: string) => void = () => {};
   /** `woke` runs after each wake, so the Mac helper lists the new sandbox now instead of at its next minute check. */
-  constructor(readonly account: () => Promise<SandboxAccount | null>, private readonly woke: (thread: string) => void = () => {}) {}
+  constructor(readonly account: () => Promise<SandboxAccount | null>, private readonly woke: (thread: string) => void = () => {}, private readonly copiedFile = "") {}
 
   /** Aborted by each reset (#1940): requests sent before an account switch or sign-out never fill the next one's state. */
   private session = new AbortController();
@@ -1554,6 +1561,7 @@ export class SandboxDirectory {
     this.configAt = 0;
     this.configDigest = "";
     this.configIssue = null;
+    this.configLeftOut = [];
     // The next sign-in asks again whether the website lists threads, instead of keeping an old "no" for an hour.
     this.threadsSupport = null;
     this.threadsFailed = 0;
@@ -2099,6 +2107,19 @@ export class SandboxDirectory {
   private configRun: Promise<unknown> = Promise.resolve();
   /** Why the last skills upload failed, until one succeeds. */
   configIssue: string | null = null;
+  /** Dependency and cache folders the last good upload left out, as `skill/folder`. */
+  configLeftOut: string[] = [];
+  /** When this computer last copied skills and instructions to the signed-in account. Saved, so after a restart Settings
+   *  still shows how old the cloud's copy is while uploads keep failing (#214). */
+  async configCopiedAt(): Promise<number | null> {
+    if (!this.copiedFile) return null;
+    const [account, saved] = await Promise.all([
+      this.account().catch(() => null),
+      // A missing or broken file means no known copy, never a failed skills list.
+      readFile(this.copiedFile, "utf8").then(text => z.object({ userId: z.string(), at: z.number() }).parse(JSON.parse(text))).catch(() => null),
+    ]);
+    return saved && saved.userId === account?.userId ? saved.at : null;
+  }
   /** Uploads this Mac's skills and instructions when they change, then pushes them to awake sandboxes. At most once a minute,
    *  unless the user just changed which skills the cloud gets. `inCloud` picks the skills by name. */
   copyMacConfig(inCloud: (name: string) => boolean, force = false): Promise<void> {
@@ -2209,10 +2230,12 @@ export class SandboxDirectory {
       throw new CloudroomError(`Your skills are too large to copy to cloud sandboxes (${(body.length / 1024 / 1024).toFixed(1)} MB compressed, ${Math.round(CONFIG_LIMIT / 1024 / 1024)} MB limit).`);
     }
     const issue = summarizeConfigIssue({ fallbackReason, oversized: picked.oversized, unreadable: picked.unreadable, copiedAny: true });
+    const leftOut = fallbackReason ? [] : [...new Set(picked.keptSkills.flatMap(entry => entry.leftOut.map(name => `${entry.name}/${name}`)))];
     const prevIssue = this.configIssue;
     const digest = contentDigest(tar);
     if (digest === this.configDigest) {
       this.configIssue = issue;
+      this.configLeftOut = leftOut;
       if (issue && issue !== prevIssue) throw new CloudroomError(issue);
       return;
     }
@@ -2221,6 +2244,13 @@ export class SandboxDirectory {
     if (!response.ok) throw new CloudroomError(`Your skills could not be copied to cloud sandboxes (HTTP ${response.status}).`);
     this.configDigest = digest;
     this.configIssue = issue;
+    this.configLeftOut = leftOut;
+    const account = await this.account().catch(() => null);
+    if (account && this.copiedFile) {
+      // Written aside and renamed, so a crash mid-write never leaves a cut-off file.
+      const file = this.copiedFile, temp = `${file}.${randomUUID()}.tmp`;
+      await writeFile(temp, JSON.stringify({ userId: account.userId, at: Date.now() }), { mode: 0o600 }).then(() => rename(temp, file)).catch(() => rm(temp, { force: true }).catch(() => {}));
+    }
     // Awake sandboxes get the change now; sleeping ones apply it when they wake.
     await this.call({ action: "push" }, "config").catch((error: unknown) => {
       throw new CloudroomError(`Your skills were saved, but awake sandboxes could not get them yet: ${error instanceof Error ? error.message : String(error)}`);

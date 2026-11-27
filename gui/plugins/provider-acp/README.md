@@ -29,7 +29,7 @@ What lives here:
   `bb.providers.register` declaration: ids, display names, icons,
   capabilities, and the bridge options it launches with (`acpLaunchSpec`,
   `acpInstaller` for agents with an official install script (plus an optional
-  Windows PowerShell one, `powershellUrl`), and `acpDialect`
+  Windows PowerShell one, `powershellUrl` and `powershellArgs`), and `acpDialect`
   for the agents whose vendor side channels the kit reads).
 - `src/legacy-config.ts` — reading the deprecated config array. Dies with the
   deprecation window.

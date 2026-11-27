@@ -7,7 +7,7 @@ export type CloudIconStyle = "electric-lime" | "crisp-white";
 
 const cloudIconStyleAtom = atomWithStorage<CloudIconStyle>(
   "cloudroom.cloudIconStyle",
-  "electric-lime",
+  "crisp-white",
   createLocalStorageEnumStorage<CloudIconStyle>(
     (value): value is CloudIconStyle =>
       value === "electric-lime" || value === "crisp-white",

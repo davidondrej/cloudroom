@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 172
+
+A new home for Scans (2026-11-27)
+
+### Changes
+
+- The Scans tab has two big scan cards. Clicking a running scan opens it instead of starting a second one.
+- The Cloudroom Agent icon now shows at the right size on iPhone and in Safari.
+- The Loops circle pauses when the window is in the background or scrolled away, so it no longer drains your battery.
+- A message that waited 10+ minutes in a busy thread's queue now says when it was sent.
+- Claude Desktop chats with messages typed while Claude was busy now import in full, and Hermes Agent installs on Windows.
+- Security fixes.
+
 ## 171
 
 Meet the Director (2026-11-26)

@@ -223,7 +223,7 @@ it("skips npm's claude.cmd when it runs the unfinished Claude stub (#1148)", () 
   ).toBe(join(native, "claude.exe"));
 });
 
-it("finds Grok (#1256) and Cursor's .cmd shim (#1709) in their own folders off PATH", () => {
+it("finds Grok (#1256), Cursor (#1709), and Hermes (#2715) in their own folders off PATH", () => {
   const home = dir({});
   mkdirSync(join(home, ".grok", "bin"), { recursive: true });
   writeFileSync(join(home, ".grok", "bin", "grok.exe"), "", { mode: 0o755 });
@@ -240,4 +240,25 @@ it("finds Grok (#1256) and Cursor's .cmd shim (#1709) in their own folders off P
       PATHEXT: ".exe;.cmd",
     }),
   ).toBe(join(cursor, "cursor-agent.cmd"));
+  const hermesBin = join(home, "Local App", "hermes", "bin");
+  mkdirSync(hermesBin, { recursive: true });
+  writeFileSync(join(hermesBin, "hermes.exe"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("hermes", {
+      PATH: "",
+      LOCALAPPDATA: join(home, "Local App"),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(hermesBin, "hermes.exe"));
+  const customHermesBin = join(home, "custom-hermes", "bin");
+  mkdirSync(customHermesBin, { recursive: true });
+  writeFileSync(join(customHermesBin, "hermes.cmd"), "", { mode: 0o755 });
+  expect(
+    findCliExecutable("hermes", {
+      PATH: "",
+      HERMES_HOME: join(home, "custom-hermes"),
+      LOCALAPPDATA: join(home, "Local App"),
+      PATHEXT: ".exe;.cmd",
+    }),
+  ).toBe(join(customHermesBin, "hermes.cmd"));
 });

@@ -2232,8 +2232,15 @@ describe("bridge", () => {
       const threadId = "thread-ask-user-question";
       const toolUseID = "tool-question-1";
       const questionInput = createBridgeUserQuestionInput();
+      // A Claude Code mod's $.ui.ask sends empty option descriptions (#2687).
+      questionInput.questions[0]!.options[1]!.description = "";
       const updatedInput = {
-        questions: questionInput.questions,
+        questions: [
+          {
+            question: "Which deployment target should I use?",
+            options: [{ label: "Staging" }, { label: "Production" }],
+          },
+        ],
         answers: {
           "Which deployment target should I use?": "Staging",
         },
@@ -2258,6 +2265,13 @@ describe("bridge", () => {
           multiSelect: false,
           options: [{ label: "Staging" }, { label: "Production" }],
         },
+      ]);
+      expect(questionPayload).not.toHaveProperty([
+        "questions",
+        0,
+        "options",
+        1,
+        "description",
       ]);
 
       handleLine(
@@ -5547,6 +5561,9 @@ describe("canonical model context-window hint", () => {
           ...canonicalOptions,
           envVars: { PLUGIN_ACCESS_TOKEN: "first" },
         },
+        dynamicTools: [
+          { name: "bb_ping", description: "Ping.", inputSchema: {} },
+        ],
       });
       const startResponse = await bridge.waitForResponse(1);
       const providerThreadId = getProviderThreadIdFromResult(startResponse);
@@ -5569,6 +5586,12 @@ describe("canonical model context-window hint", () => {
         env: { PLUGIN_ACCESS_TOKEN: "second" },
         resume: providerThreadId,
       });
+      // Each Claude gets its own bridge MCP server: on Windows the replaced Claude still holds the old one while it stops (#2597).
+      const [oldServer, newServer] = queryMock.mock.calls
+        .slice(-2)
+        .map(([call]) => call.options.mcpServers["bb-bridge"].instance);
+      expect(newServer).toBeDefined();
+      expect(newServer).not.toBe(oldServer);
       await expect(readNextPromptText(getLatestQueryCall())).resolves.toBe(
         "continue",
       );

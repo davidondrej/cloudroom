@@ -1316,6 +1316,14 @@ async fn prompt(
     if let Some(plan_only) = body.plan_only {
         input["plan_only"] = json!(plan_only);
     }
+    // A tell another thread sent through the app (a header, as older Cores refuse unknown body fields): when Core took
+    // it, so a turn it waits long for says so (prompt::with_sent_time). A user's own prompt has none.
+    if headers
+        .get("x-cloudroom-sender")
+        .is_some_and(|v| !v.is_empty())
+    {
+        input["sent"] = json!(crate::observability::now_ms());
+    }
     // An accepted retry must not depend on the model catalog still being available.
     if !manager.known_request(&id, &body.request_id) {
         manager.check_plan_only(&id, &input).await?;

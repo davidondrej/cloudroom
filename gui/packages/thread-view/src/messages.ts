@@ -6,6 +6,7 @@ import {
   THREAD_MODEL_SELECTION_OPERATION,
   THREAD_TELEPORT_LOCAL_OPERATION,
   diagnosticShellEnvValue,
+  formatGb,
   isApprovalInteractionLifecycle,
   isUserQuestionInteractionLifecycle,
   ownershipChangeOperationMetadataSchema,
@@ -63,10 +64,13 @@ export const MAX_ERROR_TITLE_LENGTH = 80;
 
 /** Antigravity's CLI reports its quota as a plain reply ("⚠ Individual quota reached. … Resets in 24m24s."), not an error. */
 export function isPlanLimitReply(text: string): boolean {
-  return /^\s*⚠?\s*Individual quota reached\b/u.test(text);
+  return /^\s*⚠?\s*(?:Individual|Third-party) quota reached\b/u.test(text);
 }
 
 const CORE_PLAN_LIMIT = "plan limit (not Cloudroom's).";
+/** How Core's error for Antigravity's quota notice starts (core/src/runtime/antigravity.rs `QUOTA_USED_UP`, #2598). */
+export const ANTIGRAVITY_QUOTA_USED_UP =
+  "Antigravity's quota is used up (not Cloudroom's).";
 /** Claude/Codex plan-limit text when an older Core or saved history missed the wrapper ("You've hit your Fable limit · resets …"). */
 const PROVIDER_PLAN_LIMIT_RE =
   /\bYou['’]ve (?:hit|reached) your (?:\S+\s+){0,4}limit\b/iu;
@@ -381,6 +385,9 @@ export function buildErrorRow(
     !isReconnect &&
     (providerErrorInfo?.category === "rate-limit" ||
       combinedText.includes(CORE_PLAN_LIMIT) ||
+      // Core's own error, so it stays a limit row after the thread switches away from Antigravity.
+      (event.type === "system/error" &&
+        rawMessage.startsWith(ANTIGRAVITY_QUOTA_USED_UP)) ||
       // The wording fallback is only for unclassified errors: an overload saying "requests per minute limit" is no plan limit.
       ((!providerErrorInfo || providerErrorInfo.category === "unknown") &&
         PROVIDER_PLAN_LIMIT_RE.test(combinedText)));
@@ -525,9 +532,6 @@ export function formatProvisioningDetail(
   }
   return lines.length > 0 ? lines.join("\n") : null;
 }
-
-const formatGb = (bytes: number, round: (n: number) => number = Math.round) =>
-  `${round((bytes / 2 ** 30) * 10) / 10} GB`;
 
 function threadInterruptedTitle(
   reason: SystemThreadInterruptedReason,

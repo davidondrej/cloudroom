@@ -155,14 +155,15 @@ const installerUrlSchema = z
   .string()
   .regex(/^https:\/\/[A-Za-z0-9.-]+(?:\/[A-Za-z0-9._~/-]*)?$/u);
 
+const installerArgSchema = z.string().regex(/^--?[A-Za-z0-9][A-Za-z0-9-]*$/u);
+
 const acpScriptInstallerSchema = z.object({
   scriptUrl: installerUrlSchema,
   /** Windows runs this PowerShell installer instead (#1696). */
   powershellUrl: installerUrlSchema.optional(),
-  args: z
-    .array(z.string().regex(/^--?[A-Za-z0-9][A-Za-z0-9-]*$/u))
-    .max(8)
-    .default([]),
+  args: z.array(installerArgSchema).max(8).default([]),
+  /** Script-level flags for the Windows PowerShell installer (#2715). */
+  powershellArgs: z.array(installerArgSchema).max(8).optional(),
 });
 
 const acpNpmInstallerSchema = z.object({
@@ -185,6 +186,29 @@ export function acpInstallerCommand(
     return npmGlobalInstallCommand(installer.npmPackage);
   }
   if (platform === "win32" && installer.powershellUrl !== undefined) {
+    const powershellArgs = installer.powershellArgs ?? [];
+    if (powershellArgs.length > 0) {
+      const displayCommand = [
+        `& ([scriptblock]::Create((irm ${installer.powershellUrl})))`,
+        ...powershellArgs,
+      ].join(" ");
+      // Fail on download errors (a null irm result otherwise creates an empty
+      // scriptblock and exits 0) and propagate $LASTEXITCODE, which scriptblock-run
+      // installers like Hermes set on failure instead of calling exit (#2715).
+      const script = `$ErrorActionPreference = 'Stop'; $LASTEXITCODE = 0; ${displayCommand}; if ($LASTEXITCODE) { exit $LASTEXITCODE }`;
+      return {
+        command: "powershell.exe",
+        args: [
+          "-NonInteractive",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          script,
+        ],
+        displayCommand,
+      };
+    }
     const command = downloadedInstallerCommand(installer.scriptUrl, {
       platform,
       powershellUrl: installer.powershellUrl,

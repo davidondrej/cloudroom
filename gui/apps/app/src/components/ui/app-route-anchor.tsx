@@ -1,20 +1,29 @@
 import {
   createContext,
+  startTransition,
   useCallback,
   useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   useTransition,
   type ComponentPropsWithoutRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useNavigate, type NavigateOptions } from "react-router";
+import {
+  matchPath,
+  Router,
+  UNSAFE_createBrowserHistory as createBrowserHistory,
+  useNavigate,
+  type NavigateOptions,
+} from "react-router";
 import { useStore } from "jotai";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { isRoutePath, resolveRouteHref } from "@/lib/route-paths";
+import { markThreadNavigation } from "@/lib/perf";
 import { getDesktopBrowserApi } from "@/lib/room-desktop";
 import { openPaneContentInSplit } from "@/lib/split-layout/openPaneContentInSplit";
 import { paneContentForPathname } from "@/views/thread-detail/splitThreadNavigation";
@@ -43,6 +52,57 @@ type RouteNavigate = (path: string, options?: RouteNavigateOptions) => void;
 interface RouteNavigation {
   navigate: RouteNavigate;
   openInSplit: (path: string) => boolean;
+}
+
+// A thread route change still rendering after this gets a default-priority copy.
+const ROUTE_TRANSITION_BUDGET_MS = 300;
+
+/**
+ * BrowserRouter, except a slow thread route change can't be starved: React
+ * restarts a transition on every sync update (a plugin's useSyncExternalStore
+ * ticker), so a cached big thread could wait for React's 5 s transition expiry.
+ * Default updates never interrupt a running transition, so this only takes
+ * over after an interruption.
+ */
+export function AppBrowserRouter({ children }: { children: ReactNode }) {
+  const [history] = useState(() => createBrowserHistory({ v5Compat: true }));
+  const [route, setRoute] = useState({
+    action: history.action,
+    location: history.location,
+  });
+  useLayoutEffect(() => {
+    let latest: object | null = null;
+    return history.listen(({ action, location }) => {
+      const next = { action, location };
+      latest = next;
+      const content = paneContentForPathname(location.pathname);
+      const threadId =
+        content?.kind === "thread"
+          ? content.threadId
+          : (matchPath(
+              { path: "/threads/:threadId", end: false },
+              location.pathname,
+            )?.params.threadId ?? null);
+      markThreadNavigation(threadId);
+      startTransition(() => setRoute(next));
+      // Other pages can be lazy: a default update would swap them for a blank fallback.
+      if (threadId === null) return;
+      window.setTimeout(() => {
+        // Checked again at render: a later navigation can land before React runs this update.
+        if (latest === next)
+          setRoute((current) => (latest === next ? next : current));
+      }, ROUTE_TRANSITION_BUDGET_MS);
+    });
+  }, [history]);
+  return (
+    <Router
+      location={route.location}
+      navigationType={route.action}
+      navigator={history}
+    >
+      {children}
+    </Router>
+  );
 }
 
 const RouteNavigationContext = createContext<RouteNavigation | null>(null);

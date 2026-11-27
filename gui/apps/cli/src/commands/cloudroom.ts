@@ -29,7 +29,7 @@ const TAR = process.platform === "win32" ? `${process.env.SystemRoot ?? "C:\\Win
 // skipping it also left nothing to unpack (#1454).
 export const WINDOWS_PULL_ARCHIVE = `ls -d -- "$n" >/dev/null && { l=$(find -H "$n" -type l | wc -l); [ "$l" = 0 ] || printf 'Skipped %s symlink(s): Windows tar cannot create them.\\n' "$l" >&2; find -H "$n" ! -type l -print0 | tar -h --null --no-recursion -czf - -T -; }`;
 
-const THIS_COMPUTER = process.platform === "win32" ? "this PC" : "this Mac";
+const THIS_COMPUTER = process.platform === "win32" ? "this PC" : process.platform === "darwin" ? "this Mac" : "this computer";
 const COMPUTER_TITLE = process.platform === "darwin" ? "Mac" : "Computer";
 
 function endsWithSeparator(path: string): boolean {
@@ -416,8 +416,8 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
       if (!outputJson(options, { ok: true })) console.log(name === "logout" ? "Signed out of this app. Cloud agents keep running." : "Sign-in cancelled.");
     }));
   }
-  group.command("teleport <thread-id>").description("Move a local Codex, Pi, Claude Code, or opencode thread to Cloud without changing its conversation. Checks first that Cloud can run the same model and effort. Use --to-local to bring a Cloud Codex, Pi, Claude Code, opencode, or Cursor thread back to this Mac")
-    .option("--to-local", "Move a Cloud thread back to this Mac with its conversation and code changes")
+  group.command("teleport <thread-id>").description(`Move a local Codex, Pi, Claude Code, or opencode thread to Cloud without changing its conversation. Checks first that Cloud can run the same model and effort. Use --to-local to bring a Cloud Codex, Pi, Claude Code, opencode, or Cursor thread back to ${THIS_COMPUTER}`)
+    .option("--to-local", `Move a Cloud thread back to ${THIS_COMPUTER} with its conversation and code changes`)
     .option("--cancel", "Cancel before cloud execution starts")
     .option("--status", "Read transfer progress without changing it")
     .option("--check", "Check whether Teleport would work, without moving anything")
@@ -430,7 +430,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
       const sdk = createCliRoomSdk(getUrl());
       if (options.toLocal) {
         const moved = await sdk.cloudroom.teleportLocal(threadId);
-        if (!outputJson(options, moved)) console.log(`Moved to this Mac.${moved.conflicts ? ` ${moved.conflicts} changed files were kept in both versions; cloud copies are in .cloudroom/teleport/.` : ""}`);
+        if (!outputJson(options, moved)) console.log(`Moved to ${THIS_COMPUTER}.${moved.conflicts ? ` ${moved.conflicts} changed files were kept in both versions; cloud copies are in .cloudroom/teleport/.` : ""}`);
         return;
       }
       if (Boolean(options.model) !== Boolean(options.reasoning)) throw new Error("Use --model and --reasoning together.");

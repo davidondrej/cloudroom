@@ -123,6 +123,72 @@ describe("secrets plugin server", () => {
     await command;
   });
 
+  it("opens and writes a long Windows scratch path without hitting the title limit", async () => {
+    const cwd =
+      "C:\\Users\\Administrator\\AppData\\Local\\Cloudroom\\worktrees\\scratch-project-with-a-very-long-workspace-name\\room-thread-2693-windows-scratch-worktree-abc12345";
+    const expectedPath = `${cwd}\\.env.local`;
+    let resolveOpened!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      resolveOpened = resolve;
+    });
+    const host = createFakePluginHost({
+      pluginId: "secrets",
+      sdk: {
+        threads: {
+          async get() {
+            return { host: { id: "host-win" } };
+          },
+        },
+        files: {
+          async read() {
+            return { content: "", contentEncoding: "utf8", sha256: "before" };
+          },
+          async write() {
+            return { outcome: "written", sha256: "after", sizeBytes: 1 };
+          },
+        },
+      },
+    });
+    const requestInput = host.bb.ui.requestInput.bind(host.bb.ui);
+    vi.spyOn(host.bb.ui, "requestInput").mockImplementation(
+      (request, options) => {
+        try {
+          return requestInput(request, options);
+        } finally {
+          resolveOpened();
+        }
+      },
+    );
+    plugin(host.bb as unknown as Parameters<typeof plugin>[0]);
+
+    const command = host.harness.runCli(
+      ["request", "API_KEY", "--write-env", ".env.local"],
+      { threadId: "thr-win", cwd },
+    );
+    await opened;
+
+    expect(expectedPath.length).toBeGreaterThan(160);
+    expect(host.harness.pendingInteractions).toHaveLength(1);
+    const pending = host.harness.pendingInteractions[0]!;
+    expect(pending.title).toBe("Add secrets");
+    expect(pending.payload).toMatchObject({
+      destination: { kind: "dotenv", path: expectedPath },
+    });
+    host.harness.submitInteraction(pending.id, {
+      values: { API_KEY: "dummy-secret" },
+    });
+
+    const result = await command;
+    expect(result.exitCode).toBe(0);
+    expect(host.harness.sdk.callsTo("files.write")[0]?.[0]).toMatchObject({
+      hostId: "host-win",
+      path: expectedPath,
+    });
+    expect(JSON.parse(result.stdout ?? "")).toMatchObject({
+      path: expectedPath,
+    });
+  });
+
   it.each([
     {
       argv: ["request", "API_KEY", "--purpose", "--write-env", ".env"],

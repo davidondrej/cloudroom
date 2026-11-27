@@ -80,6 +80,25 @@ describe("child thread notifications", () => {
     expect(message).not.toContain("Deploy script failed on preflight.");
   });
 
+  it("keeps a provider's HTML error page out of a failed outcome (#2601)", () => {
+    const page = `<!DOCTYPE html><html><head><title>Just a moment...</title><style>${"x".repeat(2_000)}</style></head><body></body></html>`;
+    const message = renderBatchMessage({
+      items: [
+        {
+          activeWorkflowCount: 0,
+          childThread: testThread({ id: "thr_child", title: null }),
+          failureReason: `unexpected status 403 Forbidden: ${page}, request id: req_1`,
+          terminalOutput: null,
+          turnStatus: "failed",
+        },
+      ],
+    });
+
+    expect(message).toContain(
+      'Error: unexpected status 403 Forbidden: [HTML page "Just a moment..." omitted], request id: req_1',
+    );
+  });
+
   it("names a queued retry's time in UTC, as provider-retry status does (#2148)", () => {
     const sendAt = Date.UTC(2026, 10, 21, 12, 5, 30);
     const message = renderBatchMessage({

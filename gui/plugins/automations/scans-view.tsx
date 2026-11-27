@@ -1,11 +1,5 @@
-import { useEffect, useState } from "react";
-import {
-  experimental_ProviderIcon as ProviderIcon,
-  experimental_useProviders as useProviders,
-  useBbNavigate,
-  useRpc,
-} from "@get-bb/plugin-sdk/app";
-import { Button } from "@cloudroom/shared-ui/button";
+import { useEffect, useState, type ReactNode } from "react";
+import { useBbNavigate, useRpc } from "@get-bb/plugin-sdk/app";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { showLoopError } from "./cloud-view";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -13,6 +7,9 @@ import type { automationRpcContract } from "./src/rpc.js";
 import type { AgentSessions } from "./src/agent-sessions.js";
 
 export type Agent = AgentSessions["agents"][number];
+type ScanKind = "workflow" | "cyber";
+/** Per kind: whether a scan ever started on this computer, and the thread of one that is running now. */
+type ScanState = Record<ScanKind, { used: boolean; running: string | null }>;
 
 export const COLORS: Record<string, string> = {
   "claude-code": "#D97757",
@@ -21,8 +18,52 @@ export const COLORS: Record<string, string> = {
   "acp-opencode": "currentColor",
   "acp-hermes-agent": "#F2C94C",
 };
-const card = "rounded-xl border border-border bg-surface-raised";
 const fmt = (n: number) => n.toLocaleString("en-US");
+
+// The Scans tab (David, 2026-11-27, docs/scopes/workflow-scan.md): one big card per scan, in the look of the
+// one-click scans under the new-thread box (ActivationChecklist.tsx). The whole card is the button.
+const BLUE = "#4F9BFF", GREEN = "#34D399", YELLOW = "#F6C945", ORANGE = "#F5873A", RED = "#EF4444";
+const OFF = "color-mix(in srgb, currentColor 7%, transparent)";
+const COLUMNS = 16, ROWS = 7;
+/** One pass of the beam across a card, in seconds. Twice as fast while that scan runs. */
+const SWEEP = 4;
+const ANIMATION = `
+@keyframes cr-scan-beam { from { transform: translateX(-100%) } to { transform: translateX(0) } }
+@keyframes cr-scan-lit { 0% { opacity: .2; filter: none } 2.5% { opacity: 1; filter: brightness(2) } 14% { opacity: 1; filter: brightness(1.2) } 62% { opacity: .7; filter: none } 100% { opacity: .2; filter: none } }
+.cr-scan-beam { animation: cr-scan-beam linear infinite; }
+.cr-scan-lit { animation: cr-scan-lit linear infinite; }
+@media (prefers-reduced-motion: reduce) { .cr-scan-beam { display: none } .cr-scan-lit { animation: none } }`;
+
+/** A card's squares are a picture, not data: nothing is scanned before the click. A fixed scatter (from `seed`),
+ *  so it never changes between renders: `share` of the squares are on, each with its own brightness.
+ *  Returns one color per square, row by row, or null for a square that is off. */
+function scatter(seed: number, share: number, color: (pick: number) => string): (string | null)[] {
+  const random = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return Array.from({ length: COLUMNS * ROWS }, () => {
+    const on = random() < share, strength = 0.51 + 0.49 * random() ** 1.6, pick = random();
+    return on ? `color-mix(in srgb, ${color(pick)} ${Math.round(strength * 100)}%, transparent)` : null;
+  });
+}
+const KINDS = {
+  workflow: {
+    name: "Workflow",
+    color: BLUE,
+    glow: "ring-[#4F9BFF] shadow-[0_0_48px_-12px_#4F9BFF]",
+    squares: scatter(11, 0.5, (pick) => (pick < 0.5 ? BLUE : GREEN)),
+  },
+  // Cyber has fewer squares on than Workflow (39 and 45), so it looks quieter next to it (David, 2026-11-27).
+  cyber: {
+    name: "Cyber",
+    color: RED,
+    glow: "ring-[#EF4444] shadow-[0_0_48px_-12px_#EF4444]",
+    squares: scatter(29, 0.28, (pick) => (pick < 0.6 ? RED : pick < 0.85 ? ORANGE : YELLOW)),
+  },
+};
 
 export function ScansTabLabel() {
   return (
@@ -40,19 +81,39 @@ export function ScansView() {
   const navigate = useBbNavigate();
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [plan, setPlan] = useState<string | null | undefined>(undefined);
-  const [starting, setStarting] = useState<"workflow" | "cyber" | null>(null);
-  // Which kinds already ran on this computer: a Free plan's first scan of each kind is free (David, 2026-11-19).
-  const [used, setUsed] = useState<Record<"workflow" | "cyber", boolean> | null>(null);
+  const [starting, setStarting] = useState<ScanKind | null>(null);
+  // `used`: a Free plan's first scan of each kind is free (David, 2026-11-19).
+  // `running`: its card opens that scan instead of starting a second one. People started scans again and again,
+  // because nothing showed that one was already running (David, 2026-11-26).
+  const [state, setState] = useState<ScanState | null>(null);
+  const anyRunning = Boolean(state?.workflow.running || state?.cyber.running);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () =>
+      rpc.call("scans_state", null).then(
+        ({ workflow, cyber }) =>
+          !cancelled &&
+          setState({
+            workflow: { used: workflow.used, running: workflow.running ? workflow.thread : null },
+            cyber: { used: cyber.used, running: cyber.running ? cyber.thread : null },
+          }),
+        // Unknown counts as unused and not running: the server still refuses a second free scan.
+        () => !cancelled && setState((old) => old ?? { workflow: { used: false, running: null }, cyber: { used: false, running: null } }),
+      );
+    void load();
+    // While a scan runs, ask again every 5 s, so its card goes back to normal when it ends. The call stays on
+    // this computer (the plugin's own storage and the thread's status): no website or database call.
+    const timer = anyRunning ? setInterval(() => !document.hidden && void load(), 5_000) : undefined;
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [rpc, anyRunning]);
   useEffect(() => {
     let cancelled = false;
     rpc.call("scans_agent_sessions", null).then(
       (result) => !cancelled && setAgents(result.agents),
       () => !cancelled && setAgents([]),
-    );
-    rpc.call("scans_state", null).then(
-      (result) => !cancelled && setUsed({ workflow: result.workflow.used, cyber: result.cyber.used }),
-      // Unknown counts as unused: the server still refuses a second free scan.
-      () => !cancelled && setUsed({ workflow: false, cyber: false }),
     );
     rpc.call("account_plan", null).then(
       (result) => !cancelled && setPlan(result.plan),
@@ -62,8 +123,9 @@ export function ScansView() {
       cancelled = true;
     };
   }, [rpc]);
-  const upgrade = (kind: "workflow" | "cyber") => plan === "free" && used !== null && used[kind];
-  const start = (kind: "workflow" | "cyber") => {
+  const free = plan === "free";
+  const upgrade = (kind: ScanKind) => free && state !== null && state[kind].used;
+  const start = (kind: ScanKind) => {
     if (upgrade(kind)) {
       rpc.call("scans_upgrade_clicked", null).catch(() => {});
       return navigate.openUrl("https://www.cloudroom.dev/billing");
@@ -80,162 +142,107 @@ export function ScansView() {
       },
     );
   };
-  const [first, second, ...rest] = agents ?? [];
+  const chats = (agents ?? []).reduce((sum, agent) => sum + agent.sessions, 0);
+  // The Workflow scan reads past chats, so with none on this computer it cannot start.
+  const noChats = agents !== null && agents.length === 0;
+  const door = (kind: ScanKind) => {
+    const running = state?.[kind].running ?? null;
+    return {
+      kind,
+      running: running !== null,
+      disabled: running === null && (starting !== null || plan === undefined || state === null || (kind === "workflow" && !agents?.length)),
+      cta: running ? "Open your scan" : upgrade(kind) ? "Upgrade to scan" : starting === kind ? "Starting…" : kind === "workflow" ? "Scan my workflow" : "Cyber scan",
+      onClick: () => (running ? navigate.toThread(running) : start(kind)),
+    };
+  };
+  const runningBody = "Your scan is running. It ends with loops for you to approve. Open it to watch.";
+  const workflow = door("workflow"), cyber = door("cyber");
   return (
-    <div className="mx-auto w-full max-w-3xl pb-10">
-      <div className="mb-6 flex items-end justify-between gap-6">
-        <h2 className="text-[30px] leading-tight font-semibold tracking-tight text-foreground">
-          See how you
-          <br />
-          actually work.
-        </h2>
-        <div className="flex shrink-0 items-center gap-3">
-          <Button
-            type="button"
-            size="lg"
-            variant="outline"
-            className="h-10 gap-2 px-4 font-semibold"
-            disabled={starting !== null || plan === undefined || used === null}
-            onClick={() => start("cyber")}
-          >
-            <Icon name="SecurityCheck" className="size-4" aria-hidden />
-            {upgrade("cyber")
-              ? "Upgrade to scan"
-              : starting === "cyber"
-                ? "Starting…"
-                : "Cyber scan"}
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            className="h-10 gap-2 px-5 font-semibold"
-            disabled={starting !== null || plan === undefined || used === null || !agents?.length}
-            onClick={() => start("workflow")}
-          >
-            <Icon name="Play" className="size-4" aria-hidden />
-            {upgrade("workflow")
-              ? "Upgrade to scan"
-              : starting === "workflow"
-                ? "Starting…"
-                : "Scan my workflow"}
-          </Button>
-        </div>
+    <div className="@container mx-auto w-full max-w-5xl pb-10">
+      <style>{ANIMATION}</style>
+      <div className="grid grid-cols-1 gap-4 @3xl:grid-cols-2">
+        <ScanDoor
+          {...workflow}
+          dim={noChats}
+          title={workflow.running ? <>Reading your<br />{chats ? `${fmt(chats)} chats…` : "chats…"}</> : <>See how you<br />actually work.</>}
+          body={
+            workflow.running
+              ? runningBody
+              : agents === null
+                ? "Reads your past chats. Gives you 3 loops that do that work."
+                : noChats
+                  ? "No agent chats on this computer yet. Chat with Claude Code or Codex first."
+                  : `Reads ${fmt(chats)} chats from ${agents.length} ${agents.length === 1 ? "agent" : "agents"}. Gives you 3 loops that do that work.`
+          }
+        />
+        <ScanDoor
+          {...cyber}
+          title={cyber.running ? <>Finding what's<br />exposed…</> : <>Find what's<br />exposed.</>}
+          body={cyber.running ? runningBody : "Checks this computer and your repos for known CVEs and leaked keys. Gives you 2 loops."}
+        />
       </div>
-      {agents === null ? (
-        <div className="grid grid-cols-2 gap-3">
-          {[0, 1].map((key) => (
-            <div key={key} className={cn(card, "h-64 animate-pulse")} />
-          ))}
-        </div>
-      ) : agents.length === 0 ? (
-        <div
-          className={cn(card, "p-8 text-center text-sm text-muted-foreground")}
-        >
-          No agent sessions found on this computer yet.
-        </div>
-      ) : (
-        <>
-          <div
-            className={cn("grid gap-3", second ? "grid-cols-2" : "grid-cols-1")}
-          >
-            {[first, second].filter(Boolean).map((agent) => (
-              <BigCard key={agent.id} agent={agent} />
-            ))}
-          </div>
-          {rest.length > 0 ? (
-            <div className="mt-3 grid grid-cols-3 gap-3">
-              {rest.map((agent) => (
-                <SmallCard key={agent.id} agent={agent} />
-              ))}
-            </div>
-          ) : null}
-        </>
-      )}
-    </div>
-  );
-}
-
-function Logo({ agent, className }: { agent: Agent; className?: string }) {
-  const { providers } = useProviders();
-  return (
-    <ProviderIcon
-      providerKind="agent"
-      provider={
-        providers.find((provider) => provider.id === agent.id) ?? {
-          id: agent.id,
-        }
-      }
-      fallback="Bot"
-      className={cn("size-4", className)}
-      aria-hidden
-    />
-  );
-}
-
-function BigCard({ agent }: { agent: Agent }) {
-  return (
-    <div className={cn(card, "p-5")}>
-      <div className="flex items-center gap-2">
-        <Logo agent={agent} className="size-5" />
-        <span className="font-semibold text-foreground">{agent.name}</span>
-      </div>
-      <p className="mt-4 text-4xl font-semibold tracking-tight text-foreground tabular-nums">
-        {fmt(agent.sessions)}
+      <p className="mt-3 text-center text-xs text-muted-foreground/70">
+        {free && state !== null && !(state.workflow.used && state.cyber.used) ? "Your first scan of each kind is free." : "Read only. Each scan ends with loops made for you."}
       </p>
-      <p className="text-xs text-muted-foreground">sessions</p>
-      <div className="mt-5">
-        <Heatmap agent={agent} cell={14} />
-      </div>
     </div>
   );
 }
 
-function SmallCard({ agent }: { agent: Agent }) {
+function ScanDoor({ kind, title, body, cta, running, disabled, dim, onClick }: {
+  kind: ScanKind;
+  title: ReactNode;
+  body: string;
+  cta: string;
+  running: boolean;
+  disabled: boolean;
+  dim?: boolean;
+  onClick: () => void;
+}) {
+  const { name, color, glow, squares } = KINDS[kind];
+  const sweep = running ? SWEEP / 2 : SWEEP;
   return (
-    <div className={cn(card, "p-4")}>
-      <div className="flex items-center gap-2">
-        <Logo agent={agent} />
-        <span className="truncate text-sm font-semibold text-foreground">
-          {agent.name}
-        </span>
-        <span className="ml-auto text-lg font-semibold text-foreground tabular-nums">
-          {fmt(agent.sessions)}
-        </span>
-      </div>
-      <div className="mt-3">
-        <Heatmap agent={agent} cell={9} />
-      </div>
-    </div>
-  );
-}
-
-function Heatmap({ agent, cell }: { agent: Agent; cell: number }) {
-  const max = Math.max(...agent.days, 1);
-  const color = COLORS[agent.id] ?? "#A1A1AA";
-  return (
-    <div
-      className="flex gap-[3px] text-foreground"
-      aria-label={`${agent.name} sessions per day, last 13 weeks`}
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={cn(
+        "relative flex h-[560px] cursor-pointer overflow-hidden rounded-[10px] bg-[#0c0c0c] text-left text-[#F5F0E1] outline-none ring-inset focus-visible:ring-2 focus-visible:ring-[#F5F0E1]/60 disabled:cursor-default",
+        running ? cn("ring-[1.5px]", glow) : "ring-1 ring-[#F5F0E1]/15 enabled:hover:ring-[#F5F0E1]/30",
+      )}
     >
-      {Array.from({ length: Math.ceil(agent.days.length / 7) }, (_, week) => (
-        <div key={week} className="flex flex-col gap-[3px]">
-          {agent.days.slice(week * 7, week * 7 + 7).map((count, day) => (
-            <span
-              key={day}
-              className="rounded-[2px]"
-              style={{
-                width: cell,
-                height: cell,
-                background:
-                  count === 0
-                    ? "color-mix(in srgb, currentColor 7%, transparent)"
-                    : color,
-                opacity: count === 0 ? 1 : 0.25 + 0.75 * Math.sqrt(count / max),
-              }}
-            />
+      {/* The squares across the card. A beam sweeps left to right, and each column lights up as the beam reaches it. */}
+      <span aria-hidden className="pointer-events-none absolute top-[250px] left-7 block w-[calc(100%-56px)] max-w-[448px] overflow-hidden py-[10px]">
+        <span className="flex gap-[3px]">
+          {Array.from({ length: COLUMNS }, (_, column) => (
+            <span key={column} className="cr-scan-lit flex flex-1 flex-col gap-[3px]" style={{ animationDuration: `${sweep}s`, animationDelay: `${(sweep * column) / COLUMNS - sweep}s` }}>
+              {Array.from({ length: ROWS }, (_, row) => (
+                <span key={row} className="aspect-square w-full rounded-[3px]" style={{ background: squares[row * COLUMNS + column] ?? OFF }} />
+              ))}
+            </span>
           ))}
-        </div>
-      ))}
-    </div>
+        </span>
+        <span
+          className="cr-scan-beam absolute inset-0"
+          style={{ animationDuration: `${sweep}s`, background: `linear-gradient(90deg, transparent calc(100% - 90px), color-mix(in srgb, ${color} 32%, transparent))`, borderRight: `2px solid ${color}` }}
+        />
+      </span>
+      <span className="relative flex min-w-0 flex-col items-start px-7 pt-8">
+        <span className="flex items-center gap-2 font-mono text-[11px] tracking-[0.16em] uppercase" style={{ color }}>
+          {running ? (
+            <span className="relative flex size-2">
+              <span className="absolute inset-0 animate-ping rounded-full bg-current opacity-75" />
+              <span className="relative size-2 rounded-full bg-current" />
+            </span>
+          ) : null}
+          {name} · {running ? "Running now" : "Scan"}
+        </span>
+        <span className="mt-2 block text-[46px] leading-[1.05] font-extrabold tracking-[-0.045em]">{title}</span>
+        <span className="mt-3 block max-w-[290px] text-[15px] leading-snug text-[#F5F0E1]/55">{body}</span>
+      </span>
+      <span className={cn("absolute bottom-7 left-7 flex h-11 items-center gap-2 rounded-[7px] bg-[#BFFF00] px-5 text-[15px] font-semibold text-[#0a0a0a]", dim && "opacity-50")}>
+        {cta}
+        <Icon name="ArrowRight" className="size-4" aria-hidden />
+      </span>
+    </button>
   );
 }

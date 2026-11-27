@@ -349,9 +349,12 @@ async function transcribeWithConfiguredModel(
     return transcribeWithAiService(deps, service, modelInfo, args);
   }
 
+  // Off, uninstalled, or failed to load: a retry alone can't fix it, so say where to look (#2665).
+  const plugin =
+    modelInfo.provider.charAt(0).toUpperCase() + modelInfo.provider.slice(1);
   throw new ApiError(
     501,
     "not_configured",
-    `No loaded plugin registers AI service "${modelInfo.provider}" for voice transcription`,
+    `Voice input uses the ${plugin} plugin, which isn't loaded. Turn it on in Settings → Plugins, then press Retry.`,
   );
 }

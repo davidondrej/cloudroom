@@ -278,7 +278,9 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     installUrl: "https://hermes-agent.nousresearch.com",
     installer: {
       scriptUrl: "https://hermes-agent.nousresearch.com/install.sh",
+      powershellUrl: "https://hermes-agent.nousresearch.com/install.ps1",
       args: ["--non-interactive"],
+      powershellArgs: ["-NonInteractive"],
     },
     visibility: "installed",
     fork: "tip",

@@ -261,11 +261,15 @@ export interface CloudSkill {
   description: string;
   cloud: boolean;
 }
-/** `auto`: skills added to this Mac later go to the cloud too. `issue`: why the last upload failed. */
+/** `auto`: skills added to this Mac later go to the cloud too. `issue`: why the last upload failed.
+ *  `leftOut`: dependency and cache folders the last good upload left out, as `skill/folder`. `copiedAt`: when it happened (ms). */
 export interface CloudSkills {
   auto: boolean;
   skills: CloudSkill[];
   issue: string | null;
+  /** Missing from older servers' answers. */
+  leftOut?: string[];
+  copiedAt?: number | null;
 }
 export type CloudSkillsChange = { names: string[]; cloud: boolean } | { auto: boolean };
 /** An MCP server on this Mac (Claude Code or Codex). `macOnly`: it runs a program or uses a path only this Mac has.

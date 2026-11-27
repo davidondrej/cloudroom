@@ -690,9 +690,11 @@ pub(super) fn notice(
             "[Cloudroom] Child thread {name} was interrupted. If the user stopped it, do not restart or replace its work unless they ask."
         ),
         // It continues by itself at the reset or after an account switch (accounts.rs).
-        _ if error
-            .as_deref()
-            .is_some_and(|e| e.contains(crate::runtime::PLAN_LIMIT)) =>
+        // Not Antigravity's quota: nothing resumes it, so its parent resends (#2598).
+        _ if error.as_deref().is_some_and(|e| {
+            e.contains(crate::runtime::PLAN_LIMIT)
+                && !e.starts_with(crate::runtime::antigravity::QUOTA_USED_UP)
+        }) =>
         {
             format!(
                 "[Cloudroom] Child thread {name} failed or its outcome is uncertain. Cause: {} Do not resend its task.",
@@ -1388,6 +1390,19 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_antigravity_quota_failure_asks_its_parent_to_resend() {
+        // Even when the quoted reply happens to carry the plan-limit marker (#2598).
+        let error = format!(
+            "{} Resend the task after it resets. Antigravity said: plan limit (not Cloudroom's).",
+            crate::runtime::antigravity::QUOTA_USED_UP
+        );
+        let text = super::notice("c", None, "failed", Some(error), None);
+        assert!(
+            text.contains("resend the task if it still matters") && !text.contains("Do not resend")
+        );
+    }
 
     #[test]
     fn thread_output_serves_the_whole_saved_reply_of_a_sleeping_child() {

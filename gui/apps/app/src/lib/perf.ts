@@ -28,11 +28,14 @@ const FLUSH_INTERVAL_MS = 10_000;
 const MAX_QUEUED_ENTRIES = 100;
 const UI_FREEZE_THRESHOLD_MS = 200;
 const INPUT_TO_OPEN_WINDOW_MS = 2_000;
+// Past React's 5 s transition limit; an older click (a focused pane that never mounted) is stale.
+const NAVIGATION_TO_OPEN_MAX_MS = 10_000;
 const PANEL_OPEN_CHECK_MS = 500;
 
 const queue: PerfEntry[] = [];
 let lastInputAt: number | null = null;
 let hasOpenedThread = false;
+let threadNavigation: { startedAt: number; threadId: string } | null = null;
 
 function recordPerf(entry: PerfEntry): void {
   if (queue.length >= MAX_QUEUED_ENTRIES) return;
@@ -50,10 +53,39 @@ function flushPerf(): void {
   }).catch(() => {});
 }
 
+/** The URL moved to `threadId` (null: elsewhere). Its open time starts at that input, however slow the mount or later clicks. */
+export function markThreadNavigation(threadId: string | null): void {
+  const now = performance.now();
+  if (threadId !== null && savedNavigationStart(threadId, now) !== null) return;
+  threadNavigation =
+    threadId !== null &&
+    lastInputAt !== null &&
+    now - lastInputAt <= INPUT_TO_OPEN_WINDOW_MS
+      ? { startedAt: lastInputAt, threadId }
+      : null;
+}
+
+function savedNavigationStart(threadId: string, now: number): number | null {
+  return threadNavigation?.threadId === threadId &&
+    now - threadNavigation.startedAt <= NAVIGATION_TO_OPEN_MAX_MS
+    ? threadNavigation.startedAt
+    : null;
+}
+
 function startThreadOpen(threadId: string): PendingThreadOpen {
   const now = performance.now();
   const isFirstOpen = !hasOpenedThread;
   hasOpenedThread = true;
+  const navigationStart = savedNavigationStart(threadId, now);
+  if (navigationStart !== null) {
+    threadNavigation = null;
+    return {
+      metric: "thread_open",
+      reported: false,
+      startedAt: navigationStart,
+      threadId,
+    };
+  }
   if (lastInputAt !== null && now - lastInputAt <= INPUT_TO_OPEN_WINDOW_MS) {
     return {
       metric: "thread_open",

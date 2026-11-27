@@ -38,7 +38,12 @@ export interface AcpAgentDefinition {
   /** False hides the Standard/Fast toggle: the agent has no fast mode. */
   supportsServiceTier?: boolean;
   installer?:
-    | { scriptUrl: string; powershellUrl?: string; args?: readonly string[] }
+    | {
+        scriptUrl: string;
+        powershellUrl?: string;
+        args?: readonly string[];
+        powershellArgs?: readonly string[];
+      }
     | { npmPackage: string };
   /** Older versions cannot run the ACP launch; thread start asks for an update. */
   minimumVersion?: string;

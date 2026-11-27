@@ -313,11 +313,20 @@ export type SystemThreadInterruptedEventData = z.infer<
 export const UNDELIVERED_MESSAGE_WARNING =
   "May not have been delivered: the agent stopped before reading it";
 
+export const formatGb = (
+  bytes: number,
+  round: (n: number) => number = Math.round,
+) => `${round((bytes / 2 ** 30) * 10) / 10} GB`;
+
 /** Plain words for a recorded stop, for parent notices and `thread show` (#1159). */
 export function describeThreadInterruption(
   stop: SystemThreadInterruptedEventData,
 ): string {
   if (stop.cause === "host-connection-lost") return "host connection lost";
+  // The whole thread's footprint, so it can't name which process used it (#2659).
+  if (stop.reason === "memory-limit" && stop.memory) {
+    return `memory protection: its processes used ${formatGb(stop.memory.usedBytes, Math.ceil)} of the computer's ${formatGb(stop.memory.totalBytes)}`;
+  }
   return {
     "manual-stop": "stopped by the user or an agent",
     "host-daemon-restarted": "host restarted",

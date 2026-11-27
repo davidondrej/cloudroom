@@ -570,17 +570,29 @@ function OrbitStat({
   );
 }
 
-function OrbitRing({ ring, radius }: { ring: OrbitRingData; radius: number }) {
+function OrbitRing({
+  ring,
+  radius,
+  ready,
+}: {
+  ring: OrbitRingData;
+  radius: number;
+  /** Run history has loaded. Until then, `last` isn't news. */
+  ready: boolean;
+}) {
   const center = ORBIT_SIZE / 2;
   const span = 360 / ORBIT_TICKS;
   const group = useRef<SVGGElement>(null);
   const newest = useRef<SVGPathElement>(null);
   const ripple = useRef<SVGCircleElement>(null);
-  const seen = useRef(ring.last);
+  const seen = useRef<number | null>(null);
   // A run just finished: the ring steps forward one tick and the new tick pops in white.
+  // The first history the ring sees, and a run that disappears, never pop.
   useEffect(() => {
-    if (ring.last === seen.current) return;
-    seen.current = ring.last;
+    if (!ready) return;
+    const previous = seen.current;
+    seen.current = Math.max(previous ?? 0, ring.last);
+    if (previous === null || ring.last <= previous) return;
     if (
       typeof group.current?.animate !== "function" ||
       window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -610,7 +622,7 @@ function OrbitRing({ ring, radius }: { ring: OrbitRingData; radius: number }) {
       ],
       { duration: 900, easing: "ease-out" },
     );
-  }, [ring.last, span]);
+  }, [ready, ring.last, span]);
   const radians = (((ORBIT_TICKS - 0.5) * span - 90) * Math.PI) / 180;
   return (
     <>
@@ -672,6 +684,7 @@ function LoopOrbit({
   failedToday,
   next,
   now,
+  ready,
   onReview,
 }: {
   rings: OrbitRingData[];
@@ -684,9 +697,21 @@ function LoopOrbit({
   failedToday: number;
   next: { name: string; at: number } | null;
   now: number;
+  ready: boolean;
   onReview?: () => void;
 }) {
   const center = ORBIT_SIZE / 2;
+  const svg = useRef<SVGSVGElement>(null);
+  // Off screen, the CSS pauses the sweep. Set on the element, so scrolling never re-renders.
+  useEffect(() => {
+    const element = svg.current;
+    if (!element || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) =>
+      element.toggleAttribute("data-offscreen", !entry?.isIntersecting),
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   return (
     <section
       aria-label="Loops at a glance"
@@ -694,6 +719,7 @@ function LoopOrbit({
     >
       <div className="relative mx-auto size-[168px] shrink-0">
         <svg
+          ref={svg}
           viewBox={`0 0 ${ORBIT_SIZE} ${ORBIT_SIZE}`}
           className="loop-orbit size-full overflow-visible"
           aria-hidden
@@ -711,6 +737,7 @@ function LoopOrbit({
               key={ring.key}
               ring={ring}
               radius={center - 12 - index * 13}
+              ready={ready}
             />
           ))}
           <g
@@ -2053,6 +2080,7 @@ export function AutomationOverviewView({
         <>
           <LoopOrbit
             rings={rings}
+            ready={review?.data != null}
             running={activeItems.length}
             cloud={activeCloud.length}
             runsPerDay={orbitLoops.reduce((sum, loop) => sum + loop.perDay, 0)}

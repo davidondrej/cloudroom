@@ -147,6 +147,11 @@
       "source": "./src/chat-file-copies.ts",
       "types": "./src/chat-file-copies.ts",
       "default": "./src/chat-file-copies.ts"
+    },
+    "./spawn-request": {
+      "source": "./src/spawn-request.ts",
+      "types": "./src/spawn-request.ts",
+      "default": "./src/spawn-request.ts"
     }
   },
   "scripts": {

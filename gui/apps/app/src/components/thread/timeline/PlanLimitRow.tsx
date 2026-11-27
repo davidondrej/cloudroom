@@ -8,6 +8,7 @@ import {
 } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import type { TimelineNonOperationSystemRow } from "@cloudroom/server-contract";
+import { ANTIGRAVITY_QUOTA_USED_UP } from "@cloudroom/thread-view";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
@@ -764,7 +765,12 @@ function pastLimitProvider(
   }
   if (/^Cursor's plan limit\b/u.test(text)) return "acp-cursor";
   if (/^Pi's plan limit\b/u.test(text)) return "pi";
-  if (/^Individual quota reached\b/iu.test(text)) return "acp-antigravity";
+  if (
+    /^(?:Individual|Third-party) quota reached\b/iu.test(text) ||
+    text.startsWith(ANTIGRAVITY_QUOTA_USED_UP)
+  ) {
+    return "acp-antigravity";
+  }
   return fallback ?? null;
 }
 

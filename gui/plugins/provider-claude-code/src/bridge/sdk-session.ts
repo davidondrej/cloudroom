@@ -43,7 +43,8 @@ export interface SdkSessionOptions {
   projectSettings?: boolean;
   sandbox?: Options["sandbox"];
   hooks?: Options["hooks"];
-  mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
+  /** Builds each Claude its own in-process MCP servers: one serves a single Claude, and a replaced Claude can still hold its own while it stops (#2597). */
+  mcpServers?: () => Record<string, McpSdkServerConfigWithInstance>;
   allowedTools?: string[];
   disallowedTools?: string[];
   canUseTool?: CanUseTool;
@@ -482,7 +483,7 @@ export class SdkSession {
       env,
       stderr: onStderr,
       ...(this.options.mcpServers
-        ? { mcpServers: this.options.mcpServers }
+        ? { mcpServers: this.options.mcpServers() }
         : {}),
       ...(this.options.allowedTools
         ? { allowedTools: this.options.allowedTools }

@@ -10,6 +10,7 @@ import {
   type Thread,
   type JsonValue,
 } from "@cloudroom/domain";
+import { requestThreadId } from "@cloudroom/config/spawn-request";
 import type { CreateThreadEnvironmentArgs } from "@cloudroom/server-contract";
 import {
   BbHttpError,
@@ -47,6 +48,8 @@ import {
 import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
 
 const SPAWN_ATTEMPTS = 3;
+// Short: the read only spares a retry, which still follows when it fails.
+const SPAWN_READBACK_TIMEOUT_MS = 10_000;
 
 const PROVIDER_HELP =
   "Provider ID for the thread, such as claude-code or codex. Required with --machine cloud; otherwise omit to use the project's remembered provider choice";
@@ -654,6 +657,19 @@ export function registerSpawnCommand(
               const reason = timedOut
                 ? `no answer within ${DEFAULT_BB_REQUEST_TIMEOUT_MS / 1000} seconds; it may be busy`
                 : getErrorMessage(error);
+              // A slow first start can outlast the answer while the thread already exists: read it before any retry (#2446).
+              // Only a request ID made here: a reused --request-id may name an older thread, which the server's 409 must judge.
+              const made =
+                unknown && !cloudTarget && opts.requestId === undefined
+                  ? await findSpawnedThread(sdk, projectId, requestId)
+                  : null;
+              if (made) {
+                console.error(
+                  `Cloudroom at ${getUrl()} did not answer the spawn in time (${reason}), but thread ${made.id} exists (${made.status}), so it was not spawned again. Check its start with: room-cli thread show ${made.id}`,
+                );
+                thread = made;
+                break;
+              }
               // Said at once: an agent's command timeout can stop this before the last attempt.
               if (unknown && !unconfirmed)
                 console.error(
@@ -712,6 +728,28 @@ export function registerSpawnCommand(
         printThread(thread);
       }),
     );
+}
+
+/** The thread a Local spawn's request ID names, once its first message cleared dispatch; null if not (yet) or unknown.
+ *  A `pending` row can still be refused and deleted, or be left by a create that stopped: the retry settles those. */
+async function findSpawnedThread(
+  sdk: ReturnType<typeof createCliRoomSdk>,
+  projectId: string,
+  requestId: string,
+): Promise<Thread | null> {
+  try {
+    const thread = await sdk.threads.get({
+      threadId: requestThreadId(projectId, requestId),
+      signal: AbortSignal.timeout(SPAWN_READBACK_TIMEOUT_MS),
+    });
+    return thread.projectId === projectId &&
+      thread.deletedAt === null &&
+      thread.status !== "pending"
+      ? thread
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 /** A gateway timeout, or a 502 with no Cloudroom error code (a proxy's, like Connect's relay): the spawn may have run (#2448). */

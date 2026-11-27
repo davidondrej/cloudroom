@@ -250,6 +250,11 @@ export class CloudSync {
       }
       await this.save();
     }
+    // Never with the row's values, and a failing logger never stops the sync.
+    if (this.unknownAgent === "seen") {
+      this.unknownAgent = "warned";
+      try { this.deps.logger?.warn("A Cloud thread uses an agent this version of Cloudroom doesn't know, so it isn't shown here. Update Cloudroom."); } catch { /* the log only */ }
+    }
     if (!state.first && !state.pinsSynced) await this.backfillPins(account, state);
     await this.cascadeMissed();
     void this.repair();
@@ -468,6 +473,8 @@ export class CloudSync {
       this.skipped.add(row.thread);
       this.deps.logger?.warn({ threadId: row.thread, projectId: row.project, error: why }, "A launched Cloud thread isn't shown here");
     };
+    // An agent added after this version (#2574): said after the list (`once`), not in it.
+    if (row.harness && !isCloudProvider(row.harness)) this.unknownAgent ??= "seen";
     if (!row.harness || !isCloudProvider(row.harness) || !row.model) return skip("it names no agent or model");
     if (state.deletedProjects.includes(row.project)) return;
     if (this.deps.db.select().from(cloudroomThreads).where(eq(cloudroomThreads.sessionId, row.session)).get()) return;
@@ -513,6 +520,8 @@ export class CloudSync {
   private readonly missed = new Set<string>();
   /** Launches already warned about as not shown here (`adopt`). */
   private readonly skipped = new Set<string>();
+  /** A row named an agent this version doesn't know (`adopt`): said once per app run, after the list. */
+  private unknownAgent: "seen" | "warned" | null = null;
   private openChildren(threadId: string): boolean {
     return Boolean(this.deps.db.select({ id: threads.id }).from(threads).where(and(eq(threads.parentThreadId, threadId), isNull(threads.archivedAt), isNull(threads.deletedAt))).limit(1).get());
   }

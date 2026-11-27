@@ -258,7 +258,8 @@ test("never forwards either credential to a redirect destination", async (t) => 
 test("routes commands, preserves caller request IDs, and never treats acceptance as completion", async (t) => {
   const prompts: unknown[] = [];
   const service = await fixture((req, res, body) => {
-    if (req.url?.endsWith("/prompts")) prompts.push(body);
+    const sender = req.headers["x-cloudroom-sender"];
+    if (req.url?.endsWith("/prompts")) prompts.push(sender ? { ...body, sender } : body);
     const command =
       req.url === "/v1/sessions"
         ? "start"
@@ -287,13 +288,17 @@ test("routes commands, preserves caller request IDs, and never treats acceptance
   assert.equal(accepted.saving, "pending");
   await service.client.prompt("s1", "message_1", "hello");
   await service.client.prompt("s1", "message_1", "hello");
-  await service.client.prompt("s1", "level", "next", "high");
+  await service.client.prompt("s1", "odd", "x", undefined, { sender: "thr_🟠" });
+  await service.client.prompt("s1", "level", "next", "high", { sender: "thr_a" });
   await service.client.interrupt("s1", "stop_1", "message_1");
   await service.client.close("s1", "close_1");
   assert.deepEqual(prompts[0], { request_id: "message_1", text: "hello" });
-  assert.deepEqual(prompts.at(-1), { request_id: "level", text: "next", reasoning: "high" });
+  // Another thread's tell names its sender in a header (#2633); a user's prompt doesn't.
+  assert.deepEqual(prompts.at(-1), { request_id: "level", text: "next", reasoning: "high", sender: "thr_a" });
+  assert.deepEqual(prompts.at(-2), { request_id: "odd", text: "x" }, "a sender that isn't a thread ID sends no header");
   assert.deepEqual(service.requests, [
     "POST /v1/sessions",
+    "POST /v1/sessions/s1/prompts",
     "POST /v1/sessions/s1/prompts",
     "POST /v1/sessions/s1/prompts",
     "POST /v1/sessions/s1/prompts",

@@ -69,7 +69,8 @@ function providerInstallPaths(cli: string, home: string): string[] {
 
 // Claude's native installer, npm's global bin and agents' own folders (Grok's
 // %USERPROFILE%\.grok\bin, #1256; Cursor's %LOCALAPPDATA%\cursor-agent,
-// #1709), none always on PATH.
+// #1709; Hermes's %HERMES_HOME%\bin or %LOCALAPPDATA%\hermes\bin, #2715),
+// none always on PATH.
 function windowsFallbackCandidates(
   cli: string,
   env: NodeJS.ProcessEnv,
@@ -77,11 +78,20 @@ function windowsFallbackCandidates(
   const home = env.USERPROFILE?.trim() || homedir();
   const appData = env.APPDATA?.trim();
   const localAppData = env.LOCALAPPDATA?.trim();
+  const hermesHome = env.HERMES_HOME?.trim();
   return [
     join(home, ".local", "bin", cli),
     ...(appData ? [join(appData, "npm", cli)] : []),
     ...(localAppData && cli === "cursor-agent"
       ? [join(localAppData, "cursor-agent", cli)]
+      : []),
+    ...(cli === "hermes"
+      ? [
+          ...(hermesHome && isAbsolute(hermesHome)
+            ? [join(hermesHome, "bin", cli)]
+            : []),
+          ...(localAppData ? [join(localAppData, "hermes", "bin", cli)] : []),
+        ]
       : []),
     ...providerInstallPaths(cli, home),
   ];

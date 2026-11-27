@@ -581,9 +581,10 @@ export class CloudroomClient {
     command: string,
     body: { request_id: string } & Record<string, Json>,
     sessionId?: string,
+    headers: Record<string, string> = {},
   ): Promise<Acceptance> {
     requestId(body.request_id);
-    const value = await this.#json(path, body, undefined, undefined, undefined, this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {});
+    const value = await this.#json(path, body, undefined, undefined, undefined, { ...(this.macDevice ? { "X-Cloudroom-Mac-Device": this.macDevice } : {}), ...headers });
     const accepted = {
       session_id: text(value.session_id),
       receipt: receipt(value.receipt),
@@ -705,7 +706,7 @@ export class CloudroomClient {
     id: string,
     prompt: string,
     reasoning?: string,
-    extra: { content?: Json; attachments?: Json; service_tier?: string } = {},
+    extra: { content?: Json; attachments?: Json; service_tier?: string; sender?: string } = {},
   ) {
     if ((!prompt.trim() && extra.attachments === undefined) || new TextEncoder().encode(prompt).length > 256 * 1024) {
       throw new CloudroomError("Prompt must contain 1–262144 bytes of text", 400);
@@ -722,6 +723,9 @@ export class CloudroomClient {
         ...(extra.service_tier ? { service_tier: extra.service_tier } : {}),
       },
       sessionId,
+      // Another thread's tell: Core notes when it took it (#2633). A header, as older Cores refuse unknown body fields.
+      // Only a thread ID, so the header can never fail the send.
+      extra.sender && /^thr_[\w-]{1,60}$/.test(extra.sender) ? { "X-Cloudroom-Sender": extra.sender } : {},
     );
   }
 

@@ -305,6 +305,15 @@ impl Previews {
         let _ = self.disconnect(|live| live.device == holder);
         true
     }
+    /// A hosted sandbox's paired device and when it last paired since Core started, for `mac` diagnostics (#2641).
+    pub(crate) fn holder_seen(&self) -> Option<(String, Option<Instant>)> {
+        let holder = self.saved.lock().unwrap().devices.keys().next().cloned()?;
+        let checked_in = self.checked_in.lock().unwrap();
+        let at = (checked_in.as_ref())
+            .filter(|(device, _, _)| *device == holder)
+            .map(|(_, at, _)| *at);
+        self.sandbox.then_some((holder, at))
+    }
     /// Runs `attach` only while `device` is paired, with the registry locked against `release_for`.
     pub(crate) fn while_paired(&self, device: &str, attach: impl FnOnce()) -> bool {
         let saved = self.saved.lock().unwrap();

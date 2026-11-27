@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import {
   createThread,
@@ -11,11 +10,10 @@ import {
   isSqliteForeignKeyConstraint,
   queuedThreadMessages,
 } from "@cloudroom/db";
+import { requestThreadId } from "@cloudroom/config/spawn-request";
 import type { DbNotifier } from "@cloudroom/db";
 import type { HostDaemonCommand } from "@cloudroom/host-daemon-contract";
 import {
-  GENERATED_ID_ALPHABET,
-  GENERATED_ID_SUFFIX_LENGTH,
   isValidGitBranchName,
   type LocalPathProjectSource,
   type PromptInput,
@@ -108,18 +106,6 @@ export function buildEnvironmentProvisionCommand(
         ? args.hookBaseBranch
         : null,
   };
-}
-
-/** A Local spawn's request ID names its thread within its project, so a retry
- *  after an unanswered request finds that thread instead of a duplicate (#860). */
-export function requestThreadId(projectId: string, requestId: string): string {
-  const digest = createHash("sha256")
-    .update(`spawn:${projectId}:${requestId}`)
-    .digest();
-  const suffix = [...digest.subarray(0, GENERATED_ID_SUFFIX_LENGTH)].map(
-    (byte) => GENERATED_ID_ALPHABET[byte % GENERATED_ID_ALPHABET.length],
-  );
-  return `thr_${suffix.join("")}`;
 }
 
 /** What a spawn asked for. A missing field was not given, so it never conflicts. */

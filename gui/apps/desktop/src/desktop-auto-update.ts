@@ -152,6 +152,14 @@ type SpawnLog = (
   stdio?: unknown,
 ) => Promise<boolean>;
 
+// Linux (#2624): electron-updater starts the new AppImage and reports success right away, so one that quit at once
+// left Cloudroom closed. Start it after this app ($1) exits, so it never meets this app's single-instance lock,
+// and once more if it fails within 30 s. A clean exit is the user closing it, so it stays closed.
+const LINUX_RELAUNCH_SCRIPT = `for _ in $(seq 300); do kill -0 "$1" 2>/dev/null || break; sleep 0.2; done
+shift; start=$(date +%s)
+"$@" && exit
+[ $(($(date +%s) - start)) -lt 30 ] && exec "$@"`;
+
 export function createElectronAutoUpdaterAdapter(
   updater: AppUpdater,
   squirrel: SquirrelUpdater,
@@ -164,7 +172,18 @@ export function createElectronAutoUpdaterAdapter(
   if (process.platform === "linux" && spawnLog) {
     spawner.spawnLog = (cmd, args = [], env = process.env, stdio) => {
       const launch = closeInheritedFdsOnLinux({
-        launch: { args, env, executablePath: cmd },
+        launch: {
+          args: [
+            "-c",
+            LINUX_RELAUNCH_SCRIPT,
+            "sh",
+            String(process.pid),
+            cmd,
+            ...args,
+          ],
+          env,
+          executablePath: "/bin/sh",
+        },
         platform: "linux",
       });
       return spawnLog(launch.executablePath, launch.args, launch.env, stdio);

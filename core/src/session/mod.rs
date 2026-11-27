@@ -975,7 +975,14 @@ impl Manager {
     fn content(input: &Value) -> Value {
         let mut input = input.clone();
         if let Some(fields) = input.as_object_mut() {
-            for key in ["plan_only", "ended", "thread_id", "project_id", "waiting"] {
+            for key in [
+                "plan_only",
+                "ended",
+                "thread_id",
+                "project_id",
+                "waiting",
+                "sent",
+            ] {
                 fields.remove(key);
             }
         }
@@ -2704,7 +2711,7 @@ impl Manager {
     /// turn never began, so advance to the next queued prompt.
     fn deliver(self: Arc<Self>, id: String, request: String, handle: runtime::Handle) {
         tokio::spawn(async move {
-            let (input, reasoning) = {
+            let (input, reasoning, harness) = {
                 let mut local = self.local.lock().unwrap();
                 let session = local.sessions.get_mut(&id).unwrap();
                 let input = prompt::latest(&session.prompts, &session.receipts, &request)
@@ -2717,8 +2724,9 @@ impl Manager {
                 if let (runtime::Kind::Claude, Some(model)) = (session.harness, &session.model) {
                     input["model"] = json!(model);
                 }
-                (input, reasoning)
+                (input, reasoning, session.harness)
             };
+            let input = prompt::with_sent_time(input, now_ms(), harness);
             let (input, notice) = prompt::with_notice(&self.config.state_dir, input);
             // A switched session's first prompt carries the note on its history, whoever sends it (#237).
             let (input, handed) = prompt::with_session_note(&self.config.state_dir, &id, input);

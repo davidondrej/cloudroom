@@ -104,6 +104,11 @@ export function acpProviderDeclaration(
                       ? {}
                       : { powershellUrl: agent.installer.powershellUrl }),
                     args: [...(agent.installer.args ?? [])],
+                    ...(agent.installer.powershellArgs === undefined
+                      ? {}
+                      : {
+                          powershellArgs: [...agent.installer.powershellArgs],
+                        }),
                   },
           }),
       ...(agent.minimumVersion === undefined

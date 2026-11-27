@@ -43,7 +43,7 @@ export default function plugin(room: BbPluginApi): void {
   const registered = room.providers.register({
     id: PROVIDER_ID,
     displayName: "Cloudroom Agent",
-    icon: "Cloud",
+    icon: "provider-cloudroom-agent/cloudroom-agent",
     strings: {
       signInHint: "Sign in to Cloudroom to use Cloudroom Agent.",
       expiredHint: "Sign in to Cloudroom again to use Cloudroom Agent.",

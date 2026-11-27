@@ -102,6 +102,12 @@ function SecretRequestInteraction({
         void submitValues();
       }}
     >
+      <p className="min-w-0 text-xs text-muted-foreground">
+        Writes to{" "}
+        <code className="break-all font-mono text-foreground" translate="no">
+          {payload.destination.path}
+        </code>
+      </p>
       <div className="space-y-2 font-mono text-sm">
         {payload.purpose ? (
           <p className="text-pretty text-subtle-foreground">

@@ -36,6 +36,7 @@ import {
 } from "@cloudroom/db";
 import { assertNever } from "@cloudroom/core-ui";
 import {
+  isStandaloneBuiltinCompactCommand,
   type ProvisioningTranscriptEntry,
   type SystemThreadInterruptedEventData,
   type SystemThreadInterruptedReason,
@@ -129,6 +130,7 @@ import {
   emitPluginThreadDeleted,
 } from "../plugins/plugin-thread-events.js";
 import { requeueRefusedTurnRequest } from "./queue-waits.js";
+import { failRefusedCompactFollowUp } from "./compact-follow-up.js";
 import { scheduleThreadProvisioningAdvance } from "./thread-provisioning.js";
 import { pendingImportFork } from "./thread-fork-history.js";
 import { isPreStartThreadStatus } from "./thread-status.js";
@@ -896,6 +898,13 @@ function settleThreadCommandFailure(
         message: errorMessage,
       },
     });
+    if (isStandaloneBuiltinCompactCommand(args.command.input)) {
+      const threadId = thread.id;
+      postCommitActions.push({
+        run: (deps) =>
+          failRefusedCompactFollowUp(deps, { threadId, error: errorMessage }),
+      });
+    }
   }
   if (hasExpectedTurnCompletedEvent(args.deps, args.command)) {
     return emptyCommandResultSideEffects();

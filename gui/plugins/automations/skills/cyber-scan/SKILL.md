@@ -49,6 +49,7 @@ Cheap readers review GitHub repos in the cloud.
 3. **Wait:** run `"$py" "$s/../workflow-scan/readers.py" wait "$d"` with a 10-minute command timeout.
    Repeat until it prints `done`.
    Read `$d/lines.txt`. Each reader's lines sit under its repo's heading.
+   A heading with `not checked: <reason>` wasn't reviewed. Name each such repo and its reason in the report's `scope`. Never call it clean.
    Then run `"$py" "$s/../workflow-scan/readers.py" archive "$d"`.
 4. **Judge:** keep only real problems.
    - Computer: FileVault off, firewall off, pending security updates, an outdated browser, ports open to the network, unknown startup items, unprotected keys or tokens.

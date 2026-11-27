@@ -1185,7 +1185,7 @@ pub(super) async fn deliver(
     m: &Arc<Manager>,
     id: &str,
     request: &str,
-    input: Value,
+    mut input: Value,
     child: bool,
     sender: Option<&str>,
     queue: bool,
@@ -1211,6 +1211,8 @@ pub(super) async fn deliver(
         }
         None => {}
     }
+    // When it was sent, so a turn it waits long for says so (prompt::with_sent_time).
+    input["sent"] = json!(crate::observability::now_ms());
     let receipt = m
         .command_from(id, request.to_owned(), "prompt", input, true, sender)
         .map_err(|error| never_started(m, id, error))?;

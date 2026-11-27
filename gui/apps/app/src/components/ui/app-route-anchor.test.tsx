@@ -1,9 +1,19 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router";
+import { useLayoutEffect, useSyncExternalStore } from "react";
+import { createRoot } from "react-dom/client";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  type NavigateFunction,
+} from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  AppBrowserRouter,
   PluginDetailRouteNavigationProvider,
   RouteAnchor,
   RouteNavigationProvider,
@@ -75,6 +85,71 @@ describe("RouteAnchor transition navigation", () => {
       pathname: "/threads/thr-new",
     });
   });
+});
+
+describe("AppBrowserRouter", () => {
+  it.each([
+    ["project", "/projects/p/threads"],
+    ["projectless", "/threads"],
+  ])(
+    "commits a slow %s thread route change while a sync store ticks faster than it renders",
+    async (_, base) => {
+      const env = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+      const usedAct = env.IS_REACT_ACT_ENVIRONMENT;
+      env.IS_REACT_ACT_ENVIRONMENT = false; // act() would flush the transition at once
+      window.history.replaceState(null, "", `${base}/a`);
+      let tick = 0;
+      let onTick = () => {};
+      const timer = setInterval(() => {
+        tick += 1;
+        onTick();
+      }, 40);
+      let navigate: NavigateFunction | undefined;
+      let committedAt = 0;
+      function Navigator() {
+        const current = useNavigate();
+        useLayoutEffect(() => void (navigate = current));
+        return null;
+      }
+      function Ticker() {
+        return useSyncExternalStore(
+          (listener) => ((onTick = listener), () => {}),
+          () => tick,
+        );
+      }
+      function SlowRow() {
+        const end = performance.now() + 1;
+        while (performance.now() < end);
+        return null;
+      }
+      function SlowPage() {
+        useLayoutEffect(() => void (committedAt = performance.now()), []);
+        return Array.from({ length: 150 }, (_, i) => <SlowRow key={i} />);
+      }
+      const root = createRoot(document.createElement("div"));
+      root.render(
+        <AppBrowserRouter>
+          <Navigator />
+          <Ticker />
+          <Routes>
+            <Route path={`${base}/a`} element={null} />
+            <Route path={`${base}/b`} element={<SlowPage />} />
+          </Routes>
+        </AppBrowserRouter>,
+      );
+      await vi.waitFor(() => expect(navigate).toBeDefined());
+      const startedAt = performance.now();
+      void navigate?.(`${base}/b`);
+      // React restarts the transition on every tick; without a fallback it waits for its 5 s expiry.
+      await vi.waitFor(() => expect(committedAt).toBeGreaterThan(0), {
+        timeout: 6_000,
+      });
+      clearInterval(timer);
+      root.unmount();
+      env.IS_REACT_ACT_ENVIRONMENT = usedAct;
+      expect(committedAt - startedAt).toBeLessThan(2_000);
+    },
+  );
 });
 
 describe("useRouteAnchorDelegate plugin-detail links", () => {

@@ -54,6 +54,12 @@ async function fixtures() {
     { type: "user", origin: { kind: "auto-continuation" }, entrypoint: "claude-desktop", cwd: join(root, "claude-project"), timestamp: at(1), message: { role: "user", content: "Implement the following plan:\n\nShip it" } },
     { type: "assistant", timestamp: at(2), message: { model: "claude-test", content: [{ type: "text", text: "Shipped." }] } },
   ].map((line) => JSON.stringify(line)).join("\n"));
+  // Another session started this Desktop chat; the user's words came in while Claude was busy, as a queued attachment (#2314).
+  await writeFile(join(root, "claude", "projects", "-claude-project", "claude-queued.jsonl"), [
+    { type: "user", origin: { kind: "peer", from: "lead" }, entrypoint: "claude-desktop", cwd: join(root, "claude-project"), timestamp: at(1), message: { role: "user", content: "Review the plan" } },
+    { type: "attachment", attachment: { type: "queued_command", prompt: "Also check pricing", commandMode: "prompt", origin: { kind: "human" } }, timestamp: at(2) },
+    { type: "assistant", timestamp: at(3), message: { model: "claude-test", content: [{ type: "text", text: "Pricing checked." }] } },
+  ].map((line) => JSON.stringify(line)).join("\n"));
   await writeFile(join(piDir, "2026-09-01_pi-old.jsonl"), [
     { type: "session", id: "pi-old", timestamp: at(0), cwd: project },
     { type: "message", timestamp: at(1), message: { role: "user", content: "Old format question" } },
@@ -325,6 +331,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
         ["codex", "0199a000-0000-7000-8000-00000000000e", "Response-only Codex question", project],
         ["claude-code", "claude-1", "Refactor the API", join(root, "claude-project")],
         ["claude-code", "claude-plan", "Implement the following plan:", join(root, "claude-project")],
+        ["claude-code", "claude-queued", "Also check pricing", join(root, "claude-project")],
         ["acp-hermes-agent", "h-cli", "Deploy plan", join(root, "hermes-project")],
         ["acp-hermes-agent", "h-telegram", "Hi from Telegram", homedir()],
         ["pi", "pi-1", "Login fix", project],
@@ -334,6 +341,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       const result = await importAll(harness, host.id, [
         { harness: "claude-code", id: "claude-1" },
         { harness: "claude-code", id: "claude-plan" },
+        { harness: "claude-code", id: "claude-queued" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000c" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000d" },
         { harness: "codex", id: "0199a000-0000-7000-8000-00000000000e" },
@@ -350,6 +358,7 @@ describe("Pi, Hermes, and T3 Code chat import", () => {
       expect(claude.startFork).toEqual({ sourceProviderThreadId: "claude-1" });
       expect(claude.sent).toBe("What's next?");
       expect(threadMessages(harness.deps.db, threadId("claude-plan"))).toEqual([{ role: "user", text: "Implement the following plan:\n\nShip it" }, { role: "agent", text: "Shipped." }]);
+      expect(threadMessages(harness.deps.db, threadId("claude-queued"))).toEqual([{ role: "user", text: "Also check pricing" }, { role: "agent", text: "Pricing checked." }]);
 
       expect(threadMessages(harness.deps.db, threadId("0199a000-0000-7000-8000-00000000000c"))).toEqual([
         { role: "user", text: "Compressed Codex question" },

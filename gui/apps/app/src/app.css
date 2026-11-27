@@ -887,7 +887,9 @@
     .bb-teleport-down,
     .bb-hero-chip,
     .prompt-ultracode-highlight,
-    [data-scan-wave]
+    [data-scan-wave],
+    .loop-orbit-comet,
+    .loop-orbit-tick
   ),
 [data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::before,
 [data-window-blurred] :is(.prompt-ultracode-highlight, .bb-beam)::after {
@@ -1003,6 +1005,10 @@
   .loop-orbit-tick {
     animation: loop-orbit-hit 6s linear infinite;
     animation-delay: calc((var(--loop-orbit-at) - 1) * 6s);
+  }
+  /* Scrolled out of view: everything stops together, so the sweep stays in step. */
+  .loop-orbit[data-offscreen] :is(.loop-orbit-comet, .loop-orbit-tick) {
+    animation-play-state: paused;
   }
 }
 
@@ -1217,8 +1223,8 @@
   border-radius: 0 !important;
 }
 
-/* Cloud icon color (Settings > Appearance > Cloud icon): Electric lime by
- * default, or Crisp white (crisp dark ink in light mode). */
+/* Cloud icon color (Settings > Appearance > Cloud icon): Crisp white by
+ * default (crisp dark ink in light mode), or Electric lime. */
 :root[data-cloud-icon="crisp-white"] {
   --cloud-icon: #111111;
   --cloud-icon-sidebar: rgb(17 17 17 / 0.88);

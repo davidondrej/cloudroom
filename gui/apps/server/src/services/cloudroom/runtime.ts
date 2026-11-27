@@ -162,7 +162,7 @@ export class CloudRuntime implements SyncHost {
     this.sandboxes = new SandboxDirectory(async () => sandboxAccountOf(await this.savedConnection()), (thread) => {
       void noteWake(host.deps, thread).catch(() => {});
       this.hooks.onWakeNoted?.();
-    });
+    }, join(host.config.dataDir, "cloudroom-skills-copied.json"));
     // A website that lists threads brings runs through the one adoption path (cloud-sync.ts); an older one, as before.
     // The minute's awake answer repeats the last week's runs, so only a run new here, once per app run, asks for a list.
     this.sandboxes.onRuns = (runs) => void this.sandboxes.followsThreads().catch(() => null).then((follows) => {

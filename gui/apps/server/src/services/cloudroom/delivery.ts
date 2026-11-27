@@ -538,6 +538,7 @@ export class CloudDelivery {
         text: z.string(), reasoning: z.string().optional(), content: z.unknown().optional(),
         attachments: z.array(z.object({ name: z.string(), kind: z.enum(["image", "file"]), localPath: z.string().optional(), path: z.string().optional(), id: z.string().optional() })).optional(),
         service_tier: z.string().optional(), customInstructions: z.string().default(""), workspaceContext: z.string().nullable().optional(), modelPickId: z.string().optional(),
+        sender_thread_id: z.string().optional(),
       }).parse(JSON.parse(pending.input));
       requireClaudeSkillSupport(parsed.content, capabilities, harness);
       if (parsed.modelPickId && !["accepted", "completed"].includes(command(this.rt.host.db, parsed.modelPickId)?.state ?? "")) {
@@ -563,7 +564,7 @@ export class CloudDelivery {
       const options = { ...(capabilities.structured_prompt && content !== undefined ? { content: content as never } : {}), ...(attachments.length ? { attachments: attachments as never } : {}), ...(parsed.service_tier ? { service_tier: parsed.service_tier } : {}) };
       return fork
         ? client.rewind(sessionId, `fork_${threadId}`, fork.before, fork.last_turn_id, { request_id: pending.id, text, ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}), ...options }, true)
-        : client.prompt(sessionId, pending.id, text, parsed.reasoning, options);
+        : client.prompt(sessionId, pending.id, text, parsed.reasoning, { ...options, ...(parsed.sender_thread_id ? { sender: parsed.sender_thread_id } : {}) });
     }
     if (pending.command === "edit") {
       const parsed = z.object({

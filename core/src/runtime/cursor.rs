@@ -397,6 +397,8 @@ pub(super) struct Protocol {
     steering: Vec<u64>,
     /// The current prompt got output. A steer's new prompt starts without, so its empty end is still silent (#1721).
     replied: bool,
+    /// The current prompt's agent messages and tool calls, so a quota notice counts only when it is all (#2598).
+    outputs: u32,
     acknowledgement: Option<(Value, u64)>,
     responses: Vec<Value>,
     closing: bool,
@@ -418,6 +420,7 @@ impl Protocol {
             restart: None,
             steering: Vec::new(),
             replied: false,
+            outputs: 0,
             acknowledgement: None,
             responses: Vec::new(),
             closing: false,
@@ -442,6 +445,7 @@ impl Protocol {
         ] {
             if !text.is_empty() {
                 if kind == "agentMessage" {
+                    self.outputs += 1;
                     // The turn's latest message is a child's reply, as for the other harnesses.
                     state.last_text.clone_from(&text);
                 }
@@ -477,6 +481,7 @@ impl Adapter for Protocol {
         if request.is_some() {
             self.prompt = Some(id);
             self.replied = false;
+            self.outputs = 0;
         }
         if method == "cloudroom/join" {
             self.steering.push(id);
@@ -616,6 +621,7 @@ impl Adapter for Protocol {
                 "tool_call" | "tool_call_update" => {
                     if kind == "tool_call" {
                         self.finish_message(state, &mut events);
+                        self.outputs += 1;
                     }
                     let id = update["toolCallId"].as_str().ok_or_else(|| {
                         io::Error::other(format!("Missing {} tool identity", self.flavor.name))
@@ -699,6 +705,7 @@ impl Adapter for Protocol {
                 self.acknowledgement = Some((value["id"].clone(), id));
                 self.prompt = Some(id);
                 self.replied = false;
+                self.outputs = 0;
             } else if value.get("error").is_none()
                 && stop == Some("end_turn")
                 && !self.steering.is_empty()
@@ -716,8 +723,16 @@ impl Adapter for Protocol {
                     self.acknowledgement = Some((value["id"].clone(), id));
                 }
                 let silent = stop == Some("end_turn") && !self.replied;
+                // Antigravity ends a turn its quota stopped like any other, with the notice as its reply (#2598).
+                let quota = (self.flavor.harness == "antigravity"
+                    && stop == Some("end_turn")
+                    && self.outputs == 1)
+                    .then(|| super::antigravity::quota_error(&state.last_text))
+                    .flatten();
                 let status = match stop {
-                    _ if silent && self.flavor.empty_turn.is_some() => "failed",
+                    _ if (silent && self.flavor.empty_turn.is_some()) || quota.is_some() => {
+                        "failed"
+                    }
                     Some("end_turn") => "completed",
                     Some("cancelled") => "interrupted",
                     _ => "failed",
@@ -725,6 +740,9 @@ impl Adapter for Protocol {
                 let error = (self.flavor.explain_stops && status == "failed").then(|| {
                     if silent && let Some(reason) = self.flavor.empty_turn {
                         return reason.to_owned();
+                    }
+                    if let Some(error) = quota {
+                        return error;
                     }
                     match (stop, value["error"]["message"].as_str()) {
                         (Some(stop), _) => format!("{} stopped the turn: {stop}", self.flavor.name),

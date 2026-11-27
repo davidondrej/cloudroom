@@ -4,7 +4,6 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "jsx": "react-jsx",
     "lib": ["ES2022", "DOM"],
     "esModuleInterop": true,
     "noEmit": true,
@@ -12,12 +11,9 @@
     "paths": {
       "@get-bb/plugin-sdk": [
         "../../packages/plugin-sdk/bundled-types/bb-plugin-sdk.d.ts"
-      ],
-      "@get-bb/plugin-sdk/app": [
-        "../../packages/plugin-sdk/bundled-types/bb-plugin-sdk-app.d.ts"
       ]
     },
     "types": ["node"]
   },
-  "include": ["server.ts", "src", "app.tsx"]
+  "include": ["server.ts", "src"]
 }

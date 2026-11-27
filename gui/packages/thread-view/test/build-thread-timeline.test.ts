@@ -31,7 +31,10 @@ import {
   type ThreadEventWithMeta,
 } from "../src/index.js";
 import { EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT } from "../src/events.js";
-import { parseOperationEvent } from "../src/messages.js";
+import {
+  ANTIGRAVITY_QUOTA_USED_UP,
+  parseOperationEvent,
+} from "../src/messages.js";
 import {
   createTimelineEventFactory,
   fromRows,
@@ -744,6 +747,7 @@ function buildTimelineRows(
   events: ThreadEventWithMeta[],
   threadStatus: BuildTimelineRowsThreadStatus = "idle",
   workspaceRoot: string | null = null,
+  providerId?: string,
 ): TimelineRow[] {
   return buildThreadTimelineFromEvents({
     acceptedClientRequestContext: EMPTY_ACCEPTED_CLIENT_REQUEST_CONTEXT,
@@ -754,6 +758,7 @@ function buildTimelineRows(
       includeNestedRows: true,
       includeDiagnosticOperations: false,
       isLatestPage: true,
+      ...(providerId ? { providerId } : {}),
       threadStatus,
       threadName: "",
       turnMessageDetail: "full",
@@ -2396,6 +2401,65 @@ describe("buildThreadTimelineFromEvents", () => {
     expect(collectSystemRows(rows)).toEqual([
       expect.objectContaining({ planLimit: true }),
     ]);
+    // A quota-only Antigravity turn ends with Core's error as the one, live limit row, which a switch marks (#2598).
+    const quota = (
+      switched: boolean,
+      providerId = "acp-antigravity",
+      reply = "⚠ Individual quota reached. Resets in 2m.",
+    ) => {
+      const agy = createTimelineEventFactory({ threadId: "thread-1" });
+      return collectSystemRows(
+        buildTimelineRows(
+          fromRows([
+            agy.turnStarted({ turnId: "turn-3" }),
+            agy.assistantCompleted({
+              turnId: "turn-3",
+              text: reply,
+            }),
+            agy.turnCompleted({ turnId: "turn-3", status: "failed" }),
+            agy.systemError({
+              code: "turn_failed",
+              message: `${ANTIGRAVITY_QUOTA_USED_UP} Resend the task after it resets. Antigravity said: Individual quota reached. Resets in 2m.`,
+            }),
+            ...(switched
+              ? [
+                  agy.systemOperation({
+                    message: "Switched",
+                    operation: "harness_switch",
+                    metadata: {
+                      from: "acp-antigravity",
+                      to: "codex",
+                      resend: true,
+                    },
+                  }),
+                ]
+              : []),
+          ]),
+          "idle",
+          null,
+          providerId,
+        ),
+      );
+    };
+    expect(quota(false)).toEqual([
+      expect.objectContaining({
+        planLimit: true,
+        detail: expect.stringMatching(/^Antigravity's quota/u),
+      }),
+    ]);
+    // After the switch the thread's agent is Codex; Core's error still marks the switch.
+    expect(quota(true, "codex")).toEqual([
+      expect.objectContaining({
+        planLimitSwitch: expect.objectContaining({ to: "codex", resend: true }),
+      }),
+    ]);
+    expect(
+      quota(
+        false,
+        "acp-antigravity",
+        "⚠ Third-party quota reached. Please switch to Gemini models or upgrade your subscription to increase your limits. Resets in 2m.",
+      ),
+    ).toEqual([expect.objectContaining({ planLimit: true })]);
     for (const detail of [
       "You’ve reached your Fable limit",
       "You've hit your channel's monthly spend limit",

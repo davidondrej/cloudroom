@@ -261,6 +261,16 @@ describe("acpProviderDeclaration", () => {
       acpDialect: "kimi",
     });
     expect(
+      byId.get("acp-hermes-agent")?.experimental_bridgeOptions,
+    ).toMatchObject({
+      acpInstaller: {
+        scriptUrl: "https://hermes-agent.nousresearch.com/install.sh",
+        powershellUrl: "https://hermes-agent.nousresearch.com/install.ps1",
+        args: ["--non-interactive"],
+        powershellArgs: ["-NonInteractive"],
+      },
+    });
+    expect(
       byId.get("acp-opencode")?.capabilities.supportsManualCompaction,
     ).toBe(true);
     expect(byId.get("acp-cursor")?.capabilities.supportsManualCompaction).toBe(

@@ -372,9 +372,10 @@ describe("room-cli thread show command output", () => {
 
     await runCommand(["thread", "show", "thread-show-pr"], register);
 
-    expect(pullRequestGet).toHaveBeenCalledWith({
-      param: { id: "env-show-pr" },
-    });
+    expect(pullRequestGet).toHaveBeenCalledWith(
+      { param: { id: "env-show-pr" } },
+      { init: { signal: expect.any(AbortSignal) } },
+    );
     const output = collectLogLines(vi.mocked(console.log)).join("\n");
     expect(output.indexOf("Environment:")).toBeLessThan(
       output.indexOf("Pull request:"),

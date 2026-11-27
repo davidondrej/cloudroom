@@ -198,7 +198,8 @@ export interface ClaudePermissionRequestApprovalParams {
 
 const claudeUserQuestionOptionSchema = z.object({
   label: z.string().min(1),
-  description: z.string().min(1),
+  // A Claude Code mod's $.ui.ask sends every option with an empty description (#2687).
+  description: z.string(),
   preview: z.string().optional(),
 });
 

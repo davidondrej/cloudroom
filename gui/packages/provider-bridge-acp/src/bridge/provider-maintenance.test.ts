@@ -234,6 +234,36 @@ describe("ACP provider maintenance", () => {
     expect(acpInstallerCommand(installer, "linux").command).toBe("sh");
   });
 
+  it("runs Hermes's PowerShell installer with script-level -NonInteractive on Windows (#2715)", () => {
+    const installer = acpInstallerSchema.parse({
+      scriptUrl: "https://hermes-agent.nousresearch.com/install.sh",
+      powershellUrl: "https://hermes-agent.nousresearch.com/install.ps1",
+      args: ["--non-interactive"],
+      powershellArgs: ["-NonInteractive"],
+    });
+    const windows = acpInstallerCommand(installer, "win32");
+    expect(windows).toEqual({
+      command: "powershell.exe",
+      args: [
+        "-NonInteractive",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$ErrorActionPreference = 'Stop'; $LASTEXITCODE = 0; & ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -NonInteractive; if ($LASTEXITCODE) { exit $LASTEXITCODE }",
+      ],
+      displayCommand:
+        "& ([scriptblock]::Create((irm https://hermes-agent.nousresearch.com/install.ps1))) -NonInteractive",
+    });
+    expect(acpInstallerCommand(installer, "darwin")).toMatchObject({
+      command: "sh",
+      displayCommand: expect.stringContaining(
+        'bash "$tmp" --non-interactive </dev/null',
+      ),
+    });
+    expect(acpInstallerCommand(installer, "linux").command).toBe("sh");
+  });
+
   it("runs Cursor's PowerShell installer on Windows, not the Unix script (#1897)", () => {
     const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { ...platform, value: "win32" });

@@ -115,6 +115,64 @@ pub fn with_notice(state_dir: &Path, mut input: Value) -> (Value, Option<String>
     (input, Some(note))
 }
 
+/// How long a message from another thread waits before its turn says when it was sent.
+const LATE_MS: u64 = 10 * 60_000;
+/// The largest prompt (all of it, as JSON) that gets the note: far below every prompt and frame limit.
+const NOTED_TEXT: usize = 64 * 1024;
+
+/// A message from another thread (`sent`, set as Core took it) that waited behind other work says when it was sent,
+/// after its text: newer messages may have replaced it, and it would otherwise look current (#2633). `sent` itself
+/// never reaches the harness, so what it gets and measures is otherwise as before. Pi never gets the note: its input
+/// extensions may match a prompt's exact text.
+pub fn with_sent_time(mut input: Value, now: u64, harness: crate::runtime::Kind) -> Value {
+    let sent = input
+        .as_object_mut()
+        .and_then(|fields| fields.remove("sent"));
+    let Some(sent) = sent.as_ref().and_then(Value::as_u64) else {
+        return input;
+    };
+    let waited = now.saturating_sub(sent);
+    if harness == crate::runtime::Kind::Pi {
+        return input;
+    }
+    // One with images, files, selected skills (Claude expands them later) or long text goes as before: the note could
+    // push it over a harness's size limit.
+    let parts = || input["content"].as_array().into_iter().flatten();
+    let as_before = input.to_string().len() > NOTED_TEXT
+        || input["attachments"]
+            .as_array()
+            .is_some_and(|a| !a.is_empty())
+        || parts().any(|part| {
+            part["mentions"].as_array().is_some_and(|m| !m.is_empty())
+                || matches!(
+                    part["type"].as_str(),
+                    Some("image" | "localImage" | "file" | "localFile")
+                )
+        });
+    if waited < LATE_MS || as_before || text(&input).trim_start().starts_with('/') {
+        return input;
+    }
+    let waited = waited / 60_000;
+    let clock = sent / 60_000 % 1440;
+    let ago = match waited / 60 {
+        0 => format!("{waited} min"),
+        hours => format!("{hours} h {} min", waited % 60),
+    };
+    let note = format!(
+        "[Cloudroom] This message was sent at {:02}:{:02} UTC, {ago} ago, and waited until now. Newer messages may replace it.",
+        clock / 60,
+        clock % 60
+    );
+    // Only beside a text part: Codex reads `text` when no content part is one it takes (runtime/codex.rs).
+    if let Some(parts) = input.get_mut("content").and_then(Value::as_array_mut)
+        && parts.iter().any(|part| part["type"] == "text")
+    {
+        parts.push(serde_json::json!({"type":"text","text":format!("\n{note}")}));
+    }
+    input["text"] = Value::String(format!("{}\n\n{note}", text(&input)));
+    input
+}
+
 fn session_note(state_dir: &Path, session: &str) -> std::path::PathBuf {
     state_dir.join("notes").join(session)
 }
@@ -194,4 +252,61 @@ pub fn latest<'a>(
         .filter(|prompt| !prompt.cancelled)
         .map(|prompt| &prompt.input)
         .or_else(|| receipts.get(request).map(|receipt| &receipt.input))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    const CODEX: crate::runtime::Kind = crate::runtime::Kind::Codex;
+
+    /// A tell that waited 3 h 4 min says when it was sent; one that ran soon after loses only `sent`, and one with no time stays as is.
+    #[test]
+    fn a_long_queued_tell_says_when_it_was_sent() {
+        let sent = 20 * 86_400_000 + (9 * 60 + 12) * 60_000;
+        let input = json!({"text":"old task","sent":sent});
+        let late = super::with_sent_time(input.clone(), sent + 184 * 60_000, CODEX);
+        assert_eq!(
+            late["text"],
+            "old task\n\n[Cloudroom] This message was sent at 09:12 UTC, 3 h 4 min ago, and waited until now. Newer messages may replace it."
+        );
+        assert_eq!(late.get("sent"), None);
+        // Pi gets exactly what it would without `sent`: its input extensions may match the exact text.
+        let pi =
+            super::with_sent_time(input.clone(), sent + 184 * 60_000, crate::runtime::Kind::Pi);
+        assert_eq!(pi, json!({"text":"old task"}));
+        // Sent soon, the harness gets exactly what it would without `sent`, so size checks measure the same.
+        let soon = super::with_sent_time(input.clone(), sent + 60_000, CODEX);
+        assert_eq!(soon, json!({"text":"old task"}));
+        // Content Codex ignores stays as is, so Codex still reads the text, note included.
+        let other = json!({"text":"old task","sent":sent,"content":[{"type":"mention"}]});
+        let late = super::with_sent_time(other, sent + 184 * 60_000, CODEX);
+        assert_eq!(late["content"], json!([{"type":"mention"}]));
+        assert!(late["text"].as_str().unwrap().contains("[Cloudroom]"));
+        // With images or files, it goes as before, without the note.
+        let image = json!({"text":"old task","sent":sent,"attachments":[{"path":"a.png"}]});
+        let late = super::with_sent_time(image, sent + 184 * 60_000, CODEX);
+        assert_eq!(
+            late,
+            json!({"text":"old task","attachments":[{"path":"a.png"}]})
+        );
+        // So does one with a selected skill or long text.
+        let skill = json!({"text":"use a","sent":sent,"content":[{"type":"text","text":"use a","mentions":[{}]}]});
+        let late = super::with_sent_time(skill, sent + 184 * 60_000, CODEX);
+        assert_eq!(late.get("sent"), None);
+        assert_eq!(late["text"], "use a");
+        let long = "x".repeat(super::NOTED_TEXT + 1);
+        let late =
+            super::with_sent_time(json!({"text":long,"sent":sent}), sent + 184 * 60_000, CODEX);
+        assert_eq!(late, json!({"text":long}));
+        let parts = json!({"text":"x","sent":sent,"content":[{"type":"text","text":long}]});
+        let late = super::with_sent_time(parts, sent + 184 * 60_000, CODEX);
+        assert_eq!(
+            late,
+            json!({"text":"x","content":[{"type":"text","text":long}]})
+        );
+        assert_eq!(
+            super::with_sent_time(json!({"text":"x"}), sent, CODEX),
+            json!({"text":"x"})
+        );
+    }
 }

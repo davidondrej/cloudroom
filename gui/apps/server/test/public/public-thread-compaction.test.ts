@@ -324,6 +324,8 @@ describe("public thread compaction", () => {
         providerThreadId: "provider-thread-busy",
         status: "active",
       });
+      // A running turn, such as a Goal's, that a send-now could steer into.
+      seedTurnStarted(harness.deps, { threadId: thread.id, turnId: "turn-1" });
       const responder = registerSuccessfulTurnResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
@@ -342,6 +344,12 @@ describe("public thread compaction", () => {
         response.status,
         JSON.stringify(await readJson(response.clone())),
       ).toBe(200);
+      // Send-now can't steer the compaction in, where it arrives as text (#2640).
+      const [compaction] = listQueuedThreadMessages(harness.db, thread.id);
+      const sendNow = await post(`queued-messages/${compaction?.id}/send`, {
+        mode: "auto",
+      });
+      expect(sendNow.status).toBe(409);
       expect(
         responder.requests.filter(({ command }) => command.type === "turn.submit"),
       ).toHaveLength(0);

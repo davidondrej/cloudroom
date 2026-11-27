@@ -317,9 +317,13 @@ function withoutSystemReminders(text: string): string {
 }
 
 // An approved plan opens its "clear context" session as an auto-continuation; Claude Code counts it as the user's turn.
+// A message typed while Claude is busy is saved as a queued_command attachment, not a user line. In a Desktop chat that
+// another session started, those can be the user's only messages.
 function claudeUserText(line: Line): string | null {
-  if (line.type !== "user" || line.isMeta || line.isCompactSummary || (line.origin?.kind && !["human", "auto-continuation"].includes(line.origin.kind))) return null;
-  const content = line.message?.content;
+  const queued = line.type === "attachment" && line.attachment?.type === "queued_command" && (line.attachment.commandMode ?? "prompt") === "prompt" ? line.attachment : null;
+  const message = queued ?? (line.type === "user" && !line.isCompactSummary ? line : null);
+  if (!message || message.isMeta || (message.origin?.kind && !["human", "auto-continuation"].includes(message.origin.kind))) return null;
+  const content = queued ? queued.prompt : line.message?.content;
   const raw = typeof content === "string" ? content : Array.isArray(content) ? content.filter((block: Line) => block?.type === "text").map((block: Line) => block.text).join("\n") : "";
   const text = withoutSystemReminders(raw).trim();
   return text && !/^<(command-|local-command)/.test(text) ? text : null;

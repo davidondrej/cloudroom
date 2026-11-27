@@ -19,6 +19,7 @@ import {
   type RunningThreadRow,
 } from "@cloudroom/db";
 import {
+  isStandaloneBuiltinCompactCommand,
   promptInputSchema,
   type ClientTurnRequestId,
   type PromptInput,
@@ -308,6 +309,13 @@ export function attemptDispatch(
   args: DispatchAttemptArgs,
 ): Promise<DispatchAttemptOutcome> {
   requireNativeThread(args.thread);
+  // Compaction is its own turn: joined into a running one, such as a Goal's next turn, it arrives as text (#2640).
+  if (
+    args.payload.mode !== "start" &&
+    isStandaloneBuiltinCompactCommand(args.payload.input)
+  ) {
+    args = { ...args, payload: { ...args.payload, mode: "queue-if-active" } };
+  }
   return runDispatchAttempt(deps, args, {
     thread: false,
     host: false,

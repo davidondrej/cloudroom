@@ -14,6 +14,7 @@ export {
   type FileChangeAction,
 } from "./utils.js";
 export {
+  ANTIGRAVITY_QUOTA_USED_UP,
   MAX_ERROR_TITLE_LENGTH,
   PROVIDER_AUTH_FAILED_TITLE,
 } from "./messages.js";

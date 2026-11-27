@@ -5,7 +5,8 @@ Read only. Never edit, commit, push, or open issues or pull requests. Never cont
 ## Steps
 
 1. Clone the repo named below: `gh repo clone <repo> /tmp/repo -- --depth 1`.
-2. If that fails, reply only: `error | - | could not clone the repo | -`
+   If that fails (no GitHub login), try: `GIT_TERMINAL_PROMPT=0 git clone --depth 1 https://github.com/<repo> /tmp/repo`.
+2. If both fail, reply only: `error | - | could not clone the repo | -`
 3. Spend about 10 minutes on the most serious real problems in its own code and config:
    - secrets in code, logs, or CI
    - missing auth or access checks

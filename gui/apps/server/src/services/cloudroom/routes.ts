@@ -519,7 +519,8 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const choice = await cloudSkills(deps);
     const inCloud = skillInCloud(choice);
     const skills = (await macSkills()).map(({ name, description }) => ({ name, description, cloud: inCloud(name) }));
-    return { auto: choice.auto, skills, issue: cloudroom(deps).sandboxes.configIssue };
+    const { sandboxes } = cloudroom(deps);
+    return { auto: choice.auto, skills, issue: sandboxes.configIssue, leftOut: sandboxes.configLeftOut, copiedAt: await sandboxes.configCopiedAt() };
   };
   let skillChange = Promise.resolve();
   app.get("/api/v1/cloudroom/account/skills", async (context) => context.json(await skillList()));

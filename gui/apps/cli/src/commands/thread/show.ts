@@ -65,6 +65,8 @@ interface ThreadLogCommandOptions {
 
 const THREAD_LOG_DEFAULT_EVENT_LIMIT = 100;
 const THREAD_SHOW_INTERRUPTION_TIMEOUT_MS = 3_000;
+// The GitHub lookup can take 10-20 s on a busy host; past this, show prints the rest (#2446).
+const THREAD_SHOW_PULL_REQUEST_TIMEOUT_MS = 10_000;
 const THREAD_SHOW_CREDITS_TIMEOUT_MS = 30_000;
 const THREAD_LOG_TIMELINE_SEGMENT_LIMIT_MAX = 100;
 
@@ -209,6 +211,7 @@ async function fetchPullRequest(args: {
   try {
     const response = await args.sdk.environments.pullRequest({
       environmentId: args.environmentId,
+      signal: AbortSignal.timeout(THREAD_SHOW_PULL_REQUEST_TIMEOUT_MS),
     });
     if (response.outcome === "available") {
       return {
@@ -232,7 +235,10 @@ async function fetchPullRequest(args: {
     return {
       status: "unavailable",
       pullRequest: null,
-      message: getErrorMessage(err),
+      message:
+        err instanceof Error && err.name === "TimeoutError"
+          ? `No answer within ${THREAD_SHOW_PULL_REQUEST_TIMEOUT_MS / 1000} seconds; --no-pr skips the lookup.`
+          : getErrorMessage(err),
     };
   }
 }

@@ -11,6 +11,7 @@ import { messagesSeed } from "./thread-harness-switch.js";
 import { ensureProjectCheckoutForThread } from "../projects/project-source-setup.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import { eq } from "drizzle-orm";
+import { requestThreadId } from "@cloudroom/config/spawn-request";
 import {
   cloudroomThreads,
   deleteThread,
@@ -66,7 +67,6 @@ import {
   createThreadRecord,
   getThreadSafe,
   requestConflict,
-  requestThreadId,
   requirePublicProjectForThreadCreate,
   savedSpawnIntent,
   spawnConflicts,

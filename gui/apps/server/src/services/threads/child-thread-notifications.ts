@@ -378,12 +378,32 @@ function formatChildThreadInterruption(
   return ` (${describeThreadInterruption(item.interruption)}${unread})`;
 }
 
+/**
+ * A provider's HTML error page (a Cloudflare 403) filled each failure report
+ * with markup and cut off the status line's URL and request ID. Its title is
+ * kept; the full page stays in the child's thread (#2601).
+ */
+const HTML_PAGE_PATTERN =
+  /<(?:!doctype\s+html|html)\b[\s\S]*?(?:<\/html\s*>|$)/giu;
+
+function withoutHtmlPages(text: string): string {
+  return text.replace(HTML_PAGE_PATTERN, (page) => {
+    // Prose that only names a tag ("expected <html>") is no page.
+    if (!/<(?:head|body)\b/iu.test(page)) return page;
+    const title = /<title[^>]*>([^<]*)/iu
+      .exec(page)?.[1]
+      ?.replace(/\s+/gu, " ")
+      .trim();
+    return title ? `[HTML page "${title}" omitted]` : "[HTML page omitted]";
+  });
+}
+
 function formatChildThreadFailureReason(
   reason: string | null | undefined,
   limit: number,
   prefix: string,
 ): string {
-  const trimmed = reason?.trim();
+  const trimmed = reason && withoutHtmlPages(reason).trim();
   return trimmed ? `${prefix}${truncateChildThreadOutput(trimmed, limit)}` : "";
 }
 

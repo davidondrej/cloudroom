@@ -464,6 +464,31 @@ describe("voice transcription", () => {
     }
   });
 
+  it("names the missing voice plugin and where to turn it on when the backup also fails", async () => {
+    const harness = await createTestAppHarness({
+      transcriptionModel: "codex/gpt-transcribe",
+    });
+    seedHostSession(harness.deps);
+    const backup = vi
+      .spyOn(SandboxDirectory.prototype, "transcribe")
+      .mockRejectedValue(new Error("backup down"));
+    try {
+      await expect(
+        transcribeVoiceInput(harness.deps, { file: voiceFile() }),
+      ).rejects.toMatchObject({
+        body: {
+          message:
+            "Voice input uses the Codex plugin, which isn't loaded. Turn it on in Settings → Plugins, then press Retry.",
+        },
+        status: 501,
+      });
+      expect(backup).toHaveBeenCalledOnce();
+    } finally {
+      backup.mockRestore();
+      await harness.cleanup();
+    }
+  });
+
   it("scales the OpenAI transcription timeout with the audio size", async () => {
     const harness = await createTestAppHarness({
       transcriptionModel: "openai/gpt-4o-transcribe",

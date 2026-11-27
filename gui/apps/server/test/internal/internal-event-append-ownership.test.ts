@@ -1218,6 +1218,8 @@ describe("internal event append ownership", () => {
   // #1159: the parent hears why a child's turn was interrupted, only from a stop that is surely that turn's.
   it.each([
     ["memory-limit", "during", "was interrupted (memory protection)."],
+    // #2659: a measured stop names the thread's footprint and the computer's total.
+    ["memory-limit", "measured", "was interrupted (memory protection: its processes used 9.3 GB of the computer's 16 GB)."],
     ["host-daemon-restarted", "after", "was interrupted (host restarted)."],
     ["manual-stop", "before", "was interrupted."],
     ["memory-limit", "overlap", "was interrupted."],
@@ -1230,7 +1232,7 @@ describe("internal event append ownership", () => {
     const childThread = seedThread(harness.deps, { environmentId: environment.id, parentThreadId: parentThread.id, projectId: project.id, status: "active" });
     const seedStop = () =>
       reason !== null &&
-      seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "system/thread/interrupted", scope: threadScope(), data: { reason } });
+      seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "system/thread/interrupted", scope: threadScope(), data: when === "measured" ? { reason, memory: { usedBytes: 9.23 * 2 ** 30, totalBytes: 16 * 2 ** 30 } } : { reason } });
     try {
       if (when === "before") seedStop();
       // An earlier turn still open: the stop could be either turn's.
@@ -1241,7 +1243,7 @@ describe("internal event append ownership", () => {
         seedEvent(harness.deps, { threadId: childThread.id, sequence: getLatestThreadSequence(harness.db, { threadId: childThread.id }) + 1, type: "turn/completed", scope: turnScope("turn-done"), data: { providerThreadId: null, status: "completed" } });
       }
       seedTurnStarted(harness.deps, { threadId: childThread.id, turnId: "turn-stopped" });
-      if (when === "during" || when === "overlap" || when === "open-earlier") seedStop();
+      if (when === "during" || when === "measured" || when === "overlap" || when === "open-earlier") seedStop();
       const response = await postEventBatch({
         harness,
         sessionId: session.id,

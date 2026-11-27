@@ -41,7 +41,7 @@ export class CloudSecrets {
       try {
         if (!this.deps.pendingInteractions) throw new Error("Interactions are unavailable");
         const result = await this.deps.pendingInteractions.requestPluginInteraction({
-          pluginId: PLUGIN_ID, rendererId: RENDERER_ID, threadId, title: `Add secrets to ${request.path}`,
+          pluginId: PLUGIN_ID, rendererId: RENDERER_ID, threadId, title: "Add secrets",
           payload: { purpose: request.purpose, destination: { kind: "dotenv", path: request.path }, fields: request.fields },
           timeoutMs: FORM_TIMEOUT_MS, signal: controller.signal,
         });

@@ -1,3 +1,7 @@
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   AppImageUpdater,
@@ -586,7 +590,7 @@ describe("desktop auto-update service", () => {
 
   // Also breaks if an electron-updater upgrade renames spawnLog, which starts the new AppImage.
   it.runIf(process.platform === "linux")(
-    "starts the new AppImage through the fd cleanup, so old mounts unmount (#2155)",
+    "starts the new AppImage through the fd cleanup (#2155), once this app exits, and again if it fails at once (#2624)",
     async () => {
       const updater = Object.create(
         AppImageUpdater.prototype,
@@ -597,11 +601,34 @@ describe("desktop auto-update service", () => {
         spawned.push(args),
       );
       createElectronAutoUpdaterAdapter(updater, { on: () => undefined });
-      await Reflect.get(updater, "spawnLog")("/apps/Cloudroom.AppImage", [], {
-        PATH: "/usr/bin",
-      });
-      expect(spawned[0]?.[0]).toBe("/bin/bash");
-      expect(spawned[0]?.[1]).toContain("/apps/Cloudroom.AppImage");
+      const dir = mkdtempSync(join(tmpdir(), "appimage-update-"));
+      // #2624: run it as if this app had exited. A new AppImage that fails at once starts once more, never in a
+      // loop; one that exits cleanly (the user closed it) stays closed.
+      for (const code of [0, 1]) {
+        const appImage = join(dir, `Cloudroom-${code}.AppImage`);
+        writeFileSync(
+          appImage,
+          `#!/bin/sh\necho started >> "$0.starts"\nexit ${code}\n`,
+          { mode: 0o755 },
+        );
+        await Reflect.get(updater, "spawnLog")(appImage, [], {
+          PATH: "/usr/bin:/bin",
+        });
+        const [cmd, args, env] = spawned.at(-1) as [
+          string,
+          string[],
+          NodeJS.ProcessEnv,
+        ];
+        expect(cmd).toBe("/bin/bash");
+        spawnSync(
+          cmd,
+          args.map((arg) => (arg === String(process.pid) ? "999999999" : arg)),
+          { env },
+        );
+        expect(readFileSync(`${appImage}.starts`, "utf8")).toBe(
+          "started\n".repeat(code === 0 ? 1 : 2),
+        );
+      }
     },
   );
 

@@ -397,6 +397,17 @@ impl Mac {
     }
 }
 
+impl Mac {
+    /// Whether the Mac whose app last sent a prompt holds the pairing (`holder_seen`) and last checked in over 90 s ago,
+    /// so `may_move` keeps it there (#2641). No check-in since Core started (a restored pairing) is unknown: no label.
+    fn kept_by_prompting_mac(&self, holder_seen: Option<(String, Option<Instant>)>) -> bool {
+        holder_seen.is_some_and(|(holder, at)| {
+            self.using.lock().unwrap().as_deref() == Some(holder.as_str())
+                && at.is_some_and(|at| at.elapsed() >= CHECK_IN)
+        })
+    }
+}
+
 fn ago(at: Instant) -> String {
     match at.elapsed().as_secs() / 60 {
         0 => "less than a minute".into(),
@@ -700,7 +711,10 @@ fn record_refusal(m: &Manager, reason: &'static str, started: Instant) {
 }
 fn refused(m: &Manager, started: Instant) -> Failure {
     let (reason, message) = m.mac.why_unavailable();
-    record_refusal(m, reason, started);
+    // For analysis only, never shown: a heuristic that can also fire during a slow reconnect or a single Mac's stalled
+    // helper (#2641). Not `paired_away`, which means another Mac was turned away.
+    let kept = reason == "not_connected" && m.mac.kept_by_prompting_mac(m.previews.holder_seen());
+    record_refusal(m, if kept { "holder_silent" } else { reason }, started);
     Failure(StatusCode::CONFLICT, naming(m, message))
 }
 /// The computer name of the Mac this sandbox is paired with, if its helper sent one.
@@ -1481,6 +1495,20 @@ mod tests {
             mac.report.lock().unwrap().as_mut().unwrap().1 = old;
             assert!(!mac.unsupported(), "{report}");
         }
+        // #2641: diagnostics record `holder_silent` only for the prompting Mac holding the pairing with an old check-in.
+        let (mac, b) = (super::Mac::default(), "b".repeat(32));
+        let now = Some(std::time::Instant::now());
+        let old = std::time::Instant::now().checked_sub(super::CHECK_IN);
+        assert!(!mac.kept_by_prompting_mac(Some((b.clone(), old))));
+        *mac.using.lock().unwrap() = Some(b.clone());
+        assert!(mac.kept_by_prompting_mac(Some((b.clone(), old))));
+        assert!(!mac.kept_by_prompting_mac(Some((b.clone(), now))));
+        // A pairing restored after a restart has no check-in yet: unknown, so `not_connected` as before.
+        assert!(!mac.kept_by_prompting_mac(Some((b.clone(), None))));
+        assert!(
+            !mac.kept_by_prompting_mac(Some(("a".repeat(32), old)))
+                && !mac.kept_by_prompting_mac(None)
+        );
     }
 
     #[tokio::test]

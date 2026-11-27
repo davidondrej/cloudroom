@@ -16,6 +16,7 @@ import type {
 } from "@cloudroom/server-contract";
 import type { EventMeta, ThreadEventWithMeta } from "./events.js";
 import {
+  ANTIGRAVITY_QUOTA_USED_UP,
   PROVIDER_AUTH_FAILED_TITLE,
   isPlanLimitReply,
 } from "./messages.js";
@@ -547,6 +548,8 @@ const isAuthFailureRow = (row: TimelineRow | undefined): boolean =>
   row.systemKind === "error" &&
   row.title === PROVIDER_AUTH_FAILED_TITLE;
 
+const QUOTA_REPLY_TITLE = "Plan limit reached";
+
 function convertPlanLimitReplies(rows: TimelineRow[]): TimelineRow[] {
   let changed = false;
   const next = rows.map((row): TimelineRow => {
@@ -566,7 +569,7 @@ function convertPlanLimitReplies(rows: TimelineRow[]): TimelineRow[] {
         createdAt: row.createdAt,
         kind: "system",
         systemKind: "error",
-        title: "Plan limit reached",
+        title: QUOTA_REPLY_TITLE,
         detail: row.text.replace(/^\s*⚠?\s*/u, "").trim(),
         status: "error",
         planLimit: true,
@@ -606,6 +609,14 @@ function collectEchoDropRowIds(rows: readonly TimelineRow[]): string[] {
   return ids;
 }
 
+const isConvertedQuotaReply = (row: TimelineRow): boolean =>
+  isPlanLimitRow(row) && row.kind === "system" && row.title === QUOTA_REPLY_TITLE;
+
+const isAntigravityQuotaError = (row: TimelineRow): boolean =>
+  isPlanLimitRow(row) &&
+  row.kind === "system" &&
+  (row.detail ?? row.title).startsWith(ANTIGRAVITY_QUOTA_USED_UP);
+
 function matchesErrorEcho(replyText: string, error: TimelineRow): boolean {
   if (error.kind !== "system") return false;
   const text = replyText.trim();
@@ -644,11 +655,14 @@ function dropErrorEchoes(
 ): TimelineRow[] {
   const gone = new Set<string>();
   const isEcho = (candidate: TimelineRow | undefined, error: TimelineRow) =>
-    candidate?.kind === "conversation" &&
-    candidate.role === "assistant" &&
+    candidate !== undefined &&
     (candidate.turnId === null || !completedTurnIds.has(candidate.turnId)) &&
     (error.turnId === null || candidate.turnId === error.turnId) &&
-    matchesErrorEcho(candidate.text, error);
+    ((candidate.kind === "conversation" &&
+      candidate.role === "assistant" &&
+      matchesErrorEcho(candidate.text, error)) ||
+      // Core's Antigravity quota error stands for the quota reply the timeline already made a limit row (#2598).
+      (isConvertedQuotaReply(candidate) && isAntigravityQuotaError(error)));
 
   const scan = (list: readonly TimelineRow[]) => {
     for (let i = 0; i < list.length; i += 1) {
