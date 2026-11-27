@@ -1,236 +1,354 @@
-import type { CSSProperties, ReactNode } from "react";
-import { Icon, type IconName } from "@cloudroom/shared-ui/icon";
-import { cn } from "@cloudroom/shared-ui/lib/utils";
+import { Icon } from "@cloudroom/shared-ui/icon";
 import { ResourceInstallControl } from "@cloudroom/shared-ui/resource-list";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { addPluginInitialFromEntry, type AddPluginInitial } from "./AddPluginDialog";
+import {
+  addPluginInitialFromEntry,
+  type AddPluginInitial,
+} from "./AddPluginDialog";
 import { usePluginEnabledToggle } from "./InstalledPluginsTab";
-import type { PluginListGroup, PluginListRow } from "./plugin-browse-discovery";
-import { CatalogEntryIconChip, PluginLogoChip } from "./plugin-ui";
+import {
+  OFFICIAL_MARKETPLACE,
+  type PluginListRow,
+} from "./plugin-browse-discovery";
 
 type OpenPlugin = (pluginId: string, trigger: HTMLButtonElement) => void;
-type Actions = { onInstall: (initial: AddPluginInitial) => void; onOpenPlugin: OpenPlugin };
-type InstalledRow = PluginListRow & { plugin: NonNullable<PluginListRow["plugin"]> };
-
-/** The plugins the top of the Plugins page features (docs/scopes/plugins.md). An art tile shows the plugin's own catalog
- *  screenshot (`shot` names the file), cropped to its artwork with `size` and `position`. */
-const HERO = { id: "aura", shot: "alpine", size: "285%", position: "62% 2%", text: "Wallpapers, animated GIFs, and pixel textures behind your whole workspace." };
-const WIDE = { id: "ambient", shot: "poppy-hill", size: "210%", position: "100% 85%", text: "A live scene behind your chats that shows what your agents are doing." };
-const FRESH = { id: "repo-sync", text: "Cloud threads push their work to main on their own." };
-const SMALL = "automations";
-/** Cloudroom's own agent (docs/scopes/cloudroom-agent.md) takes the wide tile. Ambient keeps it where the agent isn't listed. */
-const AGENT = { id: "provider-cloudroom-agent", text: "Claude Code or Codex hit its limit? Keep going in one click, on frontier open source models." };
-
-const CATEGORY_ICONS: Record<string, IconName> = {
-  "themes-and-appearance": "Palette", "thread-management": "PanelLeft", "thread-content": "MessageSquare", "memory-and-context": "Brain",
-  security: "Lock", "agents-and-providers": "Layers", environments: "FolderGit", "token-usage-and-limits": "ChartColumn",
-  notifications: "Bell", "code-and-reviews": "GitPullRequest", "file-viewers-and-editors": "FileText", "cloud-and-remote": "Cloud",
-  "command-line": "Terminal", utilities: "Toolbox", "plugin-development": "Puzzle", "tasks-and-workflows": "ListTodo",
+type Actions = {
+  onInstall: (initial: AddPluginInitial) => void;
+  onOpenPlugin: OpenPlugin;
 };
-const ON_ART = "border-white/40 bg-black/40 text-white backdrop-blur hover:bg-black/60 hover:text-white";
-const TILE = "group relative overflow-hidden rounded-xl";
+type Glyph =
+  | "cloud"
+  | "loops"
+  | "snippets"
+  | "merge"
+  | "cursor"
+  | "phone"
+  | "bolt"
+  | "target";
 
-const count = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K` : String(n));
-const art = (row: PluginListRow, spec: { shot: string; size: string; position: string }): CSSProperties | undefined => {
-  const shots = row.entry?.screenshots ?? [];
-  const url = shots.find((shot) => shot.includes(spec.shot)) ?? shots[0];
-  return url ? { backgroundImage: `url(${JSON.stringify(url)})`, backgroundSize: spec.size, backgroundPosition: spec.position } : undefined;
-};
+/* The cards look like two-ink prints on cream paper (David's pick, 2026-11-26, docs/scopes/plugins.md). The paper
+ * and inks are fixed colors on purpose: a print keeps its colors in every app theme. Text, toggles and the Install
+ * button are black ink (#1b1a17) on every card. */
+const PAPER = "#eee6d4";
+const BLUE = "#2f4bff";
+const PINK = "#ff4f9a";
+const ORANGE = "#ff5a1f";
+const TEAL = "#00957f";
+const YELLOW = "#ffc21a";
+const RED = "#ef3b2d";
 
-/** The whole tile opens the plugin's details; its own controls sit above this. */
-function Open({ row, onOpenPlugin }: { row: PluginListRow; onOpenPlugin: OpenPlugin }) {
+/** The plugins we build ourselves, shown as cards on top of the Plugins page. `inks` are the first and second ink
+ *  of the card's picture. */
+const OURS: {
+  id: string;
+  text: string;
+  glyph: Glyph;
+  inks: [string, string];
+}[] = [
+  {
+    id: "provider-cloudroom-agent",
+    text: "Keep going past plan limits.",
+    glyph: "cloud",
+    inks: [BLUE, PINK],
+  },
+  {
+    id: "automations",
+    text: "Agents on a schedule.",
+    glyph: "loops",
+    inks: [ORANGE, BLUE],
+  },
+  {
+    id: "snippets",
+    text: "Keyword in, full text out.",
+    glyph: "snippets",
+    inks: [TEAL, YELLOW],
+  },
+  {
+    id: "repo-sync",
+    text: "Cloud work lands on main.",
+    glyph: "merge",
+    inks: [PINK, TEAL],
+  },
+  {
+    id: "computer-use",
+    text: "Agents use your desktop apps.",
+    glyph: "cursor",
+    inks: [BLUE, YELLOW],
+  },
+  {
+    id: "connect",
+    text: "Cloudroom on your phone.",
+    glyph: "phone",
+    inks: [RED, TEAL],
+  },
+  {
+    id: "gpu",
+    text: "Rent a GPU from a thread.",
+    glyph: "bolt",
+    inks: [ORANGE, YELLOW],
+  },
+  {
+    id: "director",
+    text: "Unblocks stuck threads.",
+    glyph: "target",
+    inks: [RED, BLUE],
+  },
+];
+
+/** One drawing per plugin on a 100 x 100 canvas, in a single ink. `knockout` is the color of the cloud's face.
+ *  A new card needs one more case here, no image file. */
+function Drawing({
+  glyph,
+  ink,
+  knockout,
+}: {
+  glyph: Glyph;
+  ink: string;
+  knockout: string;
+}) {
+  const line = {
+    fill: "none",
+    stroke: ink,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+  } as const;
+  const shape = { ...line, fill: ink, strokeWidth: 7 };
+  switch (glyph) {
+    case "cloud":
+      return (
+        <>
+          <path
+            d="M26 78H76A18 18 0 0 0 80 43A26 26 0 0 0 32 36A21.5 21.5 0 0 0 26 78Z"
+            {...shape}
+          />
+          <circle cx={44} cy={57} r={3.4} fill={knockout} />
+          <circle cx={62} cy={57} r={3.4} fill={knockout} />
+          <path
+            d="M48 65Q53 70 58 65"
+            {...line}
+            stroke={knockout}
+            strokeWidth={3}
+          />
+        </>
+      );
+    case "loops":
+      return (
+        <path
+          d="M50 50C38 30 14 30 14 50C14 70 38 70 50 50C62 30 86 30 86 50C86 70 62 70 50 50Z"
+          {...line}
+          strokeWidth={12}
+        />
+      );
+    case "snippets":
+      // Scissors, the plugin's icon.
+      return (
+        <>
+          <circle cx={27} cy={76} r={12} {...line} strokeWidth={9} />
+          <circle cx={73} cy={76} r={12} {...line} strokeWidth={9} />
+          <path d="M33 66L64 10M67 66L36 10" {...line} strokeWidth={9} />
+        </>
+      );
+    case "merge":
+      return (
+        <>
+          <path
+            d="M30 26V74M70 32C70 56 30 46 30 66"
+            {...line}
+            strokeWidth={10}
+          />
+          <circle cx={30} cy={18} r={8} {...shape} />
+          <circle cx={30} cy={82} r={8} {...shape} />
+          <circle cx={70} cy={24} r={8} {...shape} />
+        </>
+      );
+    case "cursor":
+      return (
+        <polygon
+          points="24,10 24,80 41,64 53,92 65,86 53,60 78,60"
+          {...shape}
+        />
+      );
+    case "phone":
+      return (
+        <>
+          <rect
+            x={30}
+            y={10}
+            width={40}
+            height={80}
+            rx={9}
+            {...line}
+            strokeWidth={10.5}
+          />
+          <path d="M44 78H56" {...line} strokeWidth={8.5} />
+        </>
+      );
+    case "bolt":
+      return <polygon points="60,6 22,56 46,56 38,94 78,42 54,42" {...shape} />;
+    case "target":
+      return (
+        <>
+          <circle cx={50} cy={50} r={40} {...line} strokeWidth={10} />
+          <circle cx={50} cy={50} r={22} {...line} strokeWidth={10} />
+          <circle cx={50} cy={50} r={6} {...shape} />
+        </>
+      );
+  }
+}
+
+const HALFTONE_FADE =
+  "radial-gradient(circle at 80% 62%, black 0%, black 18%, transparent 44%)";
+const PAPER_GRAIN = `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.95' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.2  0 0 0 0 0.15  0 0 0 0 0.1  0 0 0 0.5 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>")`;
+
+/** The print behind a card's text: halftone dots in the second ink, the drawing in both inks with the second pass a
+ *  little off register (multiply makes the overlap the dark third tone), its number, and paper grain on top. */
+function Print({
+  glyph,
+  inks: [first, second],
+  number,
+}: {
+  glyph: Glyph;
+  inks: [string, string];
+  number: number;
+}) {
   return (
-    <button
-      type="button"
-      aria-label={`Open ${row.title} details`}
-      onClick={(event) => onOpenPlugin(row.pluginId, event.currentTarget)}
-      className="absolute inset-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+    <div aria-hidden className="pointer-events-none absolute inset-0">
+      <div
+        className="absolute inset-0"
+        style={{
+          backgroundImage: `radial-gradient(${second} 1.15px, transparent 1.6px)`,
+          backgroundSize: "5.5px 5.5px",
+          maskImage: HALFTONE_FADE,
+          WebkitMaskImage: HALFTONE_FADE,
+        }}
+      />
+      <svg
+        viewBox="0 0 100 100"
+        className="absolute -bottom-3 -right-1 size-[6.4rem]"
+      >
+        <g transform="translate(6 5)" style={{ mixBlendMode: "multiply" }}>
+          <Drawing glyph={glyph} ink={second} knockout={second} />
+        </g>
+        <g style={{ mixBlendMode: "multiply" }}>
+          <Drawing glyph={glyph} ink={first} knockout={PAPER} />
+        </g>
+      </svg>
+      <span
+        className="absolute right-3 top-3 font-mono text-[9px] font-bold tracking-[0.18em]"
+        style={{ color: first }}
+      >
+        N°{String(number).padStart(2, "0")}
+      </span>
+      <div
+        className="absolute inset-0 opacity-70 mix-blend-multiply"
+        style={{ backgroundImage: PAPER_GRAIN }}
+      />
+    </div>
+  );
+}
+
+function Toggle({
+  row,
+}: {
+  row: PluginListRow & { plugin: NonNullable<PluginListRow["plugin"]> };
+}) {
+  const { toggle, enabled } = usePluginEnabledToggle(row.plugin);
+  return (
+    <Switch
+      checked={enabled}
+      disabled={toggle.isPending}
+      onCheckedChange={(next) => toggle.mutate(next)}
+      aria-label={`${enabled ? "Disable" : "Enable"} ${row.title}`}
+      // Black ink with a paper thumb, the same on every card.
+      className="shadow-none data-[state=checked]:border-transparent data-[state=checked]:bg-[#1b1a17] data-[state=unchecked]:bg-[#1b1a17]/25 [&>span]:bg-[#eee6d4]!"
     />
   );
 }
-function Toggle({ row, className }: { row: InstalledRow; className?: string }) {
-  const { toggle, enabled } = usePluginEnabledToggle(row.plugin);
-  return <Switch className={className} checked={enabled} disabled={toggle.isPending} onCheckedChange={(next) => toggle.mutate(next)} aria-label={`${enabled ? "Disable" : "Enable"} ${row.title}`} />;
-}
 /** An on/off switch when installed, Install when not, like a row of the list below. */
-function Control({ row, onInstall, className, switchClassName }: { row: PluginListRow; onInstall: Actions["onInstall"]; className?: string; switchClassName?: string }) {
-  if (row.plugin !== null) return <Toggle row={{ ...row, plugin: row.plugin }} className={switchClassName} />;
+function Control({
+  row,
+  onInstall,
+}: {
+  row: PluginListRow;
+  onInstall: Actions["onInstall"];
+}) {
+  if (row.plugin !== null)
+    return <Toggle row={{ ...row, plugin: row.plugin }} />;
   const entry = row.entry;
   if (entry === null || row.installed) return null;
-  return <ResourceInstallControl accessibleLabel={`Install ${row.title}`} className={cn("h-7 px-2.5 text-xs", className)} onAction={() => onInstall(addPluginInitialFromEntry(entry))} />;
-}
-
-/** The agent tile's halftone (David's pick, 2026-11-22): dots sized by a wave times a 2D bell curve near the top right,
- *  fading out toward the text on the left. Worked out once: 680 x 265 units, scaled to the tile. */
-const DOT_W = 680, DOT_H = 265;
-const bell = (x: number, mu: number, sigma: number) => Math.exp(-((x - mu) ** 2) / (2 * sigma * sigma));
-const DOTS = Array.from({ length: Math.ceil(DOT_H / 11) }, (_, row) => row * 11 + 6).flatMap((y) =>
-  Array.from({ length: Math.ceil(DOT_W / 11) }, (_, col) => col * 11 + 6).flatMap((x) => {
-    const wave = 0.5 + 0.5 * Math.sin(x * 0.028 + Math.cos(y * 0.04) * 2) * Math.cos(y * 0.035 - x * 0.006);
-    const v = Math.min(1, (0.35 * wave + 0.85 * bell(x, 560, 150) * bell(y, 80, 120)) * Math.min(1, Math.max(0, (x - 180) / 260)));
-    return v > 0.04 ? [{ x, y, r: 0.6 + v * 4.2, opacity: 0.15 + 0.75 * v }] : [];
-  }),
-);
-function Halftone() {
   return (
-    <>
-      <svg aria-hidden className="pointer-events-none absolute inset-0 size-full" viewBox={`0 0 ${DOT_W} ${DOT_H}`} preserveAspectRatio="xMaxYMid slice">
-        {DOTS.map((dot) => <circle key={`${dot.x}-${dot.y}`} cx={dot.x} cy={dot.y} r={dot.r} fill="var(--primary)" opacity={dot.opacity} />)}
-      </svg>
-      <div aria-hidden className="pointer-events-none absolute inset-0 bg-[linear-gradient(90deg,var(--card)_38%,color-mix(in_oklab,var(--card)_70%,transparent)_55%,transparent_80%)]" />
-    </>
+    <ResourceInstallControl
+      accessibleLabel={`Install ${row.title}`}
+      className="h-7 border-[#1b1a17]/50 bg-transparent px-2.5 text-xs text-[#1b1a17] hover:bg-[#1b1a17]/10 hover:text-[#1b1a17]"
+      onAction={() => onInstall(addPluginInitialFromEntry(entry))}
+    />
   );
 }
 
-function AgentTile({ row, className, ...actions }: { row: PluginListRow; className?: string } & Actions) {
+/** "Made by Cloudroom": a card per plugin of ours that this app knows. A card opens the plugin's details; its control
+ *  installs it or turns it on. Null when none is known (an unreachable catalog and none installed). */
+export function PluginsFeatured({
+  rows,
+  onInstall,
+  onOpenPlugin,
+  onSeeAll,
+}: { rows: readonly PluginListRow[]; onSeeAll: () => void } & Actions) {
+  const ours = OURS.flatMap((spec, index) => {
+    const row = rows.find((candidate) => candidate.pluginId === spec.id);
+    return row ? [{ ...spec, row, number: index + 1 }] : [];
+  });
+  if (ours.length === 0) return null;
+  const official = rows.filter(
+    (row) => row.entry?.marketplace === OFFICIAL_MARKETPLACE,
+  ).length;
   return (
-    <div className={cn(TILE, "flex flex-col justify-end border border-primary/30 bg-card p-5", className)}>
-      <Halftone />
-      <Open row={row} onOpenPlugin={actions.onOpenPlugin} />
-      <img src="/icon-192.png?v=room" alt="" aria-hidden className="pointer-events-none absolute left-5 top-5 size-12 rounded-[22%] object-cover" />
-      <div className="pointer-events-none relative">
-        <p className="text-2xs font-semibold uppercase tracking-wider text-primary">By Cloudroom</p>
-        <p className="mt-1 text-xl font-semibold tracking-tight text-foreground">{row.title}</p>
-        <p className="mt-1 max-w-xs text-xs leading-snug text-muted-foreground">{AGENT.text}</p>
-      </div>
-      <div data-row-action className="absolute right-4 top-4">
-        {/* Lighter when off, so it reads on the bright dots. */}
-        <Control row={row} onInstall={actions.onInstall} switchClassName="data-[state=unchecked]:bg-neutral-500" />
-      </div>
-    </div>
-  );
-}
-
-function ArtTile({ row, spec, eyebrow, big = false, className, ...actions }: { row: PluginListRow; spec: typeof HERO; eyebrow: ReactNode; big?: boolean; className?: string } & Actions) {
-  return (
-    <div className={cn(TILE, "flex flex-col justify-end border border-border bg-card bg-cover", big ? "p-6" : "p-5", className)} style={art(row, spec)}>
-      <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/35 to-transparent" />
-      <Open row={row} onOpenPlugin={actions.onOpenPlugin} />
-      <div className="pointer-events-none relative">
-        <p className="text-2xs font-semibold uppercase tracking-wider text-white/75">{eyebrow}</p>
-        <p className={cn("font-semibold tracking-tight text-white", big ? "mt-1 text-5xl" : "mt-1 text-xl")}>{row.title}</p>
-        <p className={cn("leading-snug text-white/80", big ? "mt-3 max-w-sm text-sm" : "mt-1 max-w-md text-xs")}>{spec.text}</p>
-      </div>
-      <div data-row-action className={cn("absolute", big ? "right-6 top-6" : "right-4 top-4")}>
-        <Control row={row} onInstall={actions.onInstall} className={ON_ART} />
-      </div>
-    </div>
-  );
-}
-
-/** The lime tile's own button: a switch would vanish on lime. */
-function FreshAction({ row, onInstall }: { row: PluginListRow; onInstall: Actions["onInstall"] }) {
-  const button = "inline-flex h-7 items-center gap-1.5 rounded-md bg-primary-foreground px-2.5 text-xs font-medium text-primary disabled:opacity-60";
-  if (row.plugin !== null) return <FreshToggle row={{ ...row, plugin: row.plugin }} className={button} />;
-  const entry = row.entry;
-  if (entry === null) return null;
-  return (
-    <button type="button" className={button} onClick={() => onInstall(addPluginInitialFromEntry(entry))}>
-      <Icon name="Download" className="size-3.5" aria-hidden />
-      Install
-    </button>
-  );
-}
-function FreshToggle({ row, className }: { row: InstalledRow; className: string }) {
-  const { toggle, enabled } = usePluginEnabledToggle(row.plugin);
-  return (
-    <button type="button" aria-pressed={enabled} disabled={toggle.isPending} className={className} onClick={() => toggle.mutate(!enabled)}>
-      {enabled && <Icon name="Check" className="size-3.5" aria-hidden />}
-      {enabled ? "On" : "Turn on"}
-    </button>
-  );
-}
-function FreshTile({ row, ...actions }: { row: PluginListRow } & Actions) {
-  const icon = (row.entry?.icon ?? row.plugin?.icon ?? "Puzzle") as IconName;
-  return (
-    <div className={cn(TILE, "flex flex-col justify-between bg-primary p-4 text-primary-foreground")}>
-      <Open row={row} onOpenPlugin={actions.onOpenPlugin} />
-      <div className="pointer-events-none relative flex items-center justify-between">
-        <span className="rounded-full bg-primary-foreground/10 px-2 py-0.5 text-2xs font-semibold uppercase tracking-wider">New</span>
-        <Icon name={icon} className="size-6" aria-hidden />
-      </div>
-      <div className="pointer-events-none relative">
-        <p className="text-xl font-semibold tracking-tight">{row.title}</p>
-        <p className="mt-0.5 text-xs leading-snug opacity-80">{FRESH.text}</p>
-        <div data-row-action className="pointer-events-auto mt-3 w-fit">
-          <FreshAction row={row} onInstall={actions.onInstall} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function SmallTile({ row, ...actions }: { row: PluginListRow } & Actions) {
-  return (
-    <div className={cn(TILE, "flex flex-col justify-between border border-border bg-card p-4 transition-colors hover:border-foreground/30")}>
-      <Open row={row} onOpenPlugin={actions.onOpenPlugin} />
-      <div className="pointer-events-none relative flex items-start justify-between">
-        <span>
-          {row.entry !== null ? (
-            <CatalogEntryIconChip entry={row.entry} className="size-9" iconClassName="size-4.5" />
-          ) : row.plugin !== null ? (
-            <PluginLogoChip plugin={row.plugin} className="size-9" iconClassName="size-4.5" />
-          ) : null}
-        </span>
-        <div data-row-action className="pointer-events-auto">
-          <Control row={row} onInstall={actions.onInstall} />
-        </div>
-      </div>
-      <div className="pointer-events-none relative">
-        <p className="text-sm font-semibold text-foreground">{row.title}</p>
-        <p className="mt-0.5 line-clamp-2 text-xs leading-snug text-muted-foreground">{row.description}</p>
-      </div>
-    </div>
-  );
-}
-
-/** Jumps to that category in the list below. */
-function showCategory(label: string) {
-  const sections = document.querySelectorAll<HTMLElement>('[data-testid="plugin-list"] section');
-  [...sections].find((section) => section.getAttribute("aria-label") === label)?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-/** The featured bento and the categories, above the full list. Null until every featured plugin is known, so the page
- *  never shows a bento with holes (an unreachable catalog, an app older than a featured plugin). */
-export function PluginsFeatured({ rows, groups, onInstall, onOpenPlugin }: { rows: readonly PluginListRow[]; groups: readonly PluginListGroup[] } & Actions) {
-  const find = (id: string) => rows.find((row) => row.pluginId === id);
-  const [hero, wide, fresh, small, agent] = [find(HERO.id), find(WIDE.id), find(FRESH.id), find(SMALL), find(AGENT.id)];
-  if (!hero || !(agent || wide) || !fresh || !small) return null;
-  const actions = { onInstall, onOpenPlugin };
-  const installs = hero.entry?.installs ?? 0;
-  return (
-    <div className="@container space-y-6 pb-3">
-      <section aria-label="Featured plugins" className="grid auto-rows-[12rem] grid-cols-2 gap-2.5 @3xl:grid-cols-4">
-        <ArtTile row={hero} spec={HERO} big className="col-span-2 row-span-2" eyebrow={installs ? `Featured · ${count(installs)} installs` : "Featured"} {...actions} />
-        {agent ? (
-          <AgentTile row={agent} className="col-span-2" {...actions} />
-        ) : wide ? (
-          <ArtTile row={wide} spec={WIDE} className="col-span-2" eyebrow="Make it yours" {...actions} />
+    <section aria-label="Made by Cloudroom" className="@container">
+      <div className="flex items-center justify-between px-1 pb-2">
+        <h2 className="text-sm font-medium text-foreground">
+          Made by Cloudroom
+        </h2>
+        {official > ours.length ? (
+          <button
+            type="button"
+            onClick={onSeeAll}
+            className="flex items-center gap-0.5 rounded-sm text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            See all {official}
+            <Icon name="ChevronRight" className="size-3.5" aria-hidden />
+          </button>
         ) : null}
-        <FreshTile row={fresh} {...actions} />
-        <SmallTile row={small} {...actions} />
-      </section>
-      <section aria-label="Browse by category">
-        <h2 className="px-1 pb-2 text-sm font-medium text-foreground">Browse by category</h2>
-        <div className="grid grid-cols-2 gap-2.5 @3xl:grid-cols-4">
-          {groups.map((group) => (
+      </div>
+      <div className="grid grid-cols-2 gap-2.5 @3xl:grid-cols-4">
+        {ours.map(({ row, text, glyph, inks, number }) => (
+          <div
+            key={row.key}
+            data-testid={`plugin-card-${row.pluginId}`}
+            className="group relative h-[7.25rem] overflow-hidden rounded-xl p-3.5 text-[#1b1a17] transition-[filter] hover:brightness-105"
+            style={{ background: PAPER }}
+          >
+            <Print glyph={glyph} inks={inks} number={number} />
             <button
-              key={group.key}
               type="button"
-              onClick={() => showCategory(group.label)}
-              className="flex items-center gap-3 rounded-lg border border-border bg-card px-3.5 py-3 text-left transition-colors hover:border-foreground/30 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
-              <span className="flex size-8 shrink-0 items-center justify-center rounded-md border border-border text-muted-foreground">
-                <Icon name={CATEGORY_ICONS[group.key] ?? "Puzzle"} className="size-4" aria-hidden />
-              </span>
-              <span className="min-w-0">
-                <span className="block truncate text-sm font-medium text-foreground">{group.label}</span>
-                <span className="block text-xs text-subtle-foreground">{group.rows.length} {group.rows.length === 1 ? "plugin" : "plugins"}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      </section>
-    </div>
+              aria-label={`Open ${row.title} details`}
+              onClick={(event) =>
+                onOpenPlugin(row.pluginId, event.currentTarget)
+              }
+              className="absolute inset-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            />
+            <div className="pointer-events-none relative flex h-full flex-col justify-between">
+              <div>
+                <p className="truncate text-sm font-bold">{row.title}</p>
+                <p className="mt-0.5 line-clamp-2 max-w-[56%] text-xs leading-snug opacity-70">
+                  {text}
+                </p>
+              </div>
+              <div data-row-action className="pointer-events-auto w-fit">
+                <Control row={row} onInstall={onInstall} />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
   );
 }

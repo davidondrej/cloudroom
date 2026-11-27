@@ -274,7 +274,7 @@ export function registerImportCommands(program: Command, getUrl: () => string): 
 
 /** Agents send Cloudroom feedback straight to David (ADR 0158). `report` is the old hidden name. Prints {"sent":false} while it is off in Settings. */
 export function registerFeedbackCommand(program: Command, getUrl: () => string, name: "feedback" | "report"): void {
-  program.command(`${name} <message>`, { hidden: name === "report" }).description("Send David, Cloudroom's founder, a bug, friction, or idea: what happened and the exact error. No secrets or code.")
+  program.command(`${name} <message>`, { hidden: name === "report" }).description("Send David, Cloudroom's founder, a bug, friction, or idea: what happened and the exact error, up to 4,000 characters. No secrets or code.")
     .action(action(async (message: string) => {
       console.log(JSON.stringify(await createCliRoomSdk(getUrl()).cloudroom.reportBug({ message, threadId: resolveContextThreadId() })));
     }));
@@ -319,14 +319,14 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     }));
   }
   const github = group.command("github").description("Connect GitHub for cloud sandboxes");
-  // With --repos, the code's page comes first, then GitHub's page for picking repos, with no code.
+  // The code's page comes first, then GitHub's page for picking repos, with no code.
   const githubNext = (result: { verification_url: string | null; user_code: string | null }) => `Open ${result.verification_url}\n${result.user_code ? `Enter code: ${result.user_code}` : "Pick your repos there."}`;
   github.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {
     const result = await createCliRoomSdk(getUrl()).cloudroom.githubAuth();
     if (!outputJson(options, result)) console.log(`${result.state}${result.state === "waiting" ? `\n${githubNext(result)}` : ""}${result.message ? `\n${result.message}` : ""}`);
   }));
-  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--repos", "Give Cloud only the repos you then pick on GitHub").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string; repos?: boolean }) => {
-    const result = await createCliRoomSdk(getUrl()).cloudroom.githubLogin(options.requestId, options.repos);
+  github.command("login").requiredOption("--request-id <id>", "Reuse this ID after an uncertain response").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions & { requestId: string }) => {
+    const result = await createCliRoomSdk(getUrl()).cloudroom.githubLogin(options.requestId);
     if (!outputJson(options, result)) console.log(result.state === "waiting" ? `${githubNext(result)}\nRun room-cli cloud github status to verify.` : result.message ?? result.state);
   }));
   github.command("cancel <request-id>").option("--json", "Print JSON").action(action(async (id: string, options: JsonOutputOptions) => {

@@ -29,7 +29,18 @@ vi.mock("node:child_process", async (importOriginal) => ({
   execFile: execFileMock,
 }));
 
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { SdkSession, type SdkSessionOptions } from "../sdk-session.js";
+import { readProjectInstructions } from "../session-options.js";
 
 const defaultOptions: SdkSessionOptions = {
   cwd: "/tmp/test",
@@ -319,21 +330,153 @@ describe("SdkSession", () => {
     expect(queryMock.mock.calls[0]?.[0]?.options).not.toHaveProperty("skills");
   });
 
-  it("mirrors the Claude CLI settings cascade so user, project, and local settings all load", () => {
-    const onMessage = vi.fn();
-    const onDone = vi.fn();
-    const session = new SdkSession(defaultOptions, onMessage, onDone);
+  it("loads the folder's own settings only when allowed, else passes its instructions as text", () => {
+    const cwd = mkdtempSync(join(tmpdir(), "bb-claude-project-"));
+    writeFileSync(join(cwd, "AGENTS.md"), "Use tabs.");
+    try {
+      new SdkSession({ ...defaultOptions, cwd }, vi.fn(), vi.fn()).start();
+      const userOnly = queryMock.mock.calls.at(-1)?.[0]?.options;
+      expect(userOnly?.settingSources).toEqual(["user"]);
+      expect(userOnly?.systemPrompt).toContain(
+        `Contents of ${join(cwd, "AGENTS.md")} (project instructions, checked into the codebase):\n\nUse tabs.`,
+      );
 
-    session.start();
-
-    expect(queryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          settingSources: ["user", "project", "local"],
-        }),
-      }),
-    );
+      new SdkSession(
+        { ...defaultOptions, cwd, projectSettings: true },
+        vi.fn(),
+        vi.fn(),
+      ).start();
+      const all = queryMock.mock.calls.at(-1)?.[0]?.options;
+      expect(all?.settingSources).toEqual(["user", "project", "local"]);
+      expect(all?.systemPrompt).toBe(defaultOptions.systemPrompt);
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses instruction symlinks escaping their folder and Cloudroom private data files",
+    () => {
+      const root = mkdtempSync(join(tmpdir(), "bb-claude-symlink-"));
+      try {
+        const dataDir = join(root, "data");
+        const outside = join(root, "outside");
+        const snapshotsDir = join(dataDir, "plugins", "snapshots");
+        const worktree = join(
+          dataDir,
+          "plugins",
+          "environment-git-worktree",
+          "worktrees",
+          "thr_1",
+          "repo",
+        );
+        mkdirSync(join(worktree, ".claude"), { recursive: true });
+        mkdirSync(snapshotsDir, { recursive: true });
+        mkdirSync(outside, { recursive: true });
+
+        const cloudroomToken = "SECRET_CLOUDROOM_ACCOUNT_TOKEN";
+        const hostKey = "SECRET_HOST_MACHINE_KEY";
+        const relaySecret = "SECRET_CONNECT_RELAY_CREDENTIAL";
+        const sshKey = "SECRET_SSH_PRIVATE_KEY";
+        const dirLinkSecret = "SECRET_VIA_CLAUDE_DIR_SYMLINK";
+
+        writeFileSync(join(dataDir, "cloudroom.json"), cloudroomToken);
+        writeFileSync(join(dataDir, "auth.json"), hostKey);
+        writeFileSync(join(snapshotsDir, "connect.json"), relaySecret);
+        writeFileSync(join(outside, "id_rsa"), sshKey);
+        writeFileSync(join(outside, "CLAUDE.md"), dirLinkSecret);
+
+        // 1. Managed worktree escaping via relative symlink to Cloudroom credentials,
+        //    direct symlink to an outside host file, and local symlink to auth.json.
+        symlinkSync("../../../../../cloudroom.json", join(worktree, "CLAUDE.md"));
+        symlinkSync(
+          join(outside, "id_rsa"),
+          join(worktree, ".claude", "CLAUDE.md"),
+        );
+        symlinkSync(join(dataDir, "auth.json"), join(worktree, "CLAUDE.local.md"));
+        writeFileSync(join(worktree, "AGENTS.md"), "Safe repo instructions.");
+
+        new SdkSession(
+          {
+            ...defaultOptions,
+            cwd: worktree,
+            env: { ROOM_DATA_DIR: dataDir, HOME: root },
+          },
+          vi.fn(),
+          vi.fn(),
+        ).start();
+        const prompt = String(
+          queryMock.mock.calls.at(-1)?.[0]?.options?.systemPrompt,
+        );
+        expect(prompt).not.toContain(cloudroomToken);
+        expect(prompt).not.toContain(hostKey);
+        expect(prompt).not.toContain(sshKey);
+        expect(prompt).toContain("Safe repo instructions.");
+
+        // 2. Symlinked .claude directory pointing outside the repo.
+        const dirLinkRepo = join(root, "dir-link-repo");
+        mkdirSync(dirLinkRepo, { recursive: true });
+        symlinkSync(outside, join(dirLinkRepo, ".claude"), "dir");
+        expect(
+          readProjectInstructions(dirLinkRepo, {
+            ROOM_DATA_DIR: dataDir,
+            HOME: root,
+          }),
+        ).not.toContain(dirLinkSecret);
+
+        // 3. Hard link to a #2191 private file, or symlink inside a folder rooted above ROOM_DATA_DIR.
+        const hardLinkRepo = join(root, "hard-link-repo");
+        mkdirSync(hardLinkRepo, { recursive: true });
+        linkSync(
+          join(dataDir, "auth.json"),
+          join(hardLinkRepo, "CLAUDE.local.md"),
+        );
+        expect(
+          readProjectInstructions(hardLinkRepo, {
+            ROOM_DATA_DIR: dataDir,
+            HOME: root,
+          }),
+        ).not.toContain(hostKey);
+
+        rmSync(join(hardLinkRepo, "CLAUDE.local.md"));
+        linkSync(
+          join(snapshotsDir, "connect.json"),
+          join(hardLinkRepo, "CLAUDE.local.md"),
+        );
+        expect(
+          readProjectInstructions(hardLinkRepo, {
+            ROOM_DATA_DIR: dataDir,
+            HOME: root,
+          }),
+        ).not.toContain(relaySecret);
+
+        symlinkSync(
+          join(snapshotsDir, "connect.json"),
+          join(root, "CLAUDE.local.md"),
+        );
+        expect(
+          readProjectInstructions(root, { ROOM_DATA_DIR: dataDir, HOME: root }),
+        ).not.toContain(relaySecret);
+        rmSync(join(root, "CLAUDE.local.md"));
+
+        // 4. Legitimate intra-folder symlinks and symlinked workspace roots still work.
+        const realRepo = join(root, "real-repo");
+        const linkedWorkspace = join(root, "linked-workspace");
+        mkdirSync(join(realRepo, "docs"), { recursive: true });
+        writeFileSync(join(realRepo, "docs", "AI.md"), "Follow style guide.");
+        symlinkSync("docs/AI.md", join(realRepo, "CLAUDE.md"));
+        symlinkSync(realRepo, linkedWorkspace, "dir");
+        expect(
+          readProjectInstructions(linkedWorkspace, {
+            ROOM_DATA_DIR: dataDir,
+            HOME: root,
+          }),
+        ).toContain("Follow style guide.");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it("forwards max reasoning effort and thinking display to the SDK when configured", () => {
     const onMessage = vi.fn();

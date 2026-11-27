@@ -114,6 +114,26 @@ def windows_job_env(command, base=None):
     return env
 
 
+def bash_tmp(path):
+    """Windows (#2667): a push to /tmp/... as Git Bash itself resolves it, `..` and mounts included, so it lands where
+    `mac run` reads it, not in C:/tmp: C:/Users/me/AppData/Local/Temp/x, or //server/share/x for a network temp folder.
+    None for other paths, such as \\tmp\\x, and when Git Bash can't tell, so the push goes where it went before."""
+    bash = WINDOWS and (path == '/tmp' or path.startswith('/tmp/')) and git_bash()
+    with contextlib.suppress(OSError, subprocess.SubprocessError, UnicodeError, ValueError):
+        # The path travels in the environment, as job commands do, so Windows' command line rules never touch it. UTF-8
+        # whatever the user's locale: `cygpath -C UTF8` under a Latin-1 one encodes it twice.
+        done = bash and subprocess.run([bash, '-c', '/usr/bin/cygpath -m -- "$CLOUDROOM_COMMAND"'], capture_output=True, timeout=10,
+                                       env={**windows_job_env(path), 'LC_ALL': 'C.UTF-8'}, creationflags=NO_WINDOW)
+        # Only a clean answer: exit 0, one line. A long path comes as //?/C:/... or //?/UNC/server/...; drop that prefix.
+        lines = done.stdout.decode().replace('\\', '/').splitlines() if done and done.returncode == 0 else []
+        out = lines[0] if len(lines) == 1 else ''
+        out = '/' + out[7:] if out.startswith('//?/UNC/') else out[4:] if out.startswith('//?/') else out
+        # Cygwin writes names Windows can't store (a:b, a?b, a tab) as U+F000-U+F0FF; refused, so the push refuses as before.
+        if out and not any('\uf000' <= c <= '\uf0ff' for c in out) and ((out[1:3] == ':/' and out[0].isascii() and out[0].isalpha()) or (out[:2] == '//' and out[2:3] not in ('', '/', '?'))):
+            return out + ('/' if path.endswith('/') and not out.endswith('/') else '')
+    return None
+
+
 def windows_start(command, **options):
     """Windows (#958): starts a Mac job in its own job object, which holds every process it starts. taskkill /T misses
     Git Bash's children, which leave the Windows parent tree. It starts suspended and runs only once assigned, so nothing
@@ -1284,7 +1304,7 @@ END { exit bad }
 """
 
 
-def copy_command(copy, token=None):
+def copy_command(copy, token=None, tmp=True):
     """The command for a `room-cli mac push` (#222), built here from the job's names, never from the sandbox's command.
     Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
 
@@ -1298,6 +1318,9 @@ def copy_command(copy, token=None):
     Windows (#958): a stop ends the job without running its traps, so the unpack folder is named after `token` and the
     helper removes it itself (as_copy, execute). Names Windows can't store are refused, in the place and in the archive."""
     name, to, staged = copy['name'], copy['to'], copy.get('staged')
+    if tmp and (mapped := isinstance(to, str) and bash_tmp(to)):  # Windows: /tmp as Git Bash's (#2667); if refused, as before.
+        with contextlib.suppress(ValueError):
+            return copy_command({**copy, 'to': mapped}, token, False)
     to = native(to) if isinstance(to, str) else to  # Windows: C:\x and /c/x as C:/x (#958).
     if not (isinstance(name, str) and isinstance(to, str) and 0 < len(to) <= 4096 and name not in ('', '.', '..')
             and '/' not in name and '\0' not in name + to and len(name.encode()) <= 255 and (not WINDOWS or windows_name(name))):

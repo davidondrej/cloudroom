@@ -107,6 +107,7 @@ export function TopLevelSidebarSection({
     collapseControl?.isCollapsed === true,
   );
   const pluginStatus = usePluginThreadRowStatusForThreads(collapsedThreads);
+  const isDraggable = dragBindings !== undefined && !dragBindings.disabled;
   const showCollapsedActivity =
     !status &&
     collapseControl?.isCollapsed === true &&
@@ -197,12 +198,24 @@ export function TopLevelSidebarSection({
           SIDEBAR_GROUP_TEXT_CLASS,
           SIDEBAR_STANDARD_ROW_PADDING_CLASS,
           "rounded-md pr-0 transition-colors",
-          dragBindings && !dragBindings.disabled && "select-none",
+          isDraggable && "select-none pointer-fine:cursor-grab",
         )}
         {...dragBindings?.attributes}
         {...(dragBindings?.listeners ?? {})}
       >
         <span className="relative z-10 flex min-w-0 flex-1 items-center gap-1 text-left">
+          {isDraggable ? (
+            <span
+              aria-hidden="true"
+              data-sidebar-drag-grip=""
+              className={cn(
+                SIDEBAR_HOVER_ACTIONS_CLASS,
+                "absolute right-full top-1/2 mr-0.5 inline-flex -translate-y-1/2 text-subtle-foreground pointer-coarse:hidden",
+              )}
+            >
+              <Icon name="DragDropVertical" className="size-3" />
+            </span>
+          ) : null}
           <span className="min-w-0 truncate" title={label}>
             {label}
           </span>

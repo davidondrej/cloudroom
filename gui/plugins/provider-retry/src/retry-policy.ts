@@ -19,6 +19,12 @@ export const RESET_BUFFER_MS = 15_000;
  */
 export const RESET_JITTER_MS = 30_000;
 
+/**
+ * How long a reset can have passed while still being worth a retry: a provider
+ * a little late to reset, or a fast Mac clock, heals within it (#2678).
+ */
+export const RESET_GRACE_MS = 2 * 60 * 1_000;
+
 export const DEFAULT_MAXIMUM_WAIT_MS = 6 * 60 * 60 * 1_000;
 
 export const OVERLOAD_RETRY_BASE_MS = 5_000;
@@ -41,6 +47,7 @@ export type RetryDeclineReason =
   | "not-retryable"
   | "no-rate-limit-state"
   | "not-resettable"
+  | "reset-passed"
   | "beyond-maximum-wait"
   | "attempts-exhausted";
 
@@ -155,6 +162,11 @@ export function decideRetry(input: RetryPolicyInput): RetryDecision {
   // fix them, paying does — so only a subscription window earns a timer.
   if (rateLimits.kind !== "subscription-window" || resetsAtMs === null) {
     return { kind: "decline", reason: "not-resettable" };
+  }
+  // Still blocked long after the reset it reports: the provider is repeating a
+  // stale time, so retrying hits the same limit again (#2678).
+  if (resetsAtMs <= input.now - RESET_GRACE_MS) {
+    return { kind: "decline", reason: "reset-passed" };
   }
   if (
     input.maximumWaitMs !== null &&

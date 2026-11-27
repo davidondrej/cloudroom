@@ -358,6 +358,38 @@ export function retireAccountMacs(db: D1Database, userId: string): Promise<strin
   return retire(db, "user_id = ? AND owner_server_id IS NULL AND kind IS NULL", userId);
 }
 
+/** Retires every server key on the account (Macs, remote hosts, and VPS) during account deletion. */
+export async function retireAccountServers(db: D1Database, userId: string): Promise<string[]> {
+  const { results: before } = await db
+    .prepare("SELECT handle, credential_hash FROM server WHERE user_id = ?")
+    .bind(userId)
+    .all<{ handle: string; credential_hash: string }>();
+  const handles = await retire(db, "user_id = ?", userId);
+  for (const row of before) {
+    drop(servers, row.handle);
+    drop(credentials, row.credential_hash);
+  }
+  return handles;
+}
+
+/** Deletes every relay row for a deleted account (servers, remote hosts, VPS, sessions, and codes). Safe to repeat. */
+export async function deleteAccountServers(db: D1Database, userId: string): Promise<void> {
+  const { results } = await db
+    .prepare("SELECT handle, credential_hash FROM server WHERE user_id = ?")
+    .bind(userId)
+    .all<{ handle: string; credential_hash: string }>();
+  await db.batch([
+    db.prepare("DELETE FROM code WHERE user_id = ?").bind(userId),
+    db.prepare("DELETE FROM session WHERE user_id = ?").bind(userId),
+    db.prepare("DELETE FROM server WHERE user_id = ? AND owner_server_id IS NOT NULL").bind(userId),
+    db.prepare("DELETE FROM server WHERE user_id = ?").bind(userId),
+  ]);
+  for (const row of results) {
+    drop(servers, row.handle);
+    drop(credentials, row.credential_hash);
+  }
+}
+
 /** Null when this install is new and the account already has `MACS_PER_ACCOUNT` Macs. A known install always registers. */
 export async function registerServer(
   db: D1Database,

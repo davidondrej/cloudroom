@@ -39,6 +39,7 @@ import {
 } from "./plugin-sdk-hooks";
 import {
   useSidebarThreadActions,
+  useSidebarThreadIds,
   useSidebarThreadPullRequest,
   useSidebarThreads,
 } from "./plugin-sidebar-hooks";
@@ -75,6 +76,7 @@ export const pluginSdkAppImplementation = installDeprecatedAliases(
     experimental_SourceCode: PluginSourceCode,
     experimental_Diff: PluginDiff,
     experimental_useSidebarThreads: useSidebarThreads,
+    experimental_useSidebarThreadIds: useSidebarThreadIds,
     experimental_useSidebarThreadActions: useSidebarThreadActions,
     experimental_useSidebarThreadPullRequest: useSidebarThreadPullRequest,
     experimental_useSidebarThreadSplit: useSidebarThreadSplit,

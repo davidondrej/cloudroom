@@ -252,7 +252,7 @@ describe("plugin app runtime shim", () => {
     const css = await readFile(result.cssPath, "utf8");
 
     const scope =
-      ":where([data-bb-plugin=css-fixture],[data-bb-plugin-root]:not([data-bb-plugin]))";
+      ":where([data-room-plugin=css-fixture],[data-room-plugin-root]:not([data-room-plugin]),[data-bb-plugin=css-fixture],[data-bb-plugin-root]:not([data-bb-plugin]))";
     expect(css).toContain(`${scope} .flex-col`);
     expect(css).toContain(`${scope}.flex-col`);
     const sibling = String.raw`.\[\&\~\*\]\:hidden`;

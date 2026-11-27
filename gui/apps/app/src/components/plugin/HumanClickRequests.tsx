@@ -1,6 +1,7 @@
-// An agent or room-cli asked to install or update a plugin. Only a click here
-// runs it (ADR 0260): the server holds the request until a person answers,
-// and it says what the request would do. This only prints that.
+// An agent or room-cli asked to install or update a plugin, or to install a
+// skill from skills.sh. Only a click here runs it (ADR 0260): the server holds
+// the request until a person answers, and it says what the request would do.
+// This only prints that.
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -19,6 +20,7 @@ import { FullTrustWarning } from "./management/plugin-ui";
 
 interface ClickRequest {
   id: string;
+  action: string;
   title: string;
   verb: "Install" | "Update";
   rows: { label: string; value: string }[];
@@ -28,6 +30,9 @@ interface ClickRequest {
 
 // A dialog that appears under the pointer mid-click must not take that click as a yes.
 const ARM_DELAY_MS = 500;
+
+const isSkill = (request: ClickRequest): boolean =>
+  request.action === "skill-registry-install";
 
 const text = (value: unknown): string | null =>
   typeof value === "string" && value.length > 0 ? value : null;
@@ -75,13 +80,14 @@ export function HumanClickRequests() {
       if (!args.approve) return;
       const result = answered.response;
       const done = answered.verb === "Update" ? "updated" : "installed";
+      const noun = isSkill(answered) ? "Skill" : "Plugin";
       if (result !== null && result.status < 400) {
-        appToast.success(`Plugin ${done}`);
-        void invalidatePluginList({ queryClient });
+        appToast.success(`${noun} ${done}`);
+        if (!isSkill(answered)) void invalidatePluginList({ queryClient });
         return;
       }
       const failure = record(result?.body);
-      appToast.error(`Plugin was not ${done}`, {
+      appToast.error(`${noun} was not ${done}`, {
         description:
           text(failure.error) ?? text(failure.message) ?? "Unknown error",
       });
@@ -136,7 +142,14 @@ export function HumanClickRequests() {
             </div>
           ))}
         </dl>
-        <FullTrustWarning />
+        {isSkill(shown) ? (
+          <p className="text-2xs leading-snug text-subtle-foreground">
+            Agents follow a skill's instructions in any thread. Only install
+            from sources you trust.
+          </p>
+        ) : (
+          <FullTrustWarning />
+        )}
         <DialogFooter>
           <Button
             variant="outline"

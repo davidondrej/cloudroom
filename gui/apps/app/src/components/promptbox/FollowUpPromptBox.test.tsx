@@ -388,7 +388,7 @@ describe("FollowUpPromptBox", () => {
 
     const pluginHeaderRoot = screen
       .getByTestId("plugin-header")
-      .closest("[data-bb-plugin-root]");
+      .closest("[data-room-plugin-root]");
     const queuedMessages = screen.getByTestId("queued-messages");
     expect(queuedMessages.previousElementSibling).toBe(pluginHeaderRoot);
   });

@@ -2544,8 +2544,11 @@ is temporarily unavailable renders BB's renderer without erasing the pin.
 the actions that mutate it. The read hook wraps the host's own
 `useSidebarNavigation` query — the same cache and realtime subscriptions the
 built-in sidebar uses — so a plugin list costs no extra request and updates on
-exactly the same events. The action hook routes to the host's own mutations, so
-optimistic updates, toasts, and cache invalidation are identical.
+exactly the same events. It also observes the hosts query for host names, so a
+mount after that cache went stale reads hosts again; a plugin that needs only
+IDs uses `experimental_useSidebarThreadIds`, a cache-only read (#1136). The
+action hook routes to the host's own mutations, so optimistic updates, toasts,
+and cache invalidation are identical.
 
 `PluginSidebarThread` is a deliberate copy of the fields a sidebar needs, not a
 re-export of the internal `ThreadListEntry`. `indicator` is
@@ -3174,3 +3177,15 @@ First consumer: the Computer Use plugin (`computer_use_*` events).
 Stabilization requires deciding whether third-party plugins may ever send events,
 and whether a per-plugin event schema should be declared in the manifest.
 
+## `BbNavigate.experimental_openAddProject`
+
+`experimental_openAddProject()` opens the app's Add project flow, the same one
+as the sidebar's New project. It returns false when no machine can add a
+project. The frontend harness records the call and returns false.
+
+First consumer: the Loops plugin's Templates picker when the account has no
+project besides Personal (#997).
+
+Stabilization requires deciding whether plugins should learn the new project's
+id, and whether the flow should leave the plugin page for the new project's
+compose screen as it does today.

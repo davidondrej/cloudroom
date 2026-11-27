@@ -88,7 +88,7 @@ function expectBridgeSpawn(
     expect(workerArgs.at(-1)).toMatch(/bridge-worker-entry\.ts$/u);
   } else {
     expect(workerArgs).toEqual([
-      `${expected.bundleDir}/bb-provider-bridge-worker.mjs`,
+      `${expected.bundleDir}/room-provider-bridge-worker.mjs`,
     ]);
   }
 }

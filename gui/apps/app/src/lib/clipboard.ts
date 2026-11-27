@@ -5,6 +5,7 @@ interface CopyToClipboardOptions {
   successMessage?: string | null;
   errorMessage?: string | null;
   imageUrl?: string;
+  html?: string;
   chatMessage?: boolean;
 }
 
@@ -52,7 +53,7 @@ async function fetchClipboardImage(imageUrl: string): Promise<Blob> {
   return convertImageBlobToPng(await response.blob());
 }
 
-function copyWithEditingCommand(text: string): boolean {
+function copyWithEditingCommand(text: string, html?: string): boolean {
   if (
     typeof document === "undefined" ||
     document.body === null ||
@@ -72,7 +73,7 @@ function copyWithEditingCommand(text: string): boolean {
       )
     : [];
   const textarea = document.createElement("textarea");
-  textarea.value = text;
+  textarea.value = html !== undefined && text.length === 0 ? " " : text;
   textarea.readOnly = true;
   textarea.setAttribute("aria-hidden", "true");
   Object.assign(textarea.style, {
@@ -89,14 +90,31 @@ function copyWithEditingCommand(text: string): boolean {
   document.body.append(textarea);
 
   let copied = false;
+  let richCopied = false;
+  const onCopy =
+    html === undefined
+      ? null
+      : (event: ClipboardEvent) => {
+          if (!event.clipboardData) return;
+          event.clipboardData.setData("text/plain", text);
+          event.clipboardData.setData("text/html", html);
+          event.preventDefault();
+          richCopied = true;
+        };
+  if (onCopy) {
+    document.addEventListener("copy", onCopy, { once: true });
+  }
   try {
     textarea.focus({ preventScroll: true });
     textarea.select();
     textarea.setSelectionRange(0, textarea.value.length);
-    copied = document.execCommand("copy");
+    copied = document.execCommand("copy") && (onCopy === null || richCopied);
   } catch {
     copied = false;
   } finally {
+    if (onCopy) {
+      document.removeEventListener("copy", onCopy);
+    }
     textarea.remove();
     if (activeElement?.isConnected) {
       activeElement.focus({ preventScroll: true });
@@ -122,6 +140,31 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
     } catch {}
   }
   return copyWithEditingCommand(text);
+}
+
+async function copyTextAndHtmlToClipboard(
+  text: string,
+  html: string,
+): Promise<boolean> {
+  if (
+    typeof navigator !== "undefined" &&
+    typeof navigator.clipboard?.write === "function" &&
+    typeof ClipboardItem !== "undefined"
+  ) {
+    try {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/plain": new Blob([text], { type: "text/plain" }),
+          "text/html": new Blob([html], { type: "text/html" }),
+        }),
+      ]);
+      return true;
+    } catch {}
+  }
+  if (copyWithEditingCommand(text, html)) {
+    return true;
+  }
+  return copyTextToClipboard(text);
 }
 
 async function copyTextAndImageToClipboard(
@@ -158,12 +201,15 @@ export async function copyToClipboardWithToast(
     successMessage = "Copied",
     errorMessage = "Failed to copy",
     imageUrl,
+    html,
     chatMessage,
   }: CopyToClipboardOptions = {},
 ): Promise<boolean> {
   const copied = imageUrl
     ? await copyTextAndImageToClipboard(text, imageUrl)
-    : await copyTextToClipboard(text);
+    : html !== undefined
+      ? await copyTextAndHtmlToClipboard(text, html)
+      : await copyTextToClipboard(text);
   if (copied) {
     if (chatMessage) document.dispatchEvent(new CustomEvent("cloudroom:chat-copied", { detail: text }));
     if (successMessage) appToast.success(successMessage);
@@ -184,6 +230,7 @@ export function useClipboardCopy({
   successMessage = null,
   errorMessage = "Failed to copy",
   imageUrl,
+  html,
   chatMessage,
   resetMs = 2000,
 }: ClipboardCopyOptions) {
@@ -196,15 +243,16 @@ export function useClipboardCopy({
   }, [copied, resetMs]);
 
   const copy = useCallback(async (event?: { currentTarget: EventTarget | null }) => {
-    if ((!text && !imageUrl) || copied) return;
+    if ((!text && !imageUrl && !html) || copied) return;
     const success = await copyToClipboardWithToast(text, {
       successMessage,
       errorMessage,
       imageUrl,
+      html,
       chatMessage: chatMessage || (event?.currentTarget instanceof Element && !!event.currentTarget.closest("[data-timeline-row-id]")),
     });
     if (success) setCopied(true);
-  }, [text, imageUrl, copied, successMessage, errorMessage, chatMessage]);
+  }, [text, imageUrl, html, copied, successMessage, errorMessage, chatMessage]);
 
   return { copied, copy };
 }

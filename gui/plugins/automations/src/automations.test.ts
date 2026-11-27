@@ -17,6 +17,7 @@ import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import {
   claimAutomationScheduledRun,
   closeAutomationRun,
+  closeRunForSignIn,
   createAutomation,
   createManualRun,
   decodeAutomationRow,
@@ -27,10 +28,14 @@ import {
   listAutomationRuns,
   migrations,
   addReviewThread,
+  markAutomationThread,
+  releaseSignInHolds,
   setAutomationEnabled,
   setAutomationRunThread,
+  retryPausedAutomations,
   AUTOMATION_RETRY_DELAYS_MS,
   REFUSED,
+  UNAVAILABLE,
   type Db,
 } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
@@ -55,7 +60,9 @@ import { RECOVERY_WAIT_MS, sweepDueAutomations } from "./sweep.js";
 import type { FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
 import { buildReview } from "./review.js";
+import { forgetCloud, loopThreads, pausedCloud } from "./paused.js";
 import { registerAutomationCli } from "./cli.js";
+import { createRpcHandlers } from "./rpc.js";
 import { automationScriptDir } from "./script-files.js";
 
 function createTestDb(): Db {
@@ -781,6 +788,68 @@ describe("automation data access", () => {
     }
   });
 
+  it("stays on when the script's room-cli got no answer from Cloudroom, retrying as a pause would (#2656)", async () => {
+    const pluginDataDir = await mkdtemp(join(tmpdir(), "bb-auto-unavailable-"));
+    const scriptDir = automationScriptDir(pluginDataDir, "auto_down");
+    await mkdir(scriptDir, { recursive: true });
+    await writeFile(join(scriptDir, "script.sh"), ': > "$ROOM_LOOP_UNAVAILABLE_FILE"\nexit 1\n');
+    const db = createTestDb();
+    const automation = createScheduledAutomation(db, 1000);
+    let expectedNextRunAt = 1000;
+    try {
+      for (let failure = 1; failure <= 3; failure += 1) {
+        const claim = claimAutomationScheduledRun(db, {
+          automationId: automation.id,
+          expectedNextRunAt,
+          newNextRunAt: expectedNextRunAt + 60_000,
+          now: expectedNextRunAt,
+        });
+        if (!claim.advanced) throw new Error(`claim ${failure} failed`);
+        const result = await executeStoredScript({
+          pluginDataDir,
+          automationId: "auto_down",
+          runId: claim.run.id,
+          projectId: "proj_test",
+          scriptFile: "script.sh",
+          interpreter: "bash",
+          timeoutMs: 5_000,
+          serverUrl: "http://127.0.0.1:38886",
+        });
+        const { error } = mapScriptResultToRun(result);
+        expect(error).toBe(`${UNAVAILABLE}Script exited with code 1`);
+        closeAutomationRun(db, { runId: claim.run.id, status: "failed", error, now: expectedNextRunAt + 1 });
+        const current = getAutomation(db, automation.id)!;
+        expect(current.enabled).toBe(true);
+        expect(current.consecutiveFailures).toBe(failure);
+        expect(current.nextRunAt).toBe(
+          expectedNextRunAt + 1 + (failure < 3 ? AUTOMATION_RETRY_DELAYS_MS[failure - 1]! : 60 * 60_000),
+        );
+        expectedNextRunAt = current.nextRunAt!;
+      }
+      // A second held loop, then a sweep long past both retries: like main's paused retries, both are due now, so
+      // the overdue spacing holds neither back.
+      const other = createScheduledAutomation(db, 1000, "auto_down2");
+      for (let now = 1; now <= 3; now += 1) {
+        const { run } = createManualRun(db, { automationId: other.id, runMode: "script", now });
+        closeAutomationRun(db, { runId: run.id, status: "failed", error: `${UNAVAILABLE}Script exited with code 1`, now });
+      }
+      const late = expectedNextRunAt + 10 * 60_000;
+      retryPausedAutomations(db, late);
+      for (const id of [automation.id, other.id])
+        expect(getAutomation(db, id)).toMatchObject({ enabled: true, nextRunAt: late, lastError: null });
+      // A webhook loop pauses as on main: its retries would replay the same batch.
+      const hook = createScheduledAutomation(db, 1000, "auto_hook");
+      db.prepare("UPDATE automations SET trigger_type = 'webhook' WHERE id = ?").run(hook.id);
+      for (let now = 1; now <= 3; now += 1) {
+        const { run } = createManualRun(db, { automationId: hook.id, runMode: "script", trigger: "webhook", now });
+        closeAutomationRun(db, { runId: run.id, status: "failed", error: `${UNAVAILABLE}Script exited with code 1`, now });
+      }
+      expect(getAutomation(db, hook.id)).toMatchObject({ enabled: false, consecutiveFailures: 3, nextRunAt: 3 + 60 * 60_000 });
+    } finally {
+      await rm(pluginDataDir, { recursive: true, force: true });
+    }
+  });
+
   it("enforces one running execution per automation", () => {
     const db = createTestDb();
     const automation = createScheduledAutomation(db, 1000);
@@ -926,6 +995,51 @@ describe("automation data access", () => {
     expect(restored?.runCount).toBe(1);
     expect(restored?.consecutiveFailures).toBe(1);
     expect(restored?.lastRunStatus).toBe("failed");
+
+    // A failed login of a repeating loop's own agent holds it, uncounted, until a turn of that agent works; it goes on
+    // from its next slot. A one-time loop's run, or one on another agent, fails as above (#609).
+    const signIn = (id: string, once: boolean, providerId = "codex") => {
+      if (once) createOnceAutomation(db, 1000, id);
+      else createScheduledAutomation(db, 1000, id);
+      const run = claimAutomationScheduledRun(db, {
+        automationId: id,
+        expectedNextRunAt: 1000,
+        newNextRunAt: once ? null : 60_000,
+        now: 1000,
+      });
+      if (!run.advanced) throw new Error("claim failed");
+      closeRunForSignIn(db, {
+        runId: run.run.id,
+        threadId: "thr_1",
+        providerId,
+        error: "OAuth session expired",
+        now: 1001,
+      });
+    };
+    signIn("auto_signin", true);
+    signIn("auto_daily", false);
+    signIn("auto_fallback", false, "claude-code");
+    expect(getAutomation(db, "auto_signin")).toMatchObject({
+      enabled: false,
+      consecutiveFailures: 1,
+      lastRunStatus: "failed",
+    });
+    expect(getAutomation(db, "auto_fallback")).toMatchObject({
+      enabled: true,
+      consecutiveFailures: 1,
+      lastRunStatus: "failed",
+    });
+    expect(releaseSignInHolds(db, "claude-code", 1002)).toEqual([]);
+    expect(getAutomation(db, "auto_daily")).toMatchObject({
+      enabled: false,
+      consecutiveFailures: 0,
+    });
+    expect(releaseSignInHolds(db, "codex", 1002)).toEqual(["proj_test"]);
+    expect(getAutomation(db, "auto_daily")).toMatchObject({
+      enabled: true,
+      nextRunAt: 60_000,
+      lastError: null,
+    });
   });
 
   it("does not claim due agent automations when no host is connected", async () => {
@@ -2766,6 +2880,29 @@ describe("loop fallback", () => {
     // If it can't be stopped, this run stays on the last run's agent.
     stopped = false;
     expect(await loopAgent(sdk, db, afterFailure, execution)).toEqual(fable);
+    // A failed login fails the run as any other, never holding the loop: the next agent takes over (#609).
+    stopped = true;
+    createScheduledAutomation(db, 1000, "auto_turns");
+    db.prepare(
+      `UPDATE automations SET execution = json_set(execution, '$.providerId', 'claude-code', '$.agents', json(?))`,
+    ).run(JSON.stringify([fable, gemini]));
+    const claim = claimAutomationScheduledRun(db, {
+      automationId: "auto_turns",
+      expectedNextRunAt: 1000,
+      newNextRunAt: 60_000,
+      now: 1000,
+    });
+    if (!claim.advanced) throw new Error("claim failed");
+    closeRunForSignIn(db, {
+      runId: claim.run.id,
+      threadId: "thr_last",
+      providerId: "claude-code",
+      error: "OAuth session expired",
+      now: 1001,
+    });
+    const turns = getAutomation(db, "auto_turns")!;
+    expect(turns).toMatchObject({ enabled: true, lastRunStatus: "failed" });
+    expect(await loopAgent(sdk, db, turns, execution)).toEqual(gemini);
     // Usage is read again after its one-minute cache.
     claudeFull = true;
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -2776,6 +2913,95 @@ describe("loop fallback", () => {
 });
 
 describe("loop review", () => {
+  it("names the loops that started or wake each thread, for the sidebar's loop icon (#1136)", async () => {
+    const now = Date.now();
+    const db = createTestDb();
+    createScheduledAutomation(db, now + 60_000);
+    // Only the open threads the sidebar shows are looked up: an archived run thread gets nothing.
+    for (const threadId of ["thr_run", "thr_archived"])
+      markAutomationThread(db, {
+        threadId,
+        automationId: "auto_test",
+        runId: `run_${threadId}`,
+        now,
+      });
+    for (const [id, name] of [
+      ["auto_a", "Nightly tests"],
+      ["auto_b", "Dependency audit"],
+    ] as const) {
+      createScheduledAutomation(db, now + 60_000, id);
+      db.prepare(
+        "UPDATE automations SET name = ?, target_thread_id = 'thr_target' WHERE id = ?",
+      ).run(name, id);
+    }
+    addReviewThread(db, {
+      threadId: "thr_cloud_run",
+      automationId: null,
+      runId: null,
+      loopName: "PR loop",
+      createdAt: now - 1_000,
+    });
+    // A one-time loop that ran is turned off and wakes nothing, Local or Cloud. A child's Cloud loop names the
+    // sandbox's root thread; it wakes the thread its session belongs to.
+    createOnceAutomation(db, now - 60_000);
+    db.prepare(
+      "UPDATE automations SET target_thread_id = 'thr_reminded', enabled = 0 WHERE id = 'auto_once'",
+    ).run();
+    const cloudLoop = {
+      last_error: null,
+      last_run_at: null,
+      created_at: "2026-11-01T00:00:00Z",
+    };
+    forgetCloud();
+    const website = {
+      automations: vi.fn(async () => ({
+        automations: [
+          {
+            ...cloudLoop,
+            id: "c1",
+            thread_id: "thr_root",
+            session_id: "ses_target",
+            session_thread_id: "thr_target",
+            name: "Cloud check",
+            enabled: true,
+            run_at: null,
+          },
+          // A child whose session isn't synced here yet: marks nothing, never the sandbox's root.
+          {
+            ...cloudLoop,
+            id: "c3",
+            thread_id: "thr_root",
+            session_id: "ses_unsynced",
+            name: "Child check",
+            enabled: true,
+            run_at: null,
+          },
+          {
+            ...cloudLoop,
+            id: "c2",
+            thread_id: "thr_reminded",
+            name: "Check back",
+            enabled: false,
+            run_at: "2026-11-12T10:00:00Z",
+          },
+        ],
+      })),
+    };
+    // A read while the first waits on the website (the sidebar's threads arrived) gets its answer, not an empty one.
+    const [, cloud] = await Promise.all([
+      pausedCloud(website as never, now),
+      pausedCloud(website as never, now),
+    ]);
+    expect(website.automations).toHaveBeenCalledTimes(1);
+    const open = ["thr_run", "thr_target", "thr_cloud_run", "thr_reminded", "thr_root"];
+    expect(loopThreads(db, cloud.woken, open, now)).toEqual({
+      thr_run: "Started by loop: Test",
+      thr_target:
+        "Woken by loops: Nightly tests, Dependency audit, Cloud check",
+      thr_cloud_run: "Started by loop: PR loop",
+    });
+  });
+
   it("shows each run's saved report over its thread's summary (#1078)", async () => {
     const now = Date.now();
     const db = createTestDb();
@@ -2829,5 +3055,42 @@ describe("loop review", () => {
       expect(Object.fromEntries(review.items.map((item) => [item.id, { status: item.status, report: item.report }]))).toEqual(expected);
       expect(automations).toHaveBeenCalledWith({ action: "reports", runs: [run.id], threads: ["thr_cloud", "thr_busy", "thr_quiet"] });
     }
+  });
+});
+
+describe("scans_start on the Free plan (#2645)", () => {
+  async function start(planUsage: Record<string, unknown>) {
+    const spawned: { prompt: string; pluginMetadata: unknown }[] = [];
+    const saved = new Map<string, unknown>();
+    const sdk = {
+      cloudroom: {
+        status: async () => ({ plan: "free", planUsage }),
+        vps: async () => ({ connected: false, useForCloud: false }),
+        claudeAuth: async () => null,
+        codexAuth: async () => null,
+      },
+      threads: {
+        spawn: async (input: { prompt: string; pluginMetadata: unknown }) => { spawned.push(input); return { id: "thr_scan" }; },
+        pin: async () => null,
+      },
+    };
+    const kv = { get: async (key: string) => saved.get(key), set: async (key: string, value: unknown) => { saved.set(key, value); } };
+    const rpc = createRpcHandlers({} as never, sdk as never, undefined, () => {}, { kv: kv as never, pluginId: "automations" });
+    const error = await rpc.scans_start({ kind: "workflow" }).then(() => null, (e: Error) => e);
+    return { error, spawned, saved };
+  }
+
+  it("keeps the free scan unused when no Cloud threads are left", async () => {
+    const { error, spawned, saved } = await start({ threadsLeft: 0, threadsHourLeft: 5, resetsAt: "2026-12-24T12:00:00.000Z" });
+    expect(error?.message).toMatch(/still unused: try again after Dec 24/);
+    expect(spawned).toHaveLength(0);
+    expect(saved.size).toBe(0);
+  });
+
+  it("fits its readers in the threads left this month and hour", async () => {
+    const { error, spawned } = await start({ threadsLeft: 7, threadsHourLeft: 2 });
+    expect(error).toBeNull();
+    expect(spawned[0]?.prompt).toContain("Free plan: at most 2 readers, and Local loops.");
+    expect(spawned[0]?.pluginMetadata).toEqual({ workflowScan: { stage: "finding", maxReaders: 2 } });
   });
 });

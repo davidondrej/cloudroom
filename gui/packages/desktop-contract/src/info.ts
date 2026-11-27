@@ -99,7 +99,7 @@ export type RoomDesktopAppCommandHandler = (
 ) => void;
 export type RoomDesktopCloseWindowRequestHandler = () => boolean;
 
-export interface BbDesktopApi extends RoomDesktopInfo {
+export interface RoomDesktopApi extends RoomDesktopInfo {
   browser: RoomDesktopBrowserApi;
   checkForUpdates(): Promise<RoomDesktopInfo>;
   getInfo(): Promise<RoomDesktopInfo>;

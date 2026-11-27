@@ -26,8 +26,11 @@ const BEHIND_SINCE_KEY = "cloudroom.update-card.behind-since";
 const LATER_UNTIL_KEY = "cloudroom.update-card.later-until";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-const HEIGHT_VAR = "--bb-update-banner-height";
+const HEIGHT_VAR = "--room-update-banner-height";
 const GIT_FOR_WINDOWS_URL = "https://git-scm.com/downloads/win";
+
+// App-wide banners fade in from the floating sidebar card instead of butting against it (`.app-banner` in theme.css).
+export const BANNER_CLASS = "app-banner";
 
 // Window-pinned controls (e.g. the home right-panel toggle) read this to sit below the banners.
 const shownBanners = new Set<HTMLDivElement>();
@@ -98,7 +101,12 @@ export function GitForWindowsBanner({ pinned = true }: { pinned?: boolean }) {
       ref={pinned ? publishBannerHeight : undefined}
       role="alert"
       data-testid="git-for-windows-banner"
-      className="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm"
+      className={cn(
+        "flex shrink-0 items-center gap-3 px-4 py-2 text-sm",
+        pinned
+          ? `${BANNER_CLASS} [--banner-color:var(--destructive)]`
+          : "border-b border-destructive/30 bg-destructive/10",
+      )}
     >
       <Icon name="AlertTriangle" className="size-4 shrink-0 text-destructive-text" />
       <span className="min-w-0 flex-1 truncate">
@@ -190,7 +198,10 @@ export function DesktopUpdateBanner() {
       ref={publishBannerHeight}
       role="status"
       data-testid="desktop-update-banner"
-      className="flex shrink-0 items-center gap-3 border-b border-primary/30 bg-primary/10 px-4 py-2 text-sm"
+      className={cn(
+        "flex shrink-0 items-center gap-3 px-4 py-2 text-sm",
+        BANNER_CLASS,
+      )}
     >
       <Icon name="Download" className="size-4 shrink-0 text-primary" />
       <span className="min-w-0 flex-1 truncate">

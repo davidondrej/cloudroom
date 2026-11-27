@@ -71,6 +71,9 @@ export function PluginPanelHeaderActions({
         >
           <PluginContext.Provider value={panel.pluginId}>
             <div
+              data-room-plugin-root=""
+              data-room-plugin={panel.pluginId}
+              // Compat: third-party BB plugins scope their CSS to [data-bb-plugin*].
               data-bb-plugin-root=""
               data-bb-plugin={panel.pluginId}
               className="flex shrink-0 items-center gap-2"

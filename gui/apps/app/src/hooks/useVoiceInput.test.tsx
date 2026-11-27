@@ -1,18 +1,30 @@
 // @vitest-environment jsdom
 
+import { emptyPromptDraftState } from "@cloudroom/client-core";
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { PromptBoxHandle } from "@/components/promptbox/PromptBoxInternal";
+import { usePromptVoice } from "@/components/promptbox/usePromptVoice";
 import { appToast } from "@/components/ui/app-toast";
+import { transcribeVoiceInput } from "@/lib/api";
+import { getPromptDraftAccessor } from "./usePromptDraftStorage";
 import {
   deleteVoiceRecording,
   downloadVoiceRecording,
   loadVoiceRecordings,
+  startVoiceRecording,
 } from "@/lib/voice-recording-backup";
 import { useVoiceInput } from "./useVoiceInput";
+
+vi.mock("@/lib/api", () => ({
+  transcribeVoiceInput: vi.fn(),
+}));
 
 vi.mock("@/components/ui/app-toast", () => ({
   appToast: {
     error: vi.fn(),
+    message: vi.fn(),
+    success: vi.fn(),
     warning: vi.fn(),
     isOpen: vi.fn(() => false),
   },
@@ -160,4 +172,134 @@ describe("useVoiceInput", () => {
     toastOptions?.cancel?.onClick({} as React.MouseEvent<HTMLButtonElement>);
     expect(deleteVoiceRecording).toHaveBeenCalledWith(1_763_731_200_000);
   });
+
+  it.each(["closes", "moves to another thread"])(
+    "sends a voice message to the thread it was recorded in when the composer %s mid-transcription",
+    async (leave) => {
+      const voice = renderThreadVoice();
+      await recordAndSend(voice);
+      expect(voice.result.current.state).toBe("transcribing");
+
+      if (leave === "closes") {
+        voice.unmount();
+        voice.promptBoxRef.current = null;
+      } else {
+        voice.rerender({ threadId: "t2" });
+        expect(voice.result.current.state).toBe("idle");
+      }
+      await act(async () => {
+        voice.finish("ship it");
+        await vi.runAllTimersAsync();
+      });
+
+      expect(originDraftText()).toBe("ship it");
+      expect(voice.send).toHaveBeenCalledOnce();
+      expect(appToast.success).toHaveBeenCalledWith("Voice message sent", {});
+      expect(voice.promptBox.insertTextAtCursor).not.toHaveBeenCalled();
+      expect(deleteVoiceRecording).toHaveBeenCalledWith(1_763_731_200_000);
+    },
+  );
+
+  it("finishes a recording in the background without touching the next thread's recording", async () => {
+    vi.mocked(startVoiceRecording)
+      .mockReturnValueOnce(1)
+      .mockReturnValueOnce(2);
+    const voice = renderThreadVoice();
+    await recordAndSend(voice);
+    voice.rerender({ threadId: "t2" });
+    await act(() => voice.result.current.start());
+    expect(voice.result.current.state).toBe("recording");
+
+    await act(async () => {
+      voice.finish("ship it");
+      await vi.runAllTimersAsync();
+    });
+
+    expect(originDraftText()).toBe("ship it");
+    expect(voice.send).toHaveBeenCalledOnce();
+    expect(
+      voice.promptBox.playVoiceCompletionTransition,
+    ).not.toHaveBeenCalled();
+    expect(voice.promptBox.insertTextAtCursor).not.toHaveBeenCalled();
+    expect(voice.result.current.state).toBe("recording");
+  });
+
+  it("closes the mic if the user switches threads while it is opening", async () => {
+    let openMic: (stream: MediaStream) => void = () => {};
+    vi.mocked(navigator.mediaDevices.getUserMedia).mockImplementationOnce(
+      () => new Promise((resolve) => (openMic = resolve)),
+    );
+    const stopTrack = vi.fn();
+    const voice = renderThreadVoice();
+    let starting: void | Promise<void> = undefined;
+    act(() => {
+      starting = voice.result.current.start();
+    });
+    voice.rerender({ threadId: "t2" });
+
+    await act(async () => {
+      openMic({
+        getTracks: () => [{ stop: stopTrack }],
+      } as unknown as MediaStream);
+      await starting;
+    });
+
+    expect(stopTrack).toHaveBeenCalledOnce();
+    expect(startVoiceRecording).not.toHaveBeenCalled();
+    expect(voice.result.current.state).toBe("idle");
+  });
 });
+
+const ORIGIN = { kind: "thread", projectId: "p1", threadId: "t1" } as const;
+
+const originDraftText = () => getPromptDraftAccessor(ORIGIN).getCurrent().text;
+
+/** A thread composer's voice input, with a transcription that waits for `finish`. */
+function renderThreadVoice() {
+  let resolveTranscript: (text: string) => void = () => {};
+  vi.mocked(transcribeVoiceInput).mockImplementation(
+    () =>
+      new Promise((resolve) => {
+        resolveTranscript = (text) => resolve({ text });
+      }),
+  );
+  getPromptDraftAccessor(ORIGIN).setDraft(emptyPromptDraftState());
+  const send = vi.fn(async () => true);
+  const promptBox = {
+    attachFiles: vi.fn(),
+    captureHeightForLayoutChange: vi.fn(),
+    focus: vi.fn(),
+    focusEnd: vi.fn(),
+    getTextBeforeCursor: vi.fn(),
+    insertTextAtCursor: vi.fn(),
+    submit: vi.fn(),
+    playVoiceCompletionTransition: vi.fn(async () => {}),
+  } satisfies PromptBoxHandle;
+  const promptBoxRef: { current: PromptBoxHandle | null } = {
+    current: promptBox,
+  };
+  const hook = renderHook(
+    ({ threadId }) =>
+      usePromptVoice(promptBoxRef, {
+        draftScope: { ...ORIGIN, threadId },
+        send: threadId === ORIGIN.threadId ? send : vi.fn(async () => true),
+      }),
+    { initialProps: { threadId: ORIGIN.threadId as string } },
+  );
+  return {
+    ...hook,
+    send,
+    promptBox,
+    promptBoxRef,
+    finish: (text: string) => resolveTranscript(text),
+  };
+}
+
+async function recordAndSend(voice: ReturnType<typeof renderThreadVoice>) {
+  await act(() => voice.result.current.start());
+  vi.advanceTimersByTime(1_500);
+  await act(async () => {
+    voice.result.current.stopAndSend?.();
+    await Promise.resolve();
+  });
+}

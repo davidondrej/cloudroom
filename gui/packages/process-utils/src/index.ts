@@ -935,10 +935,19 @@ export function installSafeProcessDiagnostics(
   options: SafeProcessDiagnosticsOptions,
 ): () => void {
   mkdirSync(options.logsDir, { recursive: true });
+  // A contained error can repeat forever (a stale plugin timer), so write
+  // each distinct error once per process instead of one file per throw.
+  const reported = new Set<string>();
   const handleUncaughtExceptionMonitor: UncaughtExceptionMonitorHandler = (
     error,
   ) => {
     try {
+      const key =
+        error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+      if (reported.has(key)) return;
+      reported.add(key);
       writeSafeProcessDiagnosticReport({
         ...options,
         kind: "uncaughtException",

@@ -5,7 +5,7 @@ description: 'Inspect and control Cloudroom Local and Cloud threads, projects, s
 
 # Cloudroom CLI
 
-Use `room-cli` for Cloudroom, not official BB's `bb`. Never inspect, message, or launch other threads unless the user asks.
+Use `room-cli` for Cloudroom, not official BB's `bb`. Never inspect or message unrelated threads unless the user asks.
 
 ## Check context first
 
@@ -36,22 +36,23 @@ Keep `thread list` small. Filter first: `--project`, `--status`, `--provider`, `
 
 "Open" or "active" threads means threads with `archivedAt: null`. An archived thread is never open or active, whatever its `status` says. `thread list` shows open threads only; `--archived` shows only archived ones, and `--include-archived` shows both.
 
-### Run subagents: fan out, wait, collect, archive
+### Run subagents: fan out, collect, archive
 
 ```bash
 room-cli thread spawn --parent-self --prompt "Task A"   # once per task
-room-cli thread wait --children   # blocks until all are done, failed, or need input
+# End your turn to wait for free — Cloudroom wakes you when children finish
 room-cli thread output CHILD
 room-cli thread archive CHILD_A CHILD_B
 ```
 
-`wait --children` gives up after 9 minutes (100 seconds in a Cloud thread) and exits 2: give the shell call a 10-minute timeout and run it again.
+Use `room-cli thread wait --children` only if you must block inside one turn (it times out after 9 minutes, or 100 seconds in Cloud, with exit 2).
 
 ### Message or stop a thread
 
 ```sh
 room-cli thread tell THREAD "Continue with this task"
 room-cli thread tell THREAD --message-file notes.md   # a long message
+room-cli thread tell --parent "Done: see my branch"   # the thread that started this one
 room-cli thread stop THREAD
 room-cli thread queue list THREAD                     # messages still waiting (app CLI only)
 ```

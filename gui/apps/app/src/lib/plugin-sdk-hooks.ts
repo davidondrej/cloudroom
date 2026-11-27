@@ -72,6 +72,7 @@ import { useServerConnectionState } from "@/hooks/useServerConnectionState";
 import { wsManager } from "@/lib/ws";
 import { pluginSdkSettingsQueryKey } from "@/hooks/queries/query-keys";
 import { useAppNavigationHost } from "@/lib/app-navigation-host";
+import { useOptionalQuickCreateProject } from "@/hooks/useQuickCreateProject";
 import { normalizeExperimentalFileOpenOptions } from "@/lib/live-file-navigation";
 import { deprecatedAlias } from "@/lib/plugin-sdk-deprecated-aliases";
 import {
@@ -308,6 +309,12 @@ export function useRoomNavigate(): BbNavigate {
   const navigate = useNavigate();
   const appNavigation = useAppNavigationHost();
   const setRootComposeProjectId = useSetRootComposeProjectId();
+  // A ref: the controller is a new object on every provider render, and navigate must keep its identity.
+  const quickCreateProject = useOptionalQuickCreateProject();
+  const quickCreateProjectRef = useRef(quickCreateProject);
+  useEffect(() => {
+    quickCreateProjectRef.current = quickCreateProject;
+  });
   const toThread = useCallback(
     (threadId: string) => {
       void sdk.threads
@@ -373,6 +380,12 @@ export function useRoomNavigate(): BbNavigate {
     (url) => appNavigation.openUrl({ url }),
     [appNavigation],
   );
+  const experimental_openAddProject = useCallback(() => {
+    const controller = quickCreateProjectRef.current;
+    if (!controller?.isAvailable) return false;
+    controller.openCreateDialog();
+    return true;
+  }, []);
   const experimental_openFilePreview = useCallback<
     BbNavigate["experimental_openFilePreview"]
   >(
@@ -400,6 +413,7 @@ export function useRoomNavigate(): BbNavigate {
       toPluginPanel,
       toCompose,
       openThreadPanel,
+      experimental_openAddProject,
       experimental_openFileExternally,
       experimental_openFilePreview,
       experimental_openTerminal: async () => false,
@@ -416,6 +430,7 @@ export function useRoomNavigate(): BbNavigate {
       toPluginPanel,
       toCompose,
       openThreadPanel,
+      experimental_openAddProject,
       experimental_openFileExternally,
       experimental_openFilePreview,
       openUrl,

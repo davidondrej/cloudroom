@@ -428,7 +428,9 @@ function nextRunText(loop: LoopDialogLoop, schedule: string, now: number) {
     return {
       label: "Status",
       big: "Paused",
-      small: `After ${loop.paused.failures} failed runs: ${loop.paused.reason}`,
+      small: loop.paused.failures
+        ? `After ${loop.paused.failures} failed runs: ${loop.paused.reason}`
+        : loop.paused.reason,
     };
   if (!loop.enabled) return { label: "Status", big: "Off", small: schedule };
   if (loop.webhook)

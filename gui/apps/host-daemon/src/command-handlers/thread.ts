@@ -243,13 +243,14 @@ async function resolveThreadStartRuntime(
   return { bridgeLaunch, entry };
 }
 
+/** Returns whether it reopened the thread's agent. */
 async function resumeThreadRuntimeIfMissing(
   args: ResumeThreadRuntimeIfMissingArgs,
-): Promise<void> {
+): Promise<boolean> {
   const { command, entry, options } = args;
   const { resumeContext } = command;
   if (entry.runtime.hasThread(command.threadId)) {
-    return;
+    return false;
   }
   if (!resumeContext.providerThreadId) {
     throw new CommandDispatchError(
@@ -284,55 +285,70 @@ async function resumeThreadRuntimeIfMissing(
     }
     await resume();
   }
+  return true;
 }
 
-// Cursor's CLI never retries its servers: cut off, it hangs (`rpc_timeout`) or gives up (`agent_unreachable`).
-const CURSOR_OUTAGE_CODES = new Set(["rpc_timeout", "agent_unreachable"]);
-const CURSOR_RESUME_RETRY_FOR_MS = 3 * 60_000;
-const CURSOR_RESUME_RETRY_DELAY_MS = 5_000;
+// These agent CLIs never retry their servers: cut off, they hang (`rpc_timeout`) or give up (`agent_unreachable`).
+const OFFLINE_RETRY_AGENTS = new Map([
+  ["acp-cursor", "Cursor"],
+  ["acp-antigravity", "Antigravity"],
+]);
+const OUTAGE_CODES = new Set(["rpc_timeout", "agent_unreachable"]);
+const RESUME_RETRY_FOR_MS = 3 * 60_000;
+const RESUME_RETRY_DELAY_MS = 5_000;
 const STOP_CHECK_MS = 500;
 
 /**
- * Reopens a thread for a message, waiting out a Cursor outage. A failed resume
- * ends that Cursor and the message is sent only after one succeeds, so a retry
- * can't send it twice.
+ * Reopens a thread for a message, waiting out an agent's outage. A failed
+ * resume ends that agent and the message is sent only after one succeeds, so a
+ * retry can't send it twice. A Stop during the reopen means it is never sent.
  */
 async function resumeBeforeTurn(
   args: ResumeThreadRuntimeIfMissingArgs,
 ): Promise<void> {
   const { command, options } = args;
   const { threadId } = command;
-  const retryUntil = Date.now() + CURSOR_RESUME_RETRY_FOR_MS;
+  const agent = OFFLINE_RETRY_AGENTS.get(command.resumeContext.providerId);
+  const retryUntil = Date.now() + RESUME_RETRY_FOR_MS;
   const stopped = () => options.isThreadStopPending?.(threadId) === true;
+  const stoppedBeforeSend = (cause?: unknown) =>
+    new CommandDispatchError(
+      "stopped_before_send",
+      `Stopped before ${agent ?? "the agent"} started. Your message was not sent.`,
+      { cause },
+    );
   for (;;) {
     try {
-      return await resumeThreadRuntimeIfMissing(args);
+      const reopened = await resumeThreadRuntimeIfMissing(args);
+      if (reopened && stopped()) throw stoppedBeforeSend();
+      return;
     } catch (error) {
-      if (command.resumeContext.providerId !== "acp-cursor") throw error;
+      if (getErrorCode(error) === "stopped_before_send") throw error;
+      if (stopped()) throw stoppedBeforeSend(error);
       const code = getErrorCode(error);
-      if (!stopped()) {
-        if (!CURSOR_OUTAGE_CODES.has(code)) throw error;
-        if (Date.now() >= retryUntil) {
-          throw new CommandDispatchError(
-            code,
-            "Cursor didn't answer after 3 minutes of retries. Your message was not sent; send it again to retry.",
-            { cause: error },
-          );
-        }
-        options.logger.warn(
-          { err: error, threadId },
-          "Cursor didn't answer; reopening the thread",
-        );
-        const nextTryAt = Date.now() + CURSOR_RESUME_RETRY_DELAY_MS;
-        while (!stopped() && Date.now() < nextTryAt) await delay(STOP_CHECK_MS);
-      }
-      if (stopped()) {
+      if (agent === undefined) {
+        if (code !== "rpc_timeout") throw error;
         throw new CommandDispatchError(
-          "stopped_before_send",
-          "Stopped before Cursor reconnected. Your message was not sent.",
+          code,
+          "The agent didn't start in time. Your message was not sent; send it again to retry.",
           { cause: error },
         );
       }
+      if (!OUTAGE_CODES.has(code)) throw error;
+      if (Date.now() >= retryUntil) {
+        throw new CommandDispatchError(
+          code,
+          `${agent} couldn't reach its servers for 3 minutes. Check your internet connection. Your message was not sent; send it again to retry.`,
+          { cause: error },
+        );
+      }
+      options.logger.warn(
+        { err: error, threadId },
+        `${agent} didn't answer; reopening the thread`,
+      );
+      const nextTryAt = Date.now() + RESUME_RETRY_DELAY_MS;
+      while (!stopped() && Date.now() < nextTryAt) await delay(STOP_CHECK_MS);
+      if (stopped()) throw stoppedBeforeSend(error);
     }
   }
 }
@@ -646,7 +662,7 @@ export async function submitTurn(
     input: staged.input,
   };
   try {
-    await resumeThreadRuntimeIfMissing({
+    await resumeBeforeTurn({
       command: stagedCommand,
       entry,
       options,

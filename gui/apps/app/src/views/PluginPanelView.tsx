@@ -5,7 +5,7 @@ import { usePluginFrontendsSettled } from "@/lib/plugin-frontend-boot-state";
 import { usePluginSlots } from "@/lib/plugin-slots";
 
 const PLUGIN_PANEL_TOP_PADDING_CLASS =
-  "bb-zoom pt-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1)+1rem)] md:pt-[calc(var(--bb-app-chrome-row-height)/var(--bb-desktop-zoom,1)+1.25rem)]";
+  "room-zoom pt-[calc(var(--room-app-chrome-row-height)/var(--room-desktop-zoom,1)+1rem)] md:pt-[calc(var(--room-app-chrome-row-height)/var(--room-desktop-zoom,1)+1.25rem)]";
 
 interface PluginPanelViewProps {
   pluginId: string;

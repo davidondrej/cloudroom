@@ -40,6 +40,18 @@ export function isAbortLikeError(error: unknown): boolean {
   return toRecord(error)?.name === "AbortError";
 }
 
+// Refusals that come before anything is saved. 408, 409 and 429 can follow a save
+// (409 `cloudroom_command_failed`), so they are not here.
+const PRE_SAVE_REJECTION_STATUSES = new Set([400, 401, 403, 404, 413, 415, 422]);
+
+/** The server answered and refused before saving, so the request did not land. */
+export function isDefiniteRejection(error: unknown): boolean {
+  return (
+    (error instanceof HttpError || error instanceof BbHttpError) &&
+    PRE_SAVE_REJECTION_STATUSES.has(error.status)
+  );
+}
+
 function isNetworkTransportError(error: unknown): boolean {
   if (
     error instanceof HttpError ||

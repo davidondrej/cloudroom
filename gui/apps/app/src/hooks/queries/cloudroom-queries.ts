@@ -39,6 +39,8 @@ export const cloudroomStatusSchema = z.object({
   cloudQueue: z.object({ position: z.number(), total: z.number(), regionBlocked: z.boolean() }).nullable().default(null),
   /** Non-null when Metal capacity is temporarily reserved for higher plans and this tier waits (ADR 20261124-103714). */
   cloudCapacity: z.enum(["paid", "priority"]).nullable().default(null),
+  /** Free's Cloud is used up (credits or its 10 threads a month) until `resetsAt`: the new-thread screen warns first. */
+  cloudLimit: z.object({ kind: z.enum(["credits", "threads"]), resetsAt: z.string().nullable() }).nullable().catch(null).default(null),
   cloudPaused: z.boolean().default(false),
   usedCloud: z.boolean().default(true),
   lastCloudAt: z.number().nullable().optional(),
@@ -538,6 +540,13 @@ export async function cloudroomRequestId(key: string, input: unknown): Promise<s
   const id = crypto.randomUUID();
   localStorage.setItem(storageKey, `${fingerprint}:${id}`);
   return id;
+}
+
+/** The stored fingerprint and request ID, so a failed message restored unchanged can send with the same ID. */
+export function cloudroomRequestEntry(key: string): { key: string; value: string } | undefined {
+  const storageKey = `cloudroom-request:${key}`;
+  const value = localStorage.getItem(storageKey);
+  return value ? { key: storageKey, value } : undefined;
 }
 
 export function clearCloudroomRequestId(key: string, expectedId?: string): void {

@@ -1,5 +1,5 @@
 // oxlint-disable-next-line no-restricted-imports
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -10,6 +10,13 @@ import {
   resolve,
   win32,
 } from "node:path";
+import { and, eq, inArray, or } from "drizzle-orm";
+import {
+  cloudroomCommands,
+  events,
+  queuedThreadMessages,
+  type DbQueryConnection,
+} from "@cloudroom/db";
 import { resolveContainedPath } from "@cloudroom/process-utils";
 import {
   PROMPT_FILE_ATTACHMENT_LIMIT_BYTES,
@@ -227,6 +234,192 @@ export async function copyProjectAttachments(
     attachments.map(async ({ content, targetPath }) => {
       await mkdir(dirname(targetPath), { recursive: true });
       await writeFile(targetPath, content);
+    }),
+  );
+}
+
+function safeParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function collectProjectAttachmentPath(
+  rawPath: unknown,
+  out: Set<string>,
+): void {
+  if (
+    typeof rawPath === "string" &&
+    rawPath.length > 0 &&
+    !rawPath.startsWith("\\") &&
+    !pathLooksRuntimeReadable(rawPath)
+  ) {
+    out.add(rawPath);
+  }
+}
+
+function collectPromptInputAttachmentPaths(
+  parts: unknown,
+  out: Set<string>,
+): void {
+  if (!Array.isArray(parts)) return;
+  for (const part of parts) {
+    if (
+      part &&
+      typeof part === "object" &&
+      (part.type === "localImage" || part.type === "localFile")
+    ) {
+      collectProjectAttachmentPath((part as { path?: unknown }).path, out);
+    }
+  }
+}
+
+function collectCloudCommandAttachmentPaths(
+  list: unknown,
+  out: Set<string>,
+): void {
+  if (!Array.isArray(list)) return;
+  for (const item of list) {
+    if (item && typeof item === "object") {
+      collectProjectAttachmentPath(
+        (item as { localPath?: unknown }).localPath,
+        out,
+      );
+    }
+  }
+}
+
+function collectThreadProjectAttachmentPaths(
+  db: DbQueryConnection,
+  threadId: string,
+): string[] {
+  const paths = new Set<string>();
+
+  const eventRows = db
+    .select({ type: events.type, data: events.data })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, threadId),
+        or(
+          eq(events.type, "client/turn/requested"),
+          eq(events.type, "system/operation"),
+          and(
+            inArray(events.type, ["item/started", "item/completed"]),
+            eq(events.itemKind, "userMessage"),
+          ),
+        ),
+      ),
+    )
+    .all();
+
+  for (const row of eventRows) {
+    const data = safeParseJson(row.data) as Record<string, unknown> | null;
+    if (!data || typeof data !== "object") continue;
+    if (row.type === "client/turn/requested") {
+      collectPromptInputAttachmentPaths(data.input, paths);
+      if (Array.isArray(data.inputGroups)) {
+        for (const group of data.inputGroups) {
+          collectPromptInputAttachmentPaths(group, paths);
+        }
+      }
+    } else if (row.type === "system/operation") {
+      const metadata = data.metadata as Record<string, unknown> | undefined;
+      collectPromptInputAttachmentPaths(metadata?.seed, paths);
+    } else {
+      const item = data.item as Record<string, unknown> | undefined;
+      collectPromptInputAttachmentPaths(item?.content, paths);
+    }
+  }
+
+  for (const row of db
+    .select({ content: queuedThreadMessages.content })
+    .from(queuedThreadMessages)
+    .where(eq(queuedThreadMessages.threadId, threadId))
+    .all()) {
+    collectPromptInputAttachmentPaths(safeParseJson(row.content), paths);
+  }
+
+  for (const row of db
+    .select({ input: cloudroomCommands.input })
+    .from(cloudroomCommands)
+    .where(eq(cloudroomCommands.threadId, threadId))
+    .all()) {
+    const input = safeParseJson(row.input) as Record<string, unknown> | null;
+    if (!input || typeof input !== "object") continue;
+    collectPromptInputAttachmentPaths(input.content, paths);
+    collectCloudCommandAttachmentPaths(input.attachments, paths);
+    const replacement = input.replacement as Record<string, unknown> | undefined;
+    collectPromptInputAttachmentPaths(replacement?.content, paths);
+    collectCloudCommandAttachmentPaths(replacement?.attachments, paths);
+  }
+
+  return [...paths];
+}
+
+/**
+ * Copies every project-scoped attachment referenced by a thread into its new project folder.
+ * Missing source files are skipped so a stale attachment never blocks a thread move.
+ */
+export async function copyThreadAttachmentsToProject(
+  deps: {
+    config: { dataDir: string };
+    db: DbQueryConnection;
+    logger?: { warn: (obj: Record<string, unknown>, msg: string) => void };
+  },
+  args: {
+    threadId: string;
+    sourceProjectId: string;
+    targetProjectId: string;
+  },
+): Promise<void> {
+  if (args.sourceProjectId === args.targetProjectId) {
+    return;
+  }
+
+  const paths = collectThreadProjectAttachmentPaths(deps.db, args.threadId);
+  if (paths.length === 0) {
+    return;
+  }
+
+  const sourceDir = projectAttachmentDir(
+    deps.config.dataDir,
+    args.sourceProjectId,
+  );
+  const targetDir = projectAttachmentDir(
+    deps.config.dataDir,
+    args.targetProjectId,
+  );
+
+  await Promise.all(
+    paths.map(async (attachmentPath) => {
+      let sourcePath: string;
+      let targetPath: string;
+      try {
+        sourcePath = resolveAttachmentPath(sourceDir, attachmentPath);
+        targetPath = resolveAttachmentPath(targetDir, attachmentPath);
+      } catch {
+        return;
+      }
+      try {
+        const sourceStat = await stat(sourcePath).catch(() => null);
+        if (!sourceStat?.isFile()) {
+          return;
+        }
+        const targetStat = await stat(targetPath).catch(() => null);
+        if (targetStat?.isFile()) {
+          return;
+        }
+        await mkdir(dirname(targetPath), { recursive: true });
+        await copyFile(sourcePath, targetPath);
+      } catch (error) {
+        deps.logger?.warn(
+          { error, threadId: args.threadId, attachmentPath },
+          "Could not copy thread attachment to new project",
+        );
+      }
     }),
   );
 }

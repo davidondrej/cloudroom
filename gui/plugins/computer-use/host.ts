@@ -43,6 +43,22 @@ function isGnomeWayland() {
   );
 }
 
+// Cua blocks WinRects on GNOME Shells its metadata doesn't list (50+ crashed sessions), so offer it
+// only on a Shell that metadata lists. Not installed: install first. Installed without metadata: unknown.
+export function unsupportedGnomeHint(shellVersion: string, metadata: string | null, installed: boolean) {
+  if (!installed)
+    return `GNOME on Wayland may hide app windows from Cua. Whether its "cua WinRects" helper supports this GNOME Shell is unknown until the driver is installed: run \`room-cli computer-use tools\` once to install it, then check \`status\` again.`;
+  let supported: unknown;
+  try {
+    supported = metadata && JSON.parse(metadata)["shell-version"];
+  } catch {}
+  if (!Array.isArray(supported))
+    return `Cua's "cua WinRects" helper metadata is missing, so whether it supports this GNOME Shell is unknown and app windows may be hidden. Don't install or enable it.`;
+  const major = /GNOME Shell (\d+)/.exec(shellVersion)?.[1];
+  if (major && supported.includes(major)) return null;
+  return `Cua's "cua WinRects" helper supports only GNOME Shell ${supported.join(", ")}, and this is GNOME Shell ${major ?? "of unknown version"}, so app windows may be hidden and window capture limited. Don't install or enable it: Cua blocks it on newer GNOME after it crashed desktop sessions.`;
+}
+
 export function driverEnv(home: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -399,24 +415,31 @@ export function createHostEntry() {
     return null;
   }
 
-  async function waylandHint() {
+  async function waylandHint(installed: boolean) {
     if (!paths || !isGnomeWayland()) return null;
+    const helper = join(dir(), "wayland-helper");
+    const shell = await run("gnome-shell", ["--version"], { timeout: 5_000 }).catch(() => ({ stdout: "" }));
+    const metadata = await readFile(join(helper, "winrects@cua", "metadata.json"), "utf8").catch(() => null);
+    const unsupported = unsupportedGnomeHint(shell.stdout, metadata, installed);
+    if (unsupported) return unsupported;
     const { stdout } = await run("gnome-extensions", ["info", "winrects@cua"], { timeout: 5_000 }).catch(() => ({ stdout: "" }));
     if (/State:\s*(ACTIVE|ENABLED)/.test(stdout)) return null;
-    return `GNOME on Wayland hides app windows until the "cua WinRects" GNOME extension is on. With the user's OK, run ${join(dir(), "wayland-helper", "install.sh")} (no sudo needed), then ask them to log out and back in once.`;
+    return `GNOME on Wayland hides app windows until the "cua WinRects" GNOME extension is on. With the user's OK, run ${join(helper, "install.sh")} (no sudo needed), then ask them to log out and back in once.`;
   }
 
   async function status(): Promise<HostStatus> {
     const reason = unsupported();
+    // One install snapshot for both fields, so the hint never contradicts `installed`.
+    const installed = paths !== null && (await exists(join(dir(), "verified.json")));
     return {
       platform: process.platform,
       supported: reason === null,
       reason,
       version: DRIVER.version,
-      installed: paths !== null && (await exists(join(dir(), "verified.json"))),
+      installed,
       running: daemon !== null && daemon.exitCode === null,
       permissions: await readPermissions().catch(() => ({ accessibility: null, screenRecording: null })),
-      hint: await waylandHint(),
+      hint: await waylandHint(installed),
     };
   }
 
@@ -565,7 +588,8 @@ export function createHostEntry() {
         const exits = driverExits;
         driverExits = 0;
         const shotsDir = join(tmpdir(), "cloudroom-computer-use", input.shotsKey);
-        return { ...result, stdout: await saveImages(result.stdout, shotsDir), driverExits: exits };
+        const stdout = input.inline ? result.stdout : await saveImages(result.stdout, shotsDir);
+        return { ...result, stdout, driverExits: exits };
       },
       async release({ session }) {
         if (!sessions.delete(session) || !daemon || !socket) return null;

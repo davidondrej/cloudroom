@@ -3,7 +3,9 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -485,6 +487,8 @@ function NeedsYouBadge({ count }: { count: number }) {
 }
 
 type OrbitTick = RunTick | null;
+/** One loop: its last runs, oldest first, and when the newest one finished. */
+type OrbitRingData = { key: string; last: number; ticks: OrbitTick[] };
 
 const ORBIT_SIZE = 236;
 const ORBIT_TICKS = 40;
@@ -566,6 +570,97 @@ function OrbitStat({
   );
 }
 
+function OrbitRing({ ring, radius }: { ring: OrbitRingData; radius: number }) {
+  const center = ORBIT_SIZE / 2;
+  const span = 360 / ORBIT_TICKS;
+  const group = useRef<SVGGElement>(null);
+  const newest = useRef<SVGPathElement>(null);
+  const ripple = useRef<SVGCircleElement>(null);
+  const seen = useRef(ring.last);
+  // A run just finished: the ring steps forward one tick and the new tick pops in white.
+  useEffect(() => {
+    if (ring.last === seen.current) return;
+    seen.current = ring.last;
+    if (
+      typeof group.current?.animate !== "function" ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      return;
+    }
+    const white = { stroke: "var(--loop-orbit-pop)", strokeOpacity: 1 };
+    const glow = (blur: number) =>
+      `drop-shadow(0 0 ${blur}px var(--loop-orbit-pop))`;
+    group.current.animate(
+      [{ transform: `rotate(${span}deg)` }, { transform: "rotate(0deg)" }],
+      { duration: 520, easing: "cubic-bezier(0.2, 0.9, 0.2, 1)" },
+    );
+    newest.current?.animate(
+      [
+        { ...white, strokeWidth: 0, filter: glow(0) },
+        { ...white, strokeWidth: 15, filter: glow(5), offset: 0.22 },
+        { ...white, strokeWidth: 8, filter: glow(3), offset: 0.6 },
+        { filter: "drop-shadow(0 0 0 transparent)" },
+      ],
+      { duration: 1000, easing: "ease-out" },
+    );
+    ripple.current?.animate(
+      [
+        { opacity: 0.9, transform: "scale(0.1)" },
+        { opacity: 0, transform: "scale(1)" },
+      ],
+      { duration: 900, easing: "ease-out" },
+    );
+  }, [ring.last, span]);
+  const radians = (((ORBIT_TICKS - 0.5) * span - 90) * Math.PI) / 180;
+  return (
+    <>
+      <g ref={group} style={{ transformOrigin: `${center}px ${center}px` }}>
+        {ring.ticks.map((tick, index) => {
+          const opacity =
+            tick === null ? 0.08 : 0.3 + (0.7 * index) / (ORBIT_TICKS - 1);
+          const color =
+            tick === null ? "var(--foreground)" : ORBIT_TICK_COLOR[tick];
+          return (
+            <path
+              key={index}
+              ref={index === ORBIT_TICKS - 1 ? newest : undefined}
+              className="loop-orbit-tick"
+              d={orbitArc(radius, index * span + 1.5, (index + 1) * span - 1.5)}
+              fill="none"
+              strokeWidth={6}
+              stroke={color}
+              strokeOpacity={opacity}
+              style={
+                {
+                  // The sweep lights an empty tick lime, so a circle with no runs still moves in colour.
+                  "--loop-orbit-rest": opacity,
+                  "--loop-orbit-rest-stroke": color,
+                  "--loop-orbit-lit": tick === null ? 0.8 : 1,
+                  "--loop-orbit-lit-stroke":
+                    tick === null ? "var(--primary)" : color,
+                  "--loop-orbit-at": (index + 0.5) / ORBIT_TICKS,
+                } as CSSProperties
+              }
+            />
+          );
+        })}
+      </g>
+      <circle
+        ref={ripple}
+        cx={center + radius * Math.cos(radians)}
+        cy={center + radius * Math.sin(radians)}
+        r={30}
+        opacity={0}
+        fill="none"
+        stroke="var(--loop-orbit-pop)"
+        strokeWidth={1.5}
+        vectorEffect="non-scaling-stroke"
+        style={{ transformBox: "fill-box", transformOrigin: "center" }}
+      />
+    </>
+  );
+}
+
 function LoopOrbit({
   rings,
   running,
@@ -579,7 +674,7 @@ function LoopOrbit({
   now,
   onReview,
 }: {
-  rings: OrbitTick[][];
+  rings: OrbitRingData[];
   running: number;
   cloud: number;
   runsPerDay: number;
@@ -592,7 +687,6 @@ function LoopOrbit({
   onReview?: () => void;
 }) {
   const center = ORBIT_SIZE / 2;
-  const span = 360 / ORBIT_TICKS;
   return (
     <section
       aria-label="Loops at a glance"
@@ -601,48 +695,47 @@ function LoopOrbit({
       <div className="relative mx-auto size-[168px] shrink-0">
         <svg
           viewBox={`0 0 ${ORBIT_SIZE} ${ORBIT_SIZE}`}
-          className="size-full overflow-visible"
+          className="loop-orbit size-full overflow-visible"
           aria-hidden
         >
-          <defs>
-            <radialGradient id="loop-orbit-glow">
-              <stop offset="0" stopColor="var(--primary)" stopOpacity="0.16" />
-              <stop offset="1" stopColor="var(--primary)" stopOpacity="0" />
-            </radialGradient>
-          </defs>
-          <circle
-            cx={center}
-            cy={center}
-            r={center}
-            fill="url(#loop-orbit-glow)"
-          />
-          {rings.map((ticks, ring) =>
-            ticks.map((tick, index) => (
+          {[
+            ...rings,
+            // Always five tracks, so one loop doesn't sit alone in the circle.
+            ...Array.from({ length: Math.max(0, 5 - rings.length) }, (_, index) => ({
+              key: `empty-${index}`,
+              last: 0,
+              ticks: Array<OrbitTick>(ORBIT_TICKS).fill(null),
+            })),
+          ].map((ring, index) => (
+            <OrbitRing
+              key={ring.key}
+              ring={ring}
+              radius={center - 12 - index * 13}
+            />
+          ))}
+          <g
+            className="loop-orbit-comet"
+            style={{ transformOrigin: `${center}px ${center}px` }}
+          >
+            {Array.from({ length: 14 }, (_, index) => (
               <path
-                key={`${ring}-${index}`}
-                d={orbitArc(
-                  center - 12 - ring * 13,
-                  index * span + 1.5,
-                  (index + 1) * span - 1.5,
-                )}
+                key={index}
+                className="loop-orbit-tail"
+                d={orbitArc(center - 2, -(index + 1) * 5, -index * 5 + 0.4)}
                 fill="none"
-                strokeWidth={6}
-                stroke={
-                  tick === null ? "var(--foreground)" : ORBIT_TICK_COLOR[tick]
-                }
-                strokeOpacity={
-                  tick === null ? 0.08 : 0.3 + (0.7 * index) / (ORBIT_TICKS - 1)
-                }
+                strokeWidth={2.5}
+                stroke="var(--primary)"
+                strokeOpacity={0.75 * (1 - index / 14) ** 1.6}
               />
-            )),
-          )}
-          <circle
-            cx={center}
-            cy={2}
-            r={4}
-            fill="var(--primary)"
-            style={{ filter: "drop-shadow(0 0 6px var(--primary))" }}
-          />
+            ))}
+            <circle
+              cx={center}
+              cy={2}
+              r={4}
+              fill="var(--primary)"
+              style={{ filter: "drop-shadow(0 0 6px var(--primary))" }}
+            />
+          </g>
         </svg>
         <div className="absolute inset-0 grid place-items-center text-center">
           <div>
@@ -1728,6 +1821,7 @@ export function AutomationOverviewView({
       needsYou.set(key, (needsYou.get(key) ?? 0) + 1);
     }
     const history = new Map<string, RunTick[]>();
+    const lastRun = new Map<string, number>();
     const reports = new Map<string, string>();
     for (const item of [...reviewItems].sort((a, b) => a.at - b.at)) {
       const key = reviewKey(item);
@@ -1736,6 +1830,7 @@ export function AutomationOverviewView({
       const runs = history.get(key) ?? [];
       runs.push(item.status);
       history.set(key, runs);
+      lastRun.set(key, item.at);
     }
     const showRepo = repoItems.length > 1 && !activeScope.startsWith("repo:");
     const repoTag = (
@@ -1939,13 +2034,20 @@ export function AutomationOverviewView({
         })),
       ];
       const rings = orbitLoops
-        .map((loop) => history.get(loop.key)?.slice(-ORBIT_TICKS) ?? [])
-        .sort((a, b) => b.length - a.length)
+        .map((loop) => ({
+          key: loop.key,
+          last: lastRun.get(loop.key) ?? 0,
+          ticks: history.get(loop.key)?.slice(-ORBIT_TICKS) ?? [],
+        }))
+        .sort((a, b) => b.ticks.length - a.ticks.length)
         .slice(0, 5)
-        .map((ticks) => [
-          ...Array<OrbitTick>(ORBIT_TICKS - ticks.length).fill(null),
-          ...ticks,
-        ]);
+        .map((ring) => ({
+          ...ring,
+          ticks: [
+            ...Array<OrbitTick>(ORBIT_TICKS - ring.ticks.length).fill(null),
+            ...ring.ticks,
+          ],
+        }));
       const nextItem = activeItems.find((item) => item.nextRunAt === nextRunAt);
       content = (
         <>

@@ -396,7 +396,7 @@ export function createLogViewerViewUrl(
   </main>
   <script>
     const maxLines = ${LOG_VIEWER_VISIBLE_LINE_LIMIT};
-    const api = window.bbLogViewer;
+    const api = window.roomLogViewer;
     const autoscroll = document.getElementById("autoscroll");
     const clearButton = document.getElementById("clear");
     const copyButton = document.getElementById("copy");

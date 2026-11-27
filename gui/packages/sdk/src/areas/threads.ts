@@ -316,6 +316,8 @@ export interface ThreadRetryArgs {
   reason?: string;
   /** The retry continues on another account of the same agent; the plan-limit row then says so in one line. */
   accountSwitch?: RetryTurnRequest["accountSwitch"];
+  /** Run it in a new session of the same agent that gets the conversation so far, for one the agent can't reopen. */
+  freshSession?: true;
 }
 
 export interface ThreadActionArgs {
@@ -761,6 +763,7 @@ function retryJson(args: ThreadRetryArgs): RetryTurnRequest {
     sendAt: args.sendAt ?? null,
     reason: args.reason ?? DEFAULT_TURN_RETRY_REASON,
     ...(args.accountSwitch ? { accountSwitch: args.accountSwitch } : {}),
+    ...(args.freshSession ? { freshSession: true } : {}),
   };
 }
 

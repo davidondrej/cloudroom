@@ -1,6 +1,6 @@
 # Cloudroom launcher
 
-Runs Cloudroom's server and host daemon as child processes, restarts either one if it crashes, and captures their logs in `<data-dir>/logs/*-stdio.log`.
+Runs Cloudroom's server and host daemon as child processes, restarts either one if it crashes, and captures their logs in `<data-dir>/logs/*-stdio.log`. Over 10 MiB, a log's last 10 MiB move to `*-stdio.log.1`.
 
 - `bb-app` starts the whole app. The desktop app and `pnpm start` run this.
 - `bb-app host-daemon [join]` runs only the host daemon on a joined machine. `install-machine.sh` runs it.

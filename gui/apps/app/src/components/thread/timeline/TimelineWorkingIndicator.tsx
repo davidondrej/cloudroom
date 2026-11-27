@@ -5,6 +5,7 @@ import { ExpandableTimelineRow } from "./ExpandableTimelineRow.js";
 import { TimelineReasoningDetail } from "./TimelineReasoningDetail.js";
 import { TimelineStatusIndicator } from "./TimelineStatusIndicator.js";
 import { TimelineTitleView } from "./TimelineTitleView.js";
+import { useThreadProvider } from "../thread-provider-context.js";
 
 const INDICATOR_HEADER_CLASS_NAME = "min-h-7 items-center";
 
@@ -19,6 +20,39 @@ const WORKING_GRID_CELLS = Array.from({ length: 9 }, (_, index) => {
     "--k": distance === 2 ? 1.7 : distance,
   } as CSSProperties;
 });
+
+interface SpinnerMeta {
+  frames: number;
+  frameMs: number;
+  color: string;
+  mode: "mask" | "color";
+  frameWidth?: number;
+}
+
+/** One 28px-per-frame strip per harness, keyed by file name: `acp-` provider ids drop the prefix. */
+const SPINNER_URLS = import.meta.glob<string>("../../../assets/working-spinners/*.png", { eager: true, import: "default" });
+const SPINNER_META = import.meta.glob<SpinnerMeta>("../../../assets/working-spinners/*.json", { eager: true, import: "default" });
+
+function spinnerFor(providerId: string | null) {
+  const slug = providerId?.replace(/^acp-/, "");
+  const base = `../../../assets/working-spinners/${slug}`;
+  const url = SPINNER_URLS[`${base}.png`];
+  const meta = SPINNER_META[`${base}.json`];
+  return url && meta ? { url, ...meta } : null;
+}
+
+function WorkingIcon() {
+  const spinner = spinnerFor(useThreadProvider().providerId);
+  if (!spinner) return <WorkingGrid />;
+  const style = {
+    "--spinner-url": `url("${spinner.url}")`,
+    "--spinner-frames": spinner.frames,
+    "--spinner-width": `${(spinner.frameWidth ?? 28) / 2}px`,
+    "--spinner-duration": `${spinner.frames * spinner.frameMs}ms`,
+    "--spinner-color": spinner.color === "foreground" ? "var(--foreground)" : spinner.color,
+  } as CSSProperties;
+  return <span className="harness-spinner" data-mode={spinner.mode} style={style} />;
+}
 
 function WorkingGrid() {
   return (
@@ -66,7 +100,7 @@ export function TimelineWorkingIndicator({
           titleContent={
             shimmer ? (
               <>
-                <WorkingGrid />
+                <WorkingIcon />
                 <TimelineTitleView title={title} />
               </>
             ) : undefined
@@ -82,7 +116,7 @@ export function TimelineWorkingIndicator({
       label={
         shimmer ? (
           <span className="flex items-center gap-1.5">
-            <WorkingGrid />
+            <WorkingIcon />
             <span className="animate-shine">{resolvedLabel}</span>
           </span>
         ) : (

@@ -323,7 +323,7 @@ pub(super) async fn push(socket: &str, source: &str, target: &str) -> io::Result
         }
     };
     let out = String::from_utf8_lossy(&out);
-    let to = last_line(&out);
+    let to = landed(&out, &name.to_string_lossy());
     let mut printed = json!({"copied":source,"to":to});
     // Like cp, pushing `outputs` again to an existing `.../outputs` lands in `.../outputs/outputs`, so the files
     // one level up keep their old bytes (#1292). Say so, since agents read that as a failed overwrite.
@@ -449,6 +449,19 @@ fn progress(i: u64, pieces: u64) {
 /// The last line a Mac command printed: a chatty login shell may print before it.
 fn last_line(text: &str) -> &str {
     text.trim().lines().last().unwrap_or_default()
+}
+
+/// Where a push landed, for display only: the one line naming the pushed item at its place, since a login shell's
+/// logout or exit trap can print after it, like `clear`'s terminal codes (#2614). Otherwise the last line, as before.
+fn landed<'a>(out: &'a str, name: &str) -> &'a str {
+    let mut named = out.lines().filter(|line| {
+        line.strip_suffix(name)
+            .is_some_and(|rest| rest.ends_with(['/', '\\']))
+    });
+    match (named.next(), named.next()) {
+        (Some(line), None) => line,
+        _ => last_line(out),
+    }
 }
 
 /// After the first line that is exactly `mark`: the next line, then the bytes after it.
@@ -644,6 +657,23 @@ mod tests {
             (b"no mark", None),
         ] {
             assert_eq!(super::framed(stdout, mark).ok(), want);
+        }
+    }
+
+    #[test]
+    fn push_destination_skips_logout_output() {
+        // Git Bash with `clear` in ~/.bash_logout, as captured on Windows (#2614), and other login-shell text.
+        for (out, want) in [
+            (
+                "/c/Users/u/dest/a.txt\n\x1b[H\x1b[2J\x1b[3J",
+                "/c/Users/u/dest/a.txt",
+            ),
+            ("Hi\n/Users/u/a.txt\n/Users/u\n", "/Users/u/a.txt"),
+            // A new name, or two lines naming the item: the last line, as before.
+            ("/c/Users/u/new.txt\n\x1bc", "\x1bc"),
+            ("/x/a.txt\n/y/a.txt\n\x1bc", "\x1bc"),
+        ] {
+            assert_eq!(super::landed(out, "a.txt"), want);
         }
     }
 }

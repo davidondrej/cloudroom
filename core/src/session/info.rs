@@ -21,6 +21,9 @@ room-cli provider models PROVIDER";
 /// How long `status` waits for the website's list of children in sandboxes of their own before it answers without
 /// them: the thread's own state must come back fast, even while the website is slow (#1977).
 const CHILDREN_WAIT: Duration = Duration::from_secs(5);
+/// How long OpenCode and Antigravity may take to list their models, waiting on another lookup included, before they
+/// answer with their default: well under the CLI's 45 s (#2634).
+const MODELS_WAIT: Duration = Duration::from_secs(35);
 
 /// Served on the agent-only socket, next to the `thread` commands.
 pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
@@ -81,8 +84,8 @@ fn model_format(kind: runtime::Kind) -> &'static str {
     }
 }
 
-/// One agent's models, shaped like the Local `provider models --json`. Codex, Claude Code, Cursor and OpenCode list
-/// theirs; the others answer with their default and how they name models.
+/// One agent's models, shaped like the Local `provider models --json`. Codex, Claude Code, Cursor, OpenCode and
+/// Antigravity list theirs; the others answer with their default and how they name models.
 async fn models(
     State(m): State<Arc<Manager>>,
     ConnectInfo(peer): ConnectInfo<Peer>,
@@ -103,11 +106,19 @@ async fn models(
             | runtime::Kind::Claude
             | runtime::Kind::Cursor
             | runtime::Kind::OpenCode
+            | runtime::Kind::Antigravity
     ) {
         return Ok(Json(fallback()));
     }
+    // OpenCode and Antigravity still answer as before when their list can't be read; a missing Antigravity login
+    // says so (#2634).
+    let soft = matches!(kind, runtime::Kind::OpenCode | runtime::Kind::Antigravity);
+    let sign_in = runtime::antigravity::SIGN_IN;
+    if kind == runtime::Kind::Antigravity && runtime::antigravity::needs_login(&m.config) {
+        return Err(fail(StatusCode::CONFLICT, sign_in));
+    }
     if m.storage.blocks() {
-        if kind == runtime::Kind::OpenCode {
+        if soft {
             return Ok(Json(fallback()));
         }
         return Err(fail(
@@ -115,11 +126,20 @@ async fn models(
             "Model lists are unavailable while this sandbox's disk is critically low.",
         ));
     }
-    // A saved list answers at once; the first call asks the agent itself.
-    let models = match m.catalog(kind, true).await {
-        Ok(models) => models,
-        Err(_) if kind == runtime::Kind::OpenCode => return Ok(Json(fallback())),
-        Err(error) => return Err(session_failure(error)),
+    // A saved list answers at once; the first call asks the agent itself. Antigravity's login and models change
+    // under it, so its list is at most a minute old, as in the app.
+    let lookup = m.catalog(kind, kind != runtime::Kind::Antigravity);
+    let found = if soft {
+        tokio::time::timeout(MODELS_WAIT, lookup).await.ok()
+    } else {
+        Some(lookup.await)
+    };
+    let models = match found {
+        Some(Ok(models)) => models,
+        Some(Err(error)) if !soft || error.message() == sign_in => {
+            return Err(session_failure(error));
+        }
+        _ => return Ok(Json(fallback())),
     };
     let mut list: Vec<Value> = Vec::with_capacity(models.len() + 1);
     if kind == runtime::Kind::OpenCode && !models.iter().any(|model| model.model == "default") {

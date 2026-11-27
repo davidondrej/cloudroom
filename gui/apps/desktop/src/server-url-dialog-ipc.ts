@@ -1,9 +1,9 @@
 import { z } from "zod";
 
 export const ROOM_DESKTOP_SERVER_URL_DIALOG_SUBMIT_CHANNEL =
-  "bb-desktop:server-url-dialog:submit";
+  "room-desktop:server-url-dialog:submit";
 export const ROOM_DESKTOP_SERVER_URL_DIALOG_CANCEL_CHANNEL =
-  "bb-desktop:server-url-dialog:cancel";
+  "room-desktop:server-url-dialog:cancel";
 
 export const serverUrlDialogSubmitRequestSchema = z
   .object({

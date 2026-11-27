@@ -365,7 +365,8 @@ const teleportFileSchema = z.object({ path: z.string(), size: z.number().int().n
 const threadTeleportCommandSchema = hostDaemonThreadWorkspaceTargetSchema.extend({
   type: z.literal("thread.teleport"),
   transferId: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
-  action: z.enum(["capture", "read", "import"]),
+  // `size`: each saved conversation's size, asked before anything stops (#2280).
+  action: z.enum(["capture", "read", "import", "size"]),
   // `optional`: an archived child that never started, left out when it saved no conversation (#1767).
   sessions: z.array(z.object({ threadId: z.string().regex(/^[a-zA-Z0-9_-]+$/), nativeId: z.string().regex(/^[a-zA-Z0-9_-]+$/), harness: z.enum(["codex", "pi", "claude-code", "cursor", "opencode", "antigravity"]), optional: z.boolean().optional() })).optional(),
   file: z.string().optional(),

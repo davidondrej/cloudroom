@@ -1,8 +1,10 @@
-import type { BbDesktopApi } from "@cloudroom/desktop-contract";
+import type { RoomDesktopApi } from "@cloudroom/desktop-contract";
 
 declare global {
   interface Window {
-    bbDesktop?: BbDesktopApi;
+    roomDesktop?: RoomDesktopApi;
+    /** @deprecated Compat alias for older desktop shells connecting to a newer server. */
+    bbDesktop?: RoomDesktopApi;
   }
 }
 

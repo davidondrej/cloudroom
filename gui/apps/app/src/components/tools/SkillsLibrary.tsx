@@ -8,7 +8,10 @@ import {
 } from "@tanstack/react-query";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { buildSkillEditThreadPrompt } from "@cloudroom/shared-ui/resource-edit-prompt";
-import type { EditableSkillScope, SkillSummary } from "@cloudroom/server-contract";
+import type {
+  EditableSkillScope,
+  SkillSummary,
+} from "@cloudroom/server-contract";
 import {
   ResourceListState,
   useResourceRouteLabel,
@@ -27,7 +30,10 @@ import {
   type ProviderRoster,
 } from "@/components/tools/SkillsCollection";
 import { useSystemProviders } from "@/hooks/queries/system-queries";
-import { isSkillEditable } from "@/components/tools/skill-taxonomy";
+import {
+  groupSkillCopies,
+  isSkillEditable,
+} from "@/components/tools/skill-taxonomy";
 import { CREATE_SKILL_PROMPT } from "@cloudroom/client-core";
 import { usePrimaryHost } from "@/hooks/queries/host-queries";
 import { useHostFilePreview } from "@/hooks/queries/host-file-preview-query";
@@ -76,11 +82,15 @@ const REGISTRY_LIST_STALE_TIME_MS = 30 * 60_000;
 function SkillDetailPage({
   projectId,
   skill,
+  copies,
+  onSelectCopy,
   onClose,
   onEdit,
 }: {
   projectId: string;
   skill: SkillSummary | null;
+  copies: readonly SkillSummary[];
+  onSelectCopy: (copy: SkillSummary) => void;
   onClose: () => void;
   onEdit: (skill: SkillSummary) => void;
 }) {
@@ -119,6 +129,8 @@ function SkillDetailPage({
   return (
     <SkillDetailDialogView
       skill={skill}
+      copies={copies}
+      onSelectCopy={onSelectCopy}
       providerRoster={providerRoster}
       files={filesQuery.data?.files ?? ["SKILL.md"]}
       selectedPath={selectedPath}
@@ -171,6 +183,7 @@ export function SkillsLibrary() {
   const [registryPage, setRegistryPage] = useState(0);
   const skillsQuery = useProjectSkills(PERSONAL_PROJECT_ID);
   const skills = skillsQuery.data?.skills ?? EMPTY_SKILLS;
+  const skillGroups = useMemo(() => groupSkillCopies(skills), [skills]);
   const hasError = skillsQuery.isError && skillsQuery.data === undefined;
   const isLoading =
     skillsQuery.isFetching && skillsQuery.data === undefined && !hasError;
@@ -413,6 +426,13 @@ export function SkillsLibrary() {
     if (routeSkillId === undefined) return null;
     return skills.find((skill) => skill.id === routeSkillId) ?? null;
   }, [routeSkillId, skills]);
+  const selectedSkillCopies = useMemo(
+    () =>
+      skillGroups.find((group) =>
+        group.copies.some((copy) => copy.id === routeSkillId),
+      )?.copies ?? EMPTY_SKILLS,
+    [routeSkillId, skillGroups],
+  );
   const registrySkillOnPage = useMemo(() => {
     if (routeRegistrySkillId === undefined) {
       return null;
@@ -541,7 +561,7 @@ export function SkillsLibrary() {
               My skills
               {skillsQuery.data === undefined ? null : (
                 <span className="text-2xs text-subtle-foreground">
-                  {skills.length}
+                  {skillGroups.length}
                 </span>
               )}
             </span>
@@ -586,6 +606,12 @@ export function SkillsLibrary() {
         <SkillDetailPage
           projectId={PERSONAL_PROJECT_ID}
           skill={selectedSkill}
+          copies={selectedSkillCopies}
+          onSelectCopy={(copy) =>
+            navigate(getSkillDetailRoutePath({ skillId: copy.id }), {
+              replace: true,
+            })
+          }
           onClose={closeSkillDetail}
           onEdit={editSkillViaThread}
         />

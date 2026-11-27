@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type PointerEventHandler,
   type ReactNode,
@@ -128,6 +129,7 @@ import {
   sidebarCollapsedHarnessesAtom,
   revealedSelectedThreadKeyAtom,
   sidebarOrganizationModeAtom,
+  sidebarProjectRevealRequestAtom,
   type SidebarChronologicalSort,
   type CollapsibleSidebarSectionId,
   type SidebarOrganizationMode,
@@ -1779,6 +1781,38 @@ function ProjectListComponent({
     isPlaceholderNavigation,
     store,
     threadById,
+    uiPreferencesReady,
+  ]);
+  const projectRevealRequest = useAtomValue(sidebarProjectRevealRequestAtom);
+  const handledProjectRevealIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (
+      projectRevealRequest === null ||
+      handledProjectRevealIdRef.current === projectRevealRequest.id ||
+      !uiPreferencesReady ||
+      isPlaceholderNavigation
+    ) {
+      return;
+    }
+    handledProjectRevealIdRef.current = projectRevealRequest.id;
+    if (organizationMode !== "project") {
+      return;
+    }
+    if (projectRevealRequest.projectId === PERSONAL_PROJECT_ID) {
+      setCollapsedSidebarSectionIdList((current) =>
+        removeCollapsedIds(current, new Set(["threads"])),
+      );
+      return;
+    }
+    setCollapsedProjectIdList((current) =>
+      removeCollapsedIds(current, new Set([projectRevealRequest.projectId])),
+    );
+  }, [
+    isPlaceholderNavigation,
+    organizationMode,
+    projectRevealRequest,
+    setCollapsedProjectIdList,
+    setCollapsedSidebarSectionIdList,
     uiPreferencesReady,
   ]);
   const toggleSidebarSectionCollapsed =

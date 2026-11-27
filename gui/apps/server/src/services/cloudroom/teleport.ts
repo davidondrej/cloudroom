@@ -28,6 +28,7 @@ import {
 } from "@cloudroom/db";
 import type { AppDeps } from "../../types.js";
 import type { PromptInput, Thread } from "@cloudroom/domain";
+import { HOST_ARTIFACT_MAX_BYTES } from "@cloudroom/host-daemon-contract";
 import { ApiError } from "../../errors.js";
 import { runLiveHostCommand } from "../hosts/live-command.js";
 import { workspaceContextFromPath } from "../environments/workspace-command-target.js";
@@ -203,6 +204,33 @@ class Teleport {
             ? "teleport_login_required"
             : "teleport_check_failed",
         `${retry ? "Retry did not start." : "Teleport did not start; this thread stays local."} ${result.error}`,
+      );
+  }
+  /** The host refuses a saved conversation over its limit only after local work stopped, so ask it first (#2280). */
+  private async nativeSizes(
+    threadId: string,
+    environment: { id: string; hostId: string; path: string },
+    sessions: State["sessions"],
+  ) {
+    const { files = [] } = await runLiveHostCommand(this.deps, {
+      hostId: environment.hostId,
+      timeoutMs: 120_000,
+      command: {
+        type: "thread.teleport",
+        action: "size",
+        transferId: "check",
+        threadId,
+        environmentId: environment.id,
+        workspaceContext: workspaceContextFromPath({ path: environment.path }),
+        sessions,
+      },
+    });
+    const big = files.find((file) => file.size > HOST_ARTIFACT_MAX_BYTES);
+    if (big)
+      throw new ApiError(
+        409,
+        "teleport_history_size",
+        `${big.kind === "lineage" ? "The chat this Codex thread was forked from" : `${getThread(this.deps.db, big.path)?.title ?? big.path}'s saved conversation`} is ${Math.ceil(big.size / 1024 / 1024)} MB; Teleport carries at most ${HOST_ARTIFACT_MAX_BYTES / 1024 / 1024} MB per conversation. Nothing was stopped. Start a new Cloud thread for the next part of the work.`,
       );
   }
   async begin(
@@ -413,6 +441,8 @@ class Teleport {
       choice,
     );
     try {
+      // Sizes first: a refusal here should not wake a Cloud sandbox.
+      await this.nativeSizes(thread.id, environment, sessions);
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
       if (error instanceof ApiError) throw error;
@@ -504,6 +534,8 @@ class Teleport {
             source.id,
             source.environmentId,
           );
+      // Sizes first: a refusal here should not wake a Cloud sandbox.
+      await this.nativeSizes(thread.id, environment, sessions);
       await this.preflight(thread.id, thread.providerId, execution);
     } catch (error) {
       this.dropChecking(threadId, id);
@@ -699,7 +731,11 @@ class Teleport {
       this.notify(threadId);
     }
   }
-  private finishCancellation(state: State, keepBinding = false) {
+  private finishCancellation(
+    state: State,
+    keepBinding = false,
+    error?: string,
+  ) {
     this.deps.db.transaction((tx) => {
       for (const source of state.sessions) {
         if (teleportProgress(tx, source.threadId)?.id !== state.id) continue;
@@ -709,6 +745,7 @@ class Teleport {
           phase: "cancelled",
           completed: 0,
           total: 0,
+          ...(error && source.threadId === state.threadId ? { error } : {}),
         });
       }
       if (!keepBinding)
@@ -766,6 +803,27 @@ class Teleport {
           !state.activationRequested
         ) {
           this.finishCancellation(state);
+          return;
+        }
+        // Too big to capture fails the same way on every retry. With no manifest Cloud never heard of this transfer,
+        // so it ends like a Cancel: the thread works locally again and says why (#2280).
+        if (
+          state &&
+          !state.manifest &&
+          !state.activationRequested &&
+          !progress.cloudStarted &&
+          error instanceof Error &&
+          error.message.includes("exceeds the bounded capture size")
+        ) {
+          this.finishCancellation(
+            state,
+            false,
+            `${error.message.replace(/\.?$/, ".")} This thread stays local; start a new Cloud thread for the next part of the work.`,
+          );
+          this.deps.logger.warn(
+            { threadId, transferId: id, error: error.message },
+            "Teleport ended",
+          );
           return;
         }
         // A request that timed out is a slow link or a busy Core, never a verdict: every step reuses the transfer's

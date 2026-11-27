@@ -35,7 +35,13 @@ import {
   type LoopDialogRun,
   type Priority,
 } from "./loop-dialog";
-import { replaceWebhookUrl, showLoopError, useCloudAutomations } from "./cloud-view";
+import {
+  openRunThread,
+  replaceWebhookUrl,
+  showLoopError,
+  stopRunThread,
+  useCloudAutomations,
+} from "./cloud-view";
 import {
   AutomationOverviewView,
   automationProjectLabel,
@@ -456,7 +462,7 @@ function DeleteAutomationDialog({
   );
 }
 
-// Templates tab: the repos to pick from, and one Cloud (default) or Local loop per picked repo.
+// Templates tab: the repos to pick from, and one Cloud (or Local by default on Free) loop per picked repo.
 function useTemplates(onAdded: () => void): LoopTemplatesState {
   const rpc = useRpc<typeof automationRpcContract>();
   const sdk = useSdk();
@@ -465,13 +471,9 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
   const [projects, setProjects] = useState(lastLoaded.projects);
   const [plan, setPlan] = useState(lastLoaded.plan);
   const [usage, setUsage] = useState(lastLoaded.usage);
-  const paid = plan !== undefined && plan !== "free";
-  // A plan bought while this page is open: the pop-up after the purchase says so, and the paywall goes away.
   const [planAsked, setPlanAsked] = useState(0);
   usePlanLoopsChanged(() => setPlanAsked((count) => count + 1));
-  // Free never sees the templates, so it never pays for the estimate.
   useEffect(() => {
-    if (!paid) return;
     let cancelled = false;
     rpc.call("templates_usage", null).then(
       (result) => {
@@ -483,7 +485,7 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     return () => {
       cancelled = true;
     };
-  }, [rpc, paid]);
+  }, [rpc]);
   useEffect(() => {
     let cancelled = false;
     rpc.call("account_plan", null).then(
@@ -592,16 +594,19 @@ function useTemplates(onAdded: () => void): LoopTemplatesState {
     },
     [navigate, providers, rpc, sdk, onAdded],
   );
-  const onUpgrade = useCallback(
-    () => navigate.openUrl("https://www.cloudroom.dev/billing"),
-    [navigate],
-  );
+  const onAddProject = useCallback(() => {
+    // Older apps (SDK < 0.6.55) lack this method.
+    if (typeof navigate.experimental_openAddProject !== "function")
+      toast.error("Use New project in the sidebar to add a project.");
+    else if (!navigate.experimental_openAddProject())
+      toast.error("Can't add a project: no machine is connected.");
+  }, [navigate]);
   return {
     projects,
     onAdd,
-    locked: plan === undefined ? null : plan === "free",
-    onUpgrade,
+    freePlan: plan === "free",
     usage,
+    onAddProject,
   };
 }
 
@@ -777,6 +782,7 @@ function LocalLoopDialog({
   onClose: () => void;
 }) {
   const rpc = useRpc<typeof automationRpcContract>();
+  const navigate = useBbNavigate();
   const { automation, error, refetch } = useAutomation(route);
   const ownRuns = useRuns(route);
   const mutations = useMutations();
@@ -789,10 +795,30 @@ function LocalLoopDialog({
     [readable],
   );
 
+  useEffect(() => stopRunThread, []);
+
   const runAction = (method: "pause" | "resume" | "run") =>
     mutations[method](route).then(
-      () => {
-        if (method === "run") toast.success("Run started");
+      (result) => {
+        if (method !== "run") return;
+        toast.success("Run started");
+        // Run now puts the user in the run's thread once it has one.
+        const runId = (result as { run?: { id?: string } }).run?.id;
+        if (runId)
+          void openRunThread(
+            () =>
+              rpc
+                .call("automations_runs", route)
+                .then((value) => {
+                  const run = (value as AutomationRunListResponse).runs.find(
+                    (each) => each.id === runId,
+                  );
+                  // A run that ended with no thread opens nothing.
+                  if (run?.threadId) return run.threadId;
+                  return run && run.status !== "running" ? false : null;
+                }),
+            navigate.toThread,
+          );
       },
       (rpcError: unknown) =>
         toast.error(`Failed to ${method} loop: ${errorText(rpcError)}`),

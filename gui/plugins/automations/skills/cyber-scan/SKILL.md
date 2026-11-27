@@ -18,7 +18,7 @@ Cheap readers review GitHub repos in the cloud.
 - Give every finding a `score` from 0.1 to 10.0 matching its severity band: CRITICAL 9.0–10.0, HIGH 7.0–8.9, MEDIUM 4.0–6.9, LOW 1.0–3.9.
 - Use the score from `findings.json` when it matches the real risk. Otherwise estimate it.
 - Don't create loops until the user says yes.
-- Every loop you create is a Cloud loop.
+- Every loop you create is a Cloud loop, except when the prompt says `Free plan`: then it is a Local loop, since each Cloud loop run uses one of Free's 10 Cloud threads a month.
 - Start and wait for readers only through `readers.py`. Run its `wait` in the foreground.
 - At the end, delete the scan folder.
 
@@ -31,6 +31,7 @@ Cheap readers review GitHub repos in the cloud.
    echo "py=${py:?no working Python 3.8+}"
    "$py" "$s/collect.py" "$d"
    ```
+   When the prompt says `Free plan: at most N readers`, add `--max-readers N` (0 means no readers).
    Every step below runs scripts with this `$py`.
    No working Python: stop. Tell the user the scan needs Python 3.8 or newer from python.org.
    It takes 1-3 minutes. Then read all of `$d/summary.md`.
@@ -57,11 +58,9 @@ Cheap readers review GitHub repos in the cloud.
 5. **Report:** write `$d/report.json` (format in `report.py`), then run `"$py" "$s/report.py" "$d"`.
    Put the line it prints on its own line in your reply.
    Under it, write 2-3 short plain-English sentences: the biggest risk and the first fix.
+   On `Free plan`, if "Not fully checked" lists GitHub repos with no code review, add one line: Pro reviews the code of up to 8 repos. With 0 readers, say why: this month's Free Cloud threads are used up.
 6. **Loops:** find the 2 biggest gaps. Pick the 2 loops that would prevent that class of problem from coming back.
    - Base each on the closest security template (`room-cli loop templates`). Tune its prompt to what you found.
-   - If it says templates need a paid plan, the scan still worked.
-     Write both loops from your findings instead. Don't look for the templates elsewhere.
-     Say templates need a paid plan, with its upgrade link.
    - Each runs on one repo's Cloudroom project. Give its schedule and what it checks.
    - End with: "Turn these on?"
-7. **On yes:** create each as a Cloud loop with `room-cli loop create` (see the automations skill). Then `rm -rf "$d"`.
+7. **On yes:** create each loop (Local on `Free plan`, else Cloud) with `room-cli loop create` (see the automations skill). Then `rm -rf "$d"`.

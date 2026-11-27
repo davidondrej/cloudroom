@@ -24,19 +24,19 @@ describe("plugins guide chapter", () => {
     const names = plugin.commands.map((command) => command.name());
     expect(names.length).toBeGreaterThan(0);
 
-    const guide = renderTemplate("bbGuidePlugins", {});
+    const guide = renderTemplate("roomGuidePlugins", {});
     for (const name of names) {
       const pattern = new RegExp(`room-cli plugin (?:[a-z-]+\\|)*${name}\\b`);
       expect(
         guide,
-        `"room-cli plugin ${name}" is not documented in bb-guide-plugins.md`,
+        `"room-cli plugin ${name}" is not documented in room-guide-plugins.md`,
       ).toMatch(pattern);
     }
   });
 
   it("mentions every declared room-cli plugin option flag", () => {
     const plugin = buildPluginCommand();
-    const guide = renderTemplate("bbGuidePlugins", {});
+    const guide = renderTemplate("roomGuidePlugins", {});
     let optionCount = 0;
     for (const command of plugin.commands) {
       for (const option of command.options) {
@@ -47,7 +47,7 @@ describe("plugins guide chapter", () => {
         expect(forms.length).toBeGreaterThan(0);
         expect(
           forms.some((form) => guide.includes(form)),
-          `"room-cli plugin ${command.name()}" flag "${option.flags}" is not documented in bb-guide-plugins.md`,
+          `"room-cli plugin ${command.name()}" flag "${option.flags}" is not documented in room-guide-plugins.md`,
         ).toBe(true);
       }
     }
@@ -59,11 +59,11 @@ describe("plugins guide chapter", () => {
     const names = marketplace.commands.map((command) => command.name());
     expect(names.length).toBeGreaterThan(0);
 
-    const guide = renderTemplate("bbGuidePlugins", {});
+    const guide = renderTemplate("roomGuidePlugins", {});
     for (const name of names) {
       expect(
         guide,
-        `"room-cli marketplace ${name}" is not documented in bb-guide-plugins.md`,
+        `"room-cli marketplace ${name}" is not documented in room-guide-plugins.md`,
       ).toMatch(new RegExp(`room-cli marketplace ${name}\\b`));
     }
   });

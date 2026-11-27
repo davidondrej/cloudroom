@@ -832,12 +832,19 @@ describe("server-contract canonical schemas", () => {
       createProjectSourceRequestSchema.parse({
         hostId: "host_123",
         type: "local_path",
-        path: " /tmp/project/ ",
+        path: " /tmp/Demo /",
       }),
     ).toMatchObject({
       type: "local_path",
-      path: "/tmp/project",
+      path: "/tmp/Demo ",
     });
+    expect(() =>
+      createProjectSourceRequestSchema.parse({
+        hostId: "host_123",
+        type: "local_path",
+        path: "   ",
+      }),
+    ).toThrow("Project path must be an absolute path.");
 
     expect(() =>
       createProjectSourceRequestSchema.parse({

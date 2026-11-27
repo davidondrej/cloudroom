@@ -8,6 +8,7 @@ import type { ExecutionControlsProps } from "@/components/promptbox/ExecutionCon
 import type { FollowUpComposerProps } from "@/components/promptbox/FollowUpPromptBox";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import { getPromptDraftAccessor } from "@/hooks/usePromptDraftStorage";
+import { HttpError } from "@/lib/api";
 import { EmbeddedThreadChat } from "./EmbeddedThreadChat";
 
 const mocks = vi.hoisted(() => ({
@@ -36,6 +37,7 @@ const mocks = vi.hoisted(() => ({
         id: string;
         createdAt: number;
         payload: { kind: string };
+        origin?: { kind: string; pluginId: string };
       }>
     | undefined,
   pendingInteractionsIsError: false,
@@ -636,6 +638,49 @@ describe("EmbeddedThreadChat", () => {
     );
   });
 
+  it("restores a failed send even after the chat closed", async () => {
+    let reject: (error: Error) => void = () => {};
+    mocks.sendThreadMessageMutateAsync.mockReturnValueOnce(
+      new Promise((_, fail) => (reject = fail)),
+    );
+    const first = renderEmbeddedChat();
+    fireEvent.change(screen.getByTestId("embedded-chat-composer"), {
+      target: { value: "Keep me" },
+    });
+    fireEvent.pointerDown(screen.getByText("Send"));
+    fireEvent.click(screen.getByText("Send"));
+    await vi.waitFor(() => expect(mocks.sendThreadMessageMutateAsync).toHaveBeenCalled());
+    first.unmount();
+    reject(new Error("offline"));
+    await vi.waitFor(() =>
+      expect(Object.keys(window.localStorage).some((key) => key.startsWith("bb.failed-messages:"))).toBe(true),
+    );
+    renderEmbeddedChat();
+    expect(screen.getByLabelText("Failed message").textContent).toContain("may not have been sent · Keep me");
+  });
+
+  it("keeps a failed send aside while the user typed, and restores it only on click", async () => {
+    let reject: (error: Error) => void = () => {};
+    mocks.sendThreadMessageMutateAsync.mockReturnValueOnce(
+      new Promise((_, fail) => (reject = fail)),
+    );
+    renderEmbeddedChat();
+    const composer = screen.getByTestId<HTMLInputElement>("embedded-chat-composer");
+    fireEvent.change(composer, { target: { value: "Keep me" } });
+    fireEvent.pointerDown(screen.getByText("Send"));
+    fireEvent.click(screen.getByText("Send"));
+    await vi.waitFor(() => expect(composer.value).toBe(""));
+    fireEvent.change(composer, { target: { value: "Follow-up" } });
+    reject(new HttpError({ status: 400, message: "bad" }));
+    await vi.waitFor(() => screen.getByLabelText("Failed message"));
+    const draft = getPromptDraftAccessor({ kind: "thread", projectId: "proj-1", threadId: "thr_child" });
+    expect(draft.getCurrent().text).toBe("Follow-up");
+    fireEvent.click(screen.getByText("Restore failed message"));
+    expect(draft.getCurrent().text).toBe("Keep me\n\nFollow-up");
+    expect(screen.queryByLabelText("Failed message")).toBeNull();
+    expect(mocks.sendThreadMessageMutateAsync).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps queued messages adjacent to the composer", () => {
     mocks.queuedMessages = [{ id: "q1" }, { id: "q2" }];
     renderEmbeddedChat();
@@ -693,25 +738,39 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(true);
   });
 
-  it("keeps the composer for a plugin-owned interaction", () => {
+  it("shows a plugin request such as the Secrets form in place of the composer", () => {
     mocks.pendingInteractions = [
-      { id: "int_2", createdAt: 1, payload: { kind: "plugin" } },
+      {
+        id: "int_2",
+        createdAt: 1,
+        payload: { kind: "plugin" },
+        origin: { kind: "plugin", pluginId: "secrets" },
+      },
     ];
 
     renderEmbeddedChat({ threadId: "thr_side_chat" });
 
-    expect(screen.queryByTestId("pending-interaction-banner")).toBeNull();
-    expect(screen.getByTestId("embedded-chat-composer")).toBeTruthy();
+    expect(screen.getByTestId("pending-interaction-banner").textContent).toBe(
+      "thr_side_chat",
+    );
+    expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(true);
   });
 
-  it("keeps queued messages attached for a plugin-owned interaction", () => {
+  it("keeps the composer and attached queue for a chat-card plugin request", () => {
     mocks.pendingInteractions = [
-      { id: "int_2", createdAt: 1, payload: { kind: "plugin" } },
+      {
+        id: "int_2",
+        createdAt: 1,
+        payload: { kind: "plugin" },
+        origin: { kind: "plugin", pluginId: "gpu" },
+      },
     ];
     mocks.queuedMessages = [{ id: "q1" }];
 
     renderEmbeddedChat({ threadId: "thr_side_chat" });
 
+    expect(screen.queryByTestId("pending-interaction-banner")).toBeNull();
+    expect(screen.getByTestId("embedded-chat-composer").hidden).toBe(false);
     expect(
       screen
         .getByTestId("embedded-chat-queued-messages")

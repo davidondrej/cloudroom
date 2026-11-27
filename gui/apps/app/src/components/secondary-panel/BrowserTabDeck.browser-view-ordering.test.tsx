@@ -118,7 +118,7 @@ function createRecordingBrowserApi(): RecordingBrowserApi {
 }
 
 function installDesktopBrowser(api: RoomDesktopBrowserApi): void {
-  window.bbDesktop = createRoomDesktopApi(desktopInfo, api);
+  window.roomDesktop = createRoomDesktopApi(desktopInfo, api);
 }
 
 function createMatchMedia(
@@ -179,7 +179,7 @@ describe("BrowserTabLifecycleObserver", () => {
     cleanup();
     vi.restoreAllMocks();
     resetBrowserViewPersistence();
-    delete window.bbDesktop;
+    delete window.roomDesktop;
   });
 
   it("destroys a closed browser view exactly once without an active deck", async () => {
@@ -223,7 +223,7 @@ describe("BrowserTabDeck native browser first-show ordering", () => {
     vi.restoreAllMocks();
     resetBrowserViewPersistence();
     window.localStorage.clear();
-    delete window.bbDesktop;
+    delete window.roomDesktop;
     Object.defineProperty(window, "matchMedia", {
       configurable: true,
       writable: true,

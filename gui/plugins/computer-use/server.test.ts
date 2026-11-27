@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { assetFor } from "./driver.js";
-import { driverEnv, install, pruneOldVersions, workingXauthority } from "./host.js";
+import { driverEnv, install, pruneOldVersions, unsupportedGnomeHint, workingXauthority } from "./host.js";
 import computerUsePlugin, { acceptFocusedWindow, decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
@@ -229,6 +229,17 @@ it.runIf(process.platform !== "win32")("passes XAUTHORITY to the driver only whe
     hangup.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+// #2685: Cua's WinRects helper refuses GNOME 50+, so only offer its install on Shells its metadata lists.
+it("offers WinRects only on GNOME Shells the bundled helper supports", () => {
+  const metadata = JSON.stringify({ uuid: "winrects@cua", "shell-version": ["45", "46", "47", "48", "49"] });
+  expect(unsupportedGnomeHint("GNOME Shell 49.2\n", metadata, true)).toBeNull();
+  expect(unsupportedGnomeHint("GNOME Shell 50.1\n", metadata, true)).toMatch(/only GNOME Shell 45, 46, 47, 48, 49, and this is GNOME Shell 50,.*Don't install/);
+  expect(unsupportedGnomeHint("", metadata, true)).toMatch(/unknown version/);
+  expect(unsupportedGnomeHint("GNOME Shell 50.1\n", null, false)).toMatch(/unknown until the driver is installed/);
+  expect(unsupportedGnomeHint("GNOME Shell 49.2\n", metadata, false)).toMatch(/unknown until the driver is installed/);
+  expect(unsupportedGnomeHint("GNOME Shell 49.2\n", null, true)).toMatch(/metadata is missing.*Don't install or enable it\.$/);
 });
 
 // #1242: GitHub's download sometimes answers 5xx; retry it, never skip the checksum.

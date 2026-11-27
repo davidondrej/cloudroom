@@ -333,6 +333,34 @@ describe("room-cli thread tell command output", () => {
     }
   });
 
+  it("room-cli thread tell --parent sends to the caller's saved parent, as Cloud does (#2250)", async () => {
+    vi.stubEnv("ROOM_THREAD_ID", "thread-child");
+    const post = vi.fn(async () => ({ ok: true }));
+    stubTellApi({
+      "v1.threads.:id.$get": async ({ param }: { param: { id: string } }) =>
+        fixtures.makeThread({
+          id: param.id,
+          projectId: "proj-local",
+          providerId: "codex",
+          executionTarget: "local",
+          parentThreadId: param.id === "thread-child" ? "thread-moved" : null,
+        }),
+      "v1.threads.:id.send.$post": post,
+    });
+
+    await runCommand(["thread", "tell", "--parent", "done"], register);
+    expect(post).toHaveBeenCalledWith(
+      expect.objectContaining({
+        param: { id: "thread-moved" },
+        json: expect.objectContaining({ senderThreadId: "thread-child" }),
+      }),
+    );
+    await expect(
+      runCommand(["thread", "tell", "--parent", "thread-x", "hi"], register),
+    ).rejects.toThrow("process.exit:1");
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
   it("room-cli thread tell forwards automatic review mode", async () => {
     const post = vi.fn(async () => ({ ok: true }));
     stubTellApi({ "v1.threads.:id.send.$post": post });

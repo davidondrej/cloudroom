@@ -779,7 +779,7 @@ export function RoomAppUpdateRows({
   const row = (name: ReactNode, indicator: ReactNode, caption?: ReactNode) => (
     <UpdatesRow
       leading={
-        <span data-bb-update-role="app" aria-hidden>
+        <span data-room-update-role="app" aria-hidden>
           <RoomLogo className="size-4" />
         </span>
       }
@@ -1005,7 +1005,7 @@ export function RoomDaemonUpdateRow({
       openLabel={`Open ${host.name} settings`}
       onOpen={() => onOpenMachine(host.id)}
       leading={
-        <span data-bb-update-role="daemon" aria-hidden>
+        <span data-room-update-role="daemon" aria-hidden>
           <RoomLogo className="size-4" />
         </span>
       }

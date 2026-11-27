@@ -142,7 +142,7 @@ describe("theme.css neutral ramp", () => {
     )?.[1];
     expect(stickyRule).toContain("background-image: linear-gradient(");
     expect(
-      stickyRule?.match(/var\(--bb-sidebar-open-in-split-background\)/g),
+      stickyRule?.match(/var\(--room-sidebar-open-in-split-background\)/g),
     ).toHaveLength(2);
 
     const interactiveRule = css.match(
@@ -297,7 +297,7 @@ describe("theme.css semantic update surfaces", () => {
 describe("theme.css desktop portal hit testing", () => {
   it("carves portaled overlays out of native window drag regions", () => {
     const rule = css.match(
-      /\[data-bb-portaled-overlay\]:not\(\[data-state="closed"\]\)\s*\{([^}]*)\}/,
+      /\[data-room-portaled-overlay\]:not\(\[data-state="closed"\]\),\s*\[data-bb-portaled-overlay\]:not\(\[data-state="closed"\]\)\s*\{([^}]*)\}/,
     )?.[1];
 
     expect(rule).toBeDefined();

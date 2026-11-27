@@ -298,6 +298,30 @@ class WindowsPathTests(unittest.TestCase):
             for path in ('/c/x', r'a\b', 'C:/x'):
                 self.assertEqual((preview.native(path), preview.posix(path)), (path, path))
 
+    def test_push_to_tmp_uses_git_bashs_tmp(self):
+        """#2667: a push to /tmp goes where Git Bash, so `mac run`, resolves it. Anything else, or no clean answer, as before."""
+        cygpath = lambda out, code=0: mock.patch.object(preview.subprocess, 'run', return_value=SimpleNamespace(stdout=out.encode(), returncode=code))
+        with mock.patch.object(preview, 'WINDOWS', True), mock.patch.object(preview, 'git_bash', return_value='bash.exe'):
+            for to, out, code, place in (('/tmp/a.txt', 'C:/Users/Zoë/AppData/Local/Temp/a.txt\n', 0, 'C:/Users/Zoë/AppData/Local/Temp/a.txt'),
+                                         ('/tmp/../reports/', 'C:/Program Files/Git/reports\n', 0, 'C:/Program Files/Git/reports/'),
+                                         ('/tmp/x', '//server/share/Temp/x\n', 0, '//server/share/Temp/x'), ('/tmp/x', '//?/C:/long/x\n', 0, 'C:/long/x'),
+                                         ('/tmp/x', '//?/UNC/server/share/x\n', 0, '//server/share/x'), ('/tmp/x', 'C:/other/x\n', 1, None),
+                                         ('/tmp/x', 'C:/a\nC:/b\n', 0, None), ('/tmp/a:b', 'C:/T/a\uf03ab\n', 0, None),
+                                         ('/tmp/a\nb', 'C:/T/a\uf00ab\n', 0, None), ('/tmp/x', '/tmp/x\n', 0, None), ('/tmp/x', '', 0, None)):
+                with cygpath(out, code) as run:
+                    self.assertEqual(preview.bash_tmp(to), place, (to, out))
+                self.assertEqual(run.call_args.kwargs['env']['CLOUDROOM_COMMAND'], to)
+            with cygpath('C:/x\n') as run:
+                for kept in (r'\tmp\x', '/tmpx', 'C:/tmp/a', '~/tmp'):
+                    self.assertIsNone(preview.bash_tmp(kept), kept)
+                run.assert_not_called()
+            with mock.patch.object(preview, 'git_bash', return_value=None):  # A place the push would refuse: as before.
+                before = preview.copy_command({'name': 'a.txt', 'to': '/tmp/a.txt'})[1]
+            with cygpath('C:/T?/a.txt\n'):
+                self.assertEqual(preview.copy_command({'name': 'a.txt', 'to': '/tmp/a.txt'})[1], before)
+        with mock.patch.object(preview, 'WINDOWS', False):
+            self.assertIsNone(preview.bash_tmp('/tmp/a.txt'))  # Mac and Linux keep /tmp.
+
     def test_push_refuses_names_windows_cannot_store(self):
         for bad in ('', 'a:b', r'a\b', 'x?', 'a*b', '"q"', 'NUL', 'con.txt', 'CONIN$', 'CONOUT$.txt', 'COM1', 'COM¹', 'lpt9.log', 'LPT³', 'name.', 'name ', 'tab\there'):
             self.assertFalse(preview.windows_name(bad), bad)

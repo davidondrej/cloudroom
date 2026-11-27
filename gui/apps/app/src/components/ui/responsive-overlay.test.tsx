@@ -397,7 +397,7 @@ describe("PersistentResponsiveDrawerShell", () => {
     );
 
     const nestedAction = document.createElement("button");
-    nestedAction.setAttribute("data-bb-portaled-overlay", "");
+    nestedAction.setAttribute("data-room-portaled-overlay", "");
     nestedAction.addEventListener("keydown", (event) => {
       event.preventDefault();
     });
@@ -424,7 +424,7 @@ describe("PersistentResponsiveDrawerShell", () => {
     );
 
     const nestedAction = document.createElement("button");
-    nestedAction.setAttribute("data-bb-portaled-overlay", "");
+    nestedAction.setAttribute("data-room-portaled-overlay", "");
     document.body.appendChild(nestedAction);
     nestedAction.focus();
 
@@ -758,7 +758,7 @@ describe("drawer software keyboard inset", () => {
         for (const frame of frames.splice(0)) frame(0);
       });
       expect(panel.style.bottom).toBe("336px");
-      expect(panel.style.getPropertyValue("--bb-drawer-keyboard-inset")).toBe(
+      expect(panel.style.getPropertyValue("--room-drawer-keyboard-inset")).toBe(
         "336px",
       );
 
@@ -768,7 +768,7 @@ describe("drawer software keyboard inset", () => {
         for (const frame of frames.splice(0)) frame(0);
       });
       expect(panel.style.bottom).toBe("");
-      expect(panel.style.getPropertyValue("--bb-drawer-keyboard-inset")).toBe(
+      expect(panel.style.getPropertyValue("--room-drawer-keyboard-inset")).toBe(
         "",
       );
     } finally {
@@ -813,7 +813,7 @@ describe("drawer software keyboard inset", () => {
       });
 
       expect(panel.style.bottom).toBe("");
-      expect(panel.style.getPropertyValue("--bb-drawer-keyboard-inset")).toBe(
+      expect(panel.style.getPropertyValue("--room-drawer-keyboard-inset")).toBe(
         "",
       );
     } finally {

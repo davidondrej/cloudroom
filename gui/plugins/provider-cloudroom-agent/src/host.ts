@@ -60,7 +60,7 @@ type Grant = { token: string; baseUrl: string; model: Model };
 /** What Pi is told before the first token arrives, so the model lists at once. The website's own answer replaces it. */
 const FIRST: Omit<Grant, "token"> = {
   baseUrl: "https://www.cloudroom.dev/api/inference",
-  model: { id: "cloudroom-agent", name: "Cloudroom Agent", reasoning: true, input: ["text", "image"], contextWindow: 256_000, maxTokens: 32_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: { allowEmptySignature: true } },
+  model: { id: "cloudroom-agent", name: "Cloudroom Agent", reasoning: true, input: ["text", "image"], contextWindow: 256_000, maxTokens: 16_000, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compat: { allowEmptySignature: true } },
 };
 
 function grantOf(line: string): Grant | null {

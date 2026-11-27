@@ -16,7 +16,7 @@ import { useMediaQuery } from "@cloudroom/shared-ui/hooks/use-media-query";
 import { useSystemProviderInfo } from "@/hooks/queries/system-queries";
 import { useCloudroomConnection, cloudFeatureSupported, useOpenCloudFile, useCloudroomThread, useCloudroomThreadWorkspace } from "@/hooks/queries/cloudroom-queries";
 import { useNavigate } from "react-router";
-import { useAtom, useSetAtom } from "jotai";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
 import { findPane, replacePaneContent } from "@/lib/split-layout";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { useDesktopBrowserReveal } from "@/lib/use-desktop-browser-reveal";
@@ -68,9 +68,11 @@ import { useForkThreadFromMessage } from "@/hooks/useForkThreadFromMessage";
 import { isThreadForkable } from "@cloudroom/client-core";
 import { useRequestEnvironmentAction } from "../../hooks/mutations/environment-mutations";
 import {
+  useArchiveThreadAndChildren,
   useMarkThreadRead,
   useUpdateThread,
 } from "../../hooks/mutations/thread-state-mutations";
+import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 import {
   useCreateThreadQueuedMessage,
   useEditThreadMessage,
@@ -149,6 +151,7 @@ import {
 import { getThreadDisplayTitle } from "@/lib/thread-title";
 import { hasThreadProvisioningFailure } from "@/lib/thread-provisioning-failure";
 import { hasThreadAuthFailure } from "@/lib/thread-auth-failure";
+import { hasMissingSession } from "@/components/MissingSessionNotice";
 import {
   getMutationErrorMessage,
   showMutationErrorToast,
@@ -181,6 +184,7 @@ import {
 } from "@/components/right-panel/tabs/thread-info";
 import { ThreadDetailHeader } from "./ThreadDetailHeader";
 import { SubagentBar } from "./SubagentBar";
+import { showSubagentBarAtom } from "@/components/sidebar/sidebarCollapsedAtoms";
 import {
   ThreadDetailPromptArea,
   type ThreadDetailSentMessageEdit,
@@ -928,6 +932,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     filters: EMPTY_PROJECT_THREAD_SUBSET_FILTERS,
     projectId,
   });
+  const showSubagentBar = useAtomValue(showSubagentBarAtom);
   const childThreadSubsetQuery = useChildThreads({
     enabled: threadQueryState.status === "ready" && Boolean(thread?.id),
     parentThreadId: thread?.id,
@@ -1412,6 +1417,22 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   const { mutate: openCloudFile } = useOpenCloudFile(threadId);
   // Cloud threads have no environment, so chat resolves relative file links against the sandbox checkout.
   const cloudThreadState = useCloudroomThread(threadId, isCloudThread);
+  const { mutate: archiveThread } = useArchiveThreadAndChildren();
+  const setRootComposeProjectId = useSetRootComposeProjectId();
+  // Free's Cloud used up before this thread ever started (David, 2026-11-26): its first message moves to a new Local
+  // thread, and this empty Cloud thread is archived so the message can't also run here at the reset. Stop can't cancel
+  // a first message whose start Cloud refuses, so archiving is the guard; Unarchive brings it back.
+  const waitsToStart = isCloudThread && !cloudThreadState.data?.sessionId && (cloudThreadState.data?.pendingDelivery ?? 0) > 0;
+  const runFirstMessageLocally = useCallback(() => {
+    if (!thread) return;
+    const text = displayedTimelineRows.find((row) => row.kind === "conversation" && row.role === "user")?.text ?? "";
+    archiveThread({ id: thread.id });
+    setRootComposeProjectId(thread.projectId);
+    void navigate(getRootComposeRoutePath(), {
+      state: { focusPrompt: true, executionTarget: "local", ...(text ? { initialPrompt: text, replaceInitialPrompt: true } : {}) },
+    });
+    appToast.success("Moved to a new Local thread. Press Send to run it. The Cloud thread is archived.");
+  }, [archiveThread, displayedTimelineRows, navigate, setRootComposeProjectId, thread]);
   const cloudWorkspace = useCloudroomThreadWorkspace(
     threadId,
     isCloudThread && Boolean(cloudThreadState.data?.sessionId),
@@ -2733,6 +2754,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       : false;
   const providerAuthFailed =
     thread.status === "error" && hasThreadAuthFailure(timelineRows);
+  const sessionMissing = hasMissingSession(thread, timelineRows);
   const threadEnvironmentProviderLookup = findEnvironmentDisplayProvider(
     registeredEnvironmentProviders,
     environment?.environmentProviderId ?? null,
@@ -2903,6 +2925,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       onChangedFileClick={handleChangedFileClick}
       projectId={projectId}
       providerAuthFailed={providerAuthFailed}
+      sessionMissing={sessionMissing}
       resolveMentionLink={resolveMentionLink}
       workspaceChangedFilesSection={
         canUseGitUi ? workspaceChangedFilesSection : null
@@ -3133,10 +3156,12 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
             header={
               <>
                 {timelineHeader}
-                <SubagentBar
-                  childThreads={childThreadSubsetQuery.data ?? []}
-                  reserveRight={!isSideChatThread && sideChatAction != null}
-                />
+                {showSubagentBar ? (
+                  <SubagentBar
+                    childThreads={childThreadSubsetQuery.data ?? []}
+                    reserveRight={!isSideChatThread && sideChatAction != null}
+                  />
+                ) : null}
               </>
             }
             isMetadataLoading={environmentQuery.isLoading}
@@ -3261,6 +3286,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
                     {cloudThreadState.data?.usageLimit && (
                       <CloudUsageLimitNotice
                         launchCap={cloudThreadState.data.launchCap}
+                        onRunLocal={waitsToStart ? runFirstMessageLocally : undefined}
                         className="mt-1 px-2"
                       />
                     )}

@@ -99,7 +99,7 @@ export const bundleTargets = [
       "bridge-worker-entry.ts",
     ),
     label: "provider bridge worker",
-    outfile: resolve(packageRoot, "dist", "bb-provider-bridge-worker.mjs"),
+    outfile: resolve(packageRoot, "dist", "room-provider-bridge-worker.mjs"),
   },
   {
     // Forked child that runs a plugin's `bb.host` entry (plugin-host-manager.ts).
@@ -108,7 +108,7 @@ export const bundleTargets = [
     banner: NODE_ESM_REQUIRE_BANNER,
     entryPoint: resolve(packageRoot, "src", "plugin-host-worker.ts"),
     label: "plugin host worker",
-    outfile: resolve(packageRoot, "dist", "bb-plugin-host-worker.mjs"),
+    outfile: resolve(packageRoot, "dist", "room-plugin-host-worker.mjs"),
   },
   {
     banner: NODE_ESM_REQUIRE_BANNER,
@@ -139,6 +139,6 @@ export const bundleTargets = [
       "parcel-child-entry.ts",
     ),
     label: "parcel watcher child",
-    outfile: resolve(packageRoot, "dist", "bb-parcel-watcher-child.mjs"),
+    outfile: resolve(packageRoot, "dist", "room-parcel-watcher-child.mjs"),
   },
 ];

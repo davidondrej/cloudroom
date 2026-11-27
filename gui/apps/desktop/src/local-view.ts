@@ -1,7 +1,7 @@
 import { stripVTControlCharacters } from "node:util";
 import { escapeHtmlText } from "@cloudroom/domain";
 
-export const STARTUP_RETRY_CHANNEL = "bb-desktop:retry-startup";
+export const STARTUP_RETRY_CHANNEL = "room-desktop:retry-startup";
 
 export type LocalViewModel = LoadingViewModel | StartupErrorViewModel;
 

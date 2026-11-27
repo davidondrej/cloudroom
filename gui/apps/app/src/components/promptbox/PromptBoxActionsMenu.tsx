@@ -48,6 +48,8 @@ interface PromptBoxActionsMenuProps {
   actions?: readonly PromptBoxAction[];
   isAttaching?: boolean;
   onAttach?: () => void;
+  /** Attaches the copied image. Shown only where a keyboard paste cannot do it. */
+  onPasteImage?: () => void;
   onAction: (action: PromptBoxAction) => void;
   pluginItems?: readonly PluginComposerPlusMenuContribution[];
 }
@@ -135,6 +137,7 @@ export function PromptBoxActionsMenu({
   actions = [],
   isAttaching = false,
   onAttach,
+  onPasteImage,
   onAction,
   pluginItems = [],
 }: PromptBoxActionsMenuProps) {
@@ -269,6 +272,28 @@ export function PromptBoxActionsMenu({
               />
               Attach files
             </DropdownMenuItem>
+            {onPasteImage ? (
+              <DropdownMenuItem
+                disabled={isAttaching}
+                className={
+                  isCompactViewport ? COMPACT_ACTION_ROW_CLASS_NAME : undefined
+                }
+                onSelect={() => {
+                  selectedItemRef.current = true;
+                  onPasteImage();
+                }}
+              >
+                <Icon
+                  name="Image"
+                  className={cn(
+                    "text-muted-foreground",
+                    !isCompactViewport && "size-4",
+                  )}
+                  aria-hidden
+                />
+                Paste image
+              </DropdownMenuItem>
+            ) : null}
             {visibleActions.length > 0 && !isCompactViewport ? (
               <DropdownMenuSeparator />
             ) : null}

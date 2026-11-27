@@ -216,11 +216,11 @@ async function loadLibraries(format: OfficeDocumentFormat): Promise<string[]> {
       await import("../../../../node_modules/pptx-preview/dist/pptx-preview.umd.js?raw");
     return [pptx.default];
   }
-  const [jszip, docx] = await Promise.all([
-    import("../../../../node_modules/jszip/dist/jszip.min.js?raw"),
+  const [zip, docx] = await Promise.all([
+    import("./office-document-zip"),
     import("../../../../node_modules/docx-preview/dist/docx-preview.min.js?raw"),
   ]);
-  return [jszip.default, docx.default];
+  return [`(${zip.defineFrameJSZip.toString()})()`, docx.default];
 }
 
 function buildFrameDocument(libraries: string[]): string {

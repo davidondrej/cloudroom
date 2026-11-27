@@ -54,13 +54,15 @@ export interface CloudroomStatus {
   cloudQueue?: { position: number; total: number; regionBlocked: boolean } | null;
   /** Non-null when Metal capacity is temporarily reserved for higher plans and this account's tier waits. */
   cloudCapacity?: "paid" | "priority" | null;
+  /** Free's Cloud is used up (credits or its 10 threads a month) until `resetsAt`. Missing from older servers. */
+  cloudLimit?: { kind: "credits" | "threads"; resetsAt: string | null } | null;
   /** The website's database can't answer (an outage or planned work): Cloud waits and Local works. Missing from older servers. */
   cloudPaused?: boolean;
   /** The account's plan (free, pro, super, ultra) from the website's mode check; null while billing is off or unknown. */
   plan?: string | null;
   /** The account's Cloud Credits this credit period and when they refill (`resetsAt`, ADR 20261108-142517): Free's sidebar
    *  card, paid plans' meter from 75%. Null while billing is off or in the cloud queue; null credits while metering is stale. */
-  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number } | null;
+  planUsage?: { plan: string; credits: number | null; creditsLimit: number; resetsAt?: string | null; extraCredits?: number; extraCreditsTotal?: number; threadsLeft?: number | null; threadsHourLeft?: number | null } | null;
   /** Thread families burning Cloud Credits fast, by top thread: credits in the last hour, and how many subagents used most
    *  of them (0: the thread itself). The sidebar shows a red line under each (docs/scopes/credit-burn.md). */
   burning?: Record<string, { credits: number; subagents: number }>;
@@ -165,6 +167,8 @@ export interface CloudAutomation {
   id: string;
   thread_id: string;
   session_id: string | null;
+  /** The thread `session_id` belongs to on this Mac: a shared-sandbox child, whose `thread_id` is the sandbox's root. */
+  session_thread_id?: string;
   name: string;
   prompt: string;
   cron: string | null;
@@ -314,8 +318,8 @@ export interface CloudroomArea {
   githubAuth(signal?: AbortSignal): Promise<CloudroomGithubAuth>;
   /** Copies this computer's local `gh` login to Cloud once after explicit user confirmation (ADR 20261124-215124). */
   copyMacGithub(expectedLogin?: string | null): Promise<CloudroomGithubAuth>;
-  /** With `repos`, Cloud gets only the repos the user then picks on GitHub. While they pick, the answer is `waiting` with GitHub's page and no code. */
-  githubLogin(requestId: string, repos?: boolean): Promise<CloudroomCodexAuth>;
+  /** Runs the GitHub App device flow, then waits for the user to pick repos on GitHub (all or selected) unless already installed. */
+  githubLogin(requestId: string): Promise<CloudroomCodexAuth>;
   cancelGithubLogin(requestId: string): Promise<CloudroomCodexAuth>;
   /** Null when GitHub can't tell right now. */
   githubAccount(signal?: AbortSignal): Promise<CloudroomGithubAccount | null>;
@@ -376,6 +380,8 @@ export interface CloudroomArea {
   org(input: { action: string } & Record<string, unknown>): Promise<unknown>;
   /** Shared projects (docs/scopes/shared-projects.md): passes one request to the website's `/api/desktop/project-shares`, signed in as this account. */
   projectShares(input: { action: string } & Record<string, unknown>): Promise<unknown>;
+  /** The Director's lessons (docs/scopes/director.md#learning): passes one request to the website's `/api/desktop/director`, signed in as this account. */
+  director(input: { action: "read" | "teach" } & Record<string, unknown>): Promise<unknown>;
   /** GPUs (docs/scopes/gpus.md): one `room-cli gpu` step for `/api/desktop/gpu`, signed in as this account. */
   gpu(input: { argv: string[]; thread?: string }): Promise<unknown>;
   /** Cloudroom Agent (docs/scopes/cloudroom-agent.md): a token from `/api/desktop/inference` that can only buy inference. */
@@ -520,7 +526,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     deepSearch: (input, signal) => transport.readJson(request("/deep-search", input, signal)) as Promise<{ threads: ThreadListEntry[] }>,
     projectBranches: (projectId, signal) => transport.readJson(request(`/project-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{defaultBranch:string|null;branches:string[]}>,
     githubBranches: (projectId, signal) => transport.readJson(request(`/github-branches?project=${encodeURIComponent(projectId)}`, undefined, signal)) as Promise<{ defaultBranch: string | null; branches: string[] }>,
-    githubLogin: (requestId, repos) => transport.readJson(request("/github/login", repos ? { requestId, repos } : { requestId })) as Promise<CloudroomCodexAuth>,
+    githubLogin: (requestId) => transport.readJson(request("/github/login", { requestId })) as Promise<CloudroomCodexAuth>,
     cancelGithubLogin: (requestId) => transport.readJson(request("/github/cancel", { requestId })) as Promise<CloudroomCodexAuth>,
     githubAccount: (signal) => transport.readJson(request("/github/account", undefined, signal)) as Promise<CloudroomGithubAccount | null>,
     disconnectGithub: () => transport.readVoid(request("/github/disconnect", {})),
@@ -545,6 +551,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     snippets: (input) => transport.readJson(request("/snippets", input)),
     org: (input) => transport.readJson(request("/org", input)),
     projectShares: (input) => transport.readJson(request("/project-shares", input)),
+    director: (input) => transport.readJson(request("/director", input)),
     gpu: (input) => transport.readJson(request("/gpu", input)),
     inference: () => transport.readJson(request("/inference", {})),
     setAutoDelete: (days) => transport.readJson(request("/auto-delete", { days })) as Promise<AutoDeleteSetting>,

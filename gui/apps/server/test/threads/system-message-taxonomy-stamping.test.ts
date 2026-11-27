@@ -210,6 +210,15 @@ describe("Family B emit-site discriminator stamping", () => {
         title: "Assigned child",
         parentThreadId: fixture.parentThreadId,
       });
+      // An archived child's move tells its parent nothing (#2639).
+      const archived = seedThread(harness.deps, {
+        projectId: fixture.projectId,
+        parentThreadId: fixture.parentThreadId,
+      });
+      await handleThreadOwnershipChange(harness.deps, {
+        previousThread: { ...archived, parentThreadId: null },
+        updatedThread: { ...archived, archivedAt: 1 },
+      });
 
       await handleThreadOwnershipChange(harness.deps, {
         previousThread: { ...child, parentThreadId: null },

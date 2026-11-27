@@ -15,7 +15,7 @@ import {
   SectionSidebarIcon,
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
-import { InviteSidebarRow } from "@/components/InviteOffer";
+import { EarnSidebarCard } from "./ReferralsSettingsSection";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
 import { useCloseMobileSidebar } from "@/components/ui/sidebar.js";
 import { SettingsAccountMenu } from "./SettingsAccountMenu";
@@ -52,14 +52,14 @@ type SettingsSidebarNavigation = Pick<
 
 interface SettingsSidebarContentProps extends SettingsSidebarProps {
   account?: ReactNode;
-  invite?: ReactNode;
+  earn?: ReactNode;
   navigation: SettingsSidebarNavigation;
   testIdPrefix?: string;
 }
 
 export function SettingsSidebarContent({
   account,
-  invite,
+  earn,
   onResizeMouseDown,
   isResizing,
   appRoutePath,
@@ -234,7 +234,7 @@ export function SettingsSidebarContent({
               <SectionSidebarIcon name={group.icon} />
             </SectionSidebarRow>
           ))}
-          {invite}
+          {earn}
         </div>
       )}
     </SectionSidebar>
@@ -254,7 +254,7 @@ export function SettingsSidebar({
   return (
     <SettingsSidebarContent
       account={<SettingsAccountMenu />}
-      invite={<InviteSidebarRow />}
+      earn={<EarnSidebarCard />}
       appRoutePath={appRoutePath}
       isResizing={isResizing}
       mobileHosted={mobileHosted}

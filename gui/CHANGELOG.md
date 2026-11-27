@@ -2,6 +2,43 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 171
+
+Meet the Director (2026-11-26)
+
+### Changes
+
+- Meet the Director: a built-in plugin that wakes on a timer, reads your stopped threads, and unblocks the obvious ones. It learns from your first 50 approvals and corrections.
+- The Plugins page now shows Cloudroom's own plugins at the top, then every other plugin by popularity.
+- Snippets expand instantly as you type, with no flicker, and have a new icon.
+- Free plan scans now finish, using far fewer Cloud threads.
+- Antigravity threads reconnect on their own after a short internet drop, and the Loops circle now animates when a run finishes.
+- Security fixes.
+
+## 170
+
+Computer Use from anywhere (2026-11-26)
+
+### Changes
+
+- Cloud threads can now use your Mac's Computer Use, with the blue highlight and an approval card for each app.
+- Local agents that an app restart cut off now pick up where they left off.
+- The Get started checklist has clearer steps, including a new "Enable a skill" step.
+- Full Access threads that started in Plan mode no longer ask for permission.
+- Security fixes.
+
+## 169
+
+Full Access stops interrupting (2026-11-26)
+
+### Changes
+
+- Claude Code in Full Access no longer stops to ask about shell commands it can't fully read.
+- A voice message now goes to the thread you recorded it in, even if you switch threads while it transcribes.
+- Teleport moves Antigravity and OpenCode 2 chats to the Cloud again, with their history.
+- The rename dialog, the sidebar resize handle, and images you send got a cleaner look.
+- Security fixes.
+
 ## 168
 
 Sign out any connected device (2026-11-25)

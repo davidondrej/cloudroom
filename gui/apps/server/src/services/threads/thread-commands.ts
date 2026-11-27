@@ -23,8 +23,11 @@ import { ApiError } from "../../errors.js";
 import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
   countThreadStartsSent,
+  runLiveHostCommand,
   startLiveHostCommand,
 } from "../hosts/live-command.js";
+import { requireConnectedHostSession } from "../lib/entity-lookup.js";
+import { requireThreadCommandEnvironment } from "./thread-command-environment.js";
 import { getLastProviderThreadId } from "./thread-events.js";
 import { prepareCustomInstructionInput } from "./custom-instructions.js";
 import type { ThreadForkDescriptor } from "./thread-startup-store.js";
@@ -392,6 +395,42 @@ export async function prepareTurnSubmitCommandPayload(
     runtimeContext,
     target: args.target,
     threadId: args.thread.id,
+  });
+}
+
+/** Pauses, resumes, or replaces a thread's Goal on its provider (Codex today). */
+export async function setThreadGoal(
+  deps: AppDeps,
+  thread: Thread,
+  goal: { status?: "active" | "paused"; objective?: string },
+): Promise<void> {
+  const environment = await requireThreadCommandEnvironment(deps, { thread });
+  requireConnectedHostSession(deps, environment.hostId);
+  const execution = await buildExecutionOptions(
+    deps,
+    {},
+    { threadId: thread.id },
+  );
+  const preparedRuntimeCommand = await prepareTurnSubmitCommandPayload(deps, {
+    environment,
+    execution,
+    input: [],
+    permissionEscalation: "ask",
+    target: { mode: "auto", expectedTurnId: null },
+    thread,
+  });
+  await runLiveHostCommand(deps, {
+    command: {
+      type: "thread.goal.set",
+      environmentId: environment.id,
+      threadId: thread.id,
+      ...goal,
+      options: preparedRuntimeCommand.options,
+      resumeContext: preparedRuntimeCommand.resumeContext,
+      bridgeLaunch: preparedRuntimeCommand.bridgeLaunch,
+    },
+    hostId: environment.hostId,
+    timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
   });
 }
 

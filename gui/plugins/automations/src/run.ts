@@ -5,6 +5,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import {
   closeAutomationRun,
+  closeRunForSignIn,
   disableAutomationsForDeletedThread,
   getAutomation,
   listAutomationRuns,
@@ -521,6 +522,8 @@ export async function closeAutomationRunForSettledThread(
     status: "idle" | "failed";
     error?: string | null;
     rateLimited?: boolean;
+    /** The agent whose login failed this turn. */
+    signIn?: string;
     /** The provider refused the work: the run fails, and its retry goes to the other provider (fallback.ts). */
     refused?: boolean;
   },
@@ -533,7 +536,8 @@ export async function closeAutomationRunForSettledThread(
     const stopped =
       args.status === "idle" &&
       (await stoppedRunSkip(room, run, args.threadId, args.threadCreatedAt, true));
-    // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause.
+    // A plan limit is the agent's account, not the loop: skip the run, so it never counts toward a pause. So is a
+    // failed login of a one-agent repeating loop's own agent, which also holds the loop until it signs in again (#609).
     const closed = stopped
       ? closeAutomationRun(db, {
           runId: run.id,
@@ -549,13 +553,21 @@ export async function closeAutomationRunForSettledThread(
             threadId: args.threadId,
             now,
           })
-        : closeAutomationRun(db, {
-            runId: run.id,
-            status: args.status === "idle" ? "succeeded" : "failed",
-            error: args.status === "idle" ? null : error,
-            threadId: args.threadId,
-            now,
-          });
+        : args.status === "failed" && args.signIn
+          ? closeRunForSignIn(db, {
+              runId: run.id,
+              threadId: args.threadId,
+              providerId: args.signIn,
+              error,
+              now,
+            })
+          : closeAutomationRun(db, {
+              runId: run.id,
+              status: args.status === "idle" ? "succeeded" : "failed",
+              error: args.status === "idle" ? null : error,
+              threadId: args.threadId,
+              now,
+            });
     if (!closed) continue;
     const automation = getAutomation(db, closed.automationId);
     if (automation) changedProjects.add(automation.projectId);

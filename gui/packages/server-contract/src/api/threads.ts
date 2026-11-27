@@ -393,6 +393,8 @@ export const retryTurnRequestSchema = z
       })
       .strict()
       .optional(),
+    /** Run it in a new session of the same agent that gets the conversation so far, for one the agent can't reopen (#335). */
+    freshSession: z.literal(true).optional(),
   })
   .strict();
 export type RetryTurnRequest = z.infer<typeof retryTurnRequestSchema>;

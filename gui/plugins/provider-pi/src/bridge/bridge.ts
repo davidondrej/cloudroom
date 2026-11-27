@@ -55,7 +55,7 @@ import {
   buildPiTurnOptions,
   type PiSessionParams,
 } from "../session-params.js";
-import { ROOM_PI_EXTENSION_SOURCE } from "./bb-pi-extension.js";
+import { ROOM_PI_EXTENSION_SOURCE } from "./room-pi-extension.js";
 import {
   createExtensionUiCoordinator,
   type ExtensionUiCoordinator,
@@ -247,7 +247,7 @@ function requireScratchDir(): string {
 // session start or respawn.
 function requireExtensionPath(): string {
   const dir = requireScratchDir();
-  const path = join(dir, "bb-pi-extension.mjs");
+  const path = join(dir, "room-pi-extension.mjs");
   if (!existsSync(path)) {
     // This may recreate the worker's temp root. That is safe because the root
     // sits in a folder that nothing less trusted can write: not another

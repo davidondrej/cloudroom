@@ -6,16 +6,17 @@ import { useEffect, useSyncExternalStore, type CSSProperties } from "react";
 // one window event.
 
 /** Every card that may use the corner, most important first.
- *  `wait`: it shows only once the account's record says yes (once per month for Wrapped and Partner; the quiet
- *  days for Scan and Partner; the 45 days for Scan; the 3 days after the call ticket was closed or clicked).
+ *  `wait`: it shows only once the account's record says yes (once per month for Wrapped; every 14 days for Partner,
+ *  plus one final showing 30 days after a click; the quiet days and 45 days for Scan; 3 days after the call ticket
+ *  was closed or clicked).
  *  `phone`: also shows on a phone. The others are desktop only. */
 export const CORNER_CARDS = [
   { id: "invite", phone: true },
   { id: "call", wait: true },
   { id: "checklist" },
   { id: "wrapped", wait: true },
-  { id: "scan", wait: true },
   { id: "partner", wait: true },
+  { id: "scan", wait: true },
 ] as const satisfies readonly { id: string; wait?: true; phone?: true }[];
 export type CornerCard = (typeof CORNER_CARDS)[number]["id"];
 /** What the user did with a card: its main button, or its close button. */

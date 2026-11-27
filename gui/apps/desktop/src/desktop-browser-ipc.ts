@@ -1,43 +1,43 @@
-export const ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL = "bb-desktop:browser:attach";
-export const ROOM_DESKTOP_BROWSER_TARGET_CHANNEL = "bb-desktop:browser:target";
-export const ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL = "bb-desktop:browser:control";
+export const ROOM_DESKTOP_BROWSER_ATTACH_CHANNEL = "room-desktop:browser:attach";
+export const ROOM_DESKTOP_BROWSER_TARGET_CHANNEL = "room-desktop:browser:target";
+export const ROOM_DESKTOP_BROWSER_CONTROL_CHANNEL = "room-desktop:browser:control";
 export const ROOM_DESKTOP_BROWSER_GET_CONTROL_CHANNEL =
-  "bb-desktop:browser:get-control";
+  "room-desktop:browser:get-control";
 export const ROOM_DESKTOP_BROWSER_RELEASE_CONTROL_CHANNEL =
-  "bb-desktop:browser:release-control";
-export const ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL = "bb-desktop:browser:reveal";
-export const ROOM_DESKTOP_BROWSER_DETACH_CHANNEL = "bb-desktop:browser:detach";
+  "room-desktop:browser:release-control";
+export const ROOM_DESKTOP_BROWSER_REVEAL_CHANNEL = "room-desktop:browser:reveal";
+export const ROOM_DESKTOP_BROWSER_DETACH_CHANNEL = "room-desktop:browser:detach";
 export const ROOM_DESKTOP_BROWSER_NAVIGATE_CHANNEL =
-  "bb-desktop:browser:navigate";
-export const ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL = "bb-desktop:browser:go-back";
+  "room-desktop:browser:navigate";
+export const ROOM_DESKTOP_BROWSER_GO_BACK_CHANNEL = "room-desktop:browser:go-back";
 export const ROOM_DESKTOP_BROWSER_GO_FORWARD_CHANNEL =
-  "bb-desktop:browser:go-forward";
-export const ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL = "bb-desktop:browser:reload";
-export const ROOM_DESKTOP_BROWSER_STOP_CHANNEL = "bb-desktop:browser:stop";
-export const ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL = "bb-desktop:browser:focus";
+  "room-desktop:browser:go-forward";
+export const ROOM_DESKTOP_BROWSER_RELOAD_CHANNEL = "room-desktop:browser:reload";
+export const ROOM_DESKTOP_BROWSER_STOP_CHANNEL = "room-desktop:browser:stop";
+export const ROOM_DESKTOP_BROWSER_FOCUS_CHANNEL = "room-desktop:browser:focus";
 export const ROOM_DESKTOP_BROWSER_SET_BOUNDS_CHANNEL =
-  "bb-desktop:browser:set-bounds";
+  "room-desktop:browser:set-bounds";
 export const ROOM_DESKTOP_BROWSER_SET_VISIBLE_CHANNEL =
-  "bb-desktop:browser:set-visible";
+  "room-desktop:browser:set-visible";
 export const ROOM_DESKTOP_BROWSER_SET_VISIBLE_WITHOUT_FOCUS_CHANNEL =
-  "bb-desktop:browser:set-visible-without-focus";
-export const ROOM_DESKTOP_BROWSER_STATE_CHANNEL = "bb-desktop:browser:state";
-export const ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL = "bb-desktop:browser:focused";
+  "room-desktop:browser:set-visible-without-focus";
+export const ROOM_DESKTOP_BROWSER_STATE_CHANNEL = "room-desktop:browser:state";
+export const ROOM_DESKTOP_BROWSER_FOCUSED_CHANNEL = "room-desktop:browser:focused";
 export const ROOM_DESKTOP_BROWSER_OPEN_TAB_CHANNEL =
-  "bb-desktop:browser:open-tab";
+  "room-desktop:browser:open-tab";
 export const ROOM_DESKTOP_BROWSER_SCOPED_OPEN_TAB_CHANNEL =
-  "bb-desktop:browser:scoped-open-tab";
+  "room-desktop:browser:scoped-open-tab";
 export const ROOM_DESKTOP_BROWSER_SNAPSHOT_CHANNEL =
-  "bb-desktop:browser:snapshot";
+  "room-desktop:browser:snapshot";
 export const ROOM_DESKTOP_BROWSER_FIND_IN_PAGE_CHANNEL =
-  "bb-desktop:browser:find-in-page";
+  "room-desktop:browser:find-in-page";
 export const ROOM_DESKTOP_BROWSER_STOP_FIND_IN_PAGE_CHANNEL =
-  "bb-desktop:browser:stop-find-in-page";
+  "room-desktop:browser:stop-find-in-page";
 export const ROOM_DESKTOP_BROWSER_FIND_RESULT_CHANNEL =
-  "bb-desktop:browser:find-result";
+  "room-desktop:browser:find-result";
 export const ROOM_DESKTOP_BROWSER_LIST_IMPORT_SOURCES_CHANNEL =
-  "bb-desktop:browser:list-import-sources";
+  "room-desktop:browser:list-import-sources";
 export const ROOM_DESKTOP_BROWSER_IMPORT_COOKIES_CHANNEL =
-  "bb-desktop:browser:import-cookies";
+  "room-desktop:browser:import-cookies";
 export const ROOM_DESKTOP_BROWSER_OPEN_FULL_DISK_ACCESS_SETTINGS_CHANNEL =
-  "bb-desktop:browser:open-full-disk-access-settings";
+  "room-desktop:browser:open-full-disk-access-settings";

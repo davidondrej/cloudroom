@@ -7,7 +7,7 @@ import { GitForWindowsBanner, publishBannerHeight } from "./DesktopUpdateBanner"
 const status = vi.hoisted(() => ({ value: null as { gitMissing?: boolean } | null }));
 vi.mock("@/lib/use-async-atom-value", () => ({ useAsyncAtomValue: () => status.value }));
 
-const HEIGHT = "--bb-update-banner-height";
+const HEIGHT = "--room-update-banner-height";
 const banner = (height: number) => {
   const element = document.createElement("div");
   Object.defineProperty(element, "offsetHeight", { value: height });

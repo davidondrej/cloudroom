@@ -76,8 +76,12 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "Get its own URL, so the page can be linked to and Cloudroom's back and forward buttons work",
           "Register tabs in the panel to the right of its page, beside Cloudroom's own Browser and Terminal tabs",
           "Show a short status right after its sidebar title, with an optional hover card, through experimental_sidebarLabel",
+          "Open Cloudroom's Add project flow, the sidebar's New project, with useBbNavigate().experimental_openAddProject()",
         ],
-        apiSymbols: ["PluginNavPanelRegistration"],
+        apiSymbols: [
+          "PluginNavPanelRegistration",
+          "BbNavigate.experimental_openAddProject",
+        ],
         firstParty: ["Loops", "GitHub", "Tasks"],
       },
       {

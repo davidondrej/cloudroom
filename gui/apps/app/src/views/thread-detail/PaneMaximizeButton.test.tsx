@@ -68,7 +68,7 @@ function renderButton(
 
 afterEach(() => {
   cleanup();
-  delete window.bbDesktop;
+  delete window.roomDesktop;
 });
 
 describe("PaneMaximizeButton", () => {
@@ -189,7 +189,7 @@ describe("PaneMaximizeButton", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createRoomDesktopApi(desktopInfo);
+    window.roomDesktop = createRoomDesktopApi(desktopInfo);
     renderButton(false);
 
     const button = screen.getByRole("button", {
@@ -213,7 +213,7 @@ describe("PaneMaximizeButton", () => {
       updateDownloaded: false,
       version: "0.0.0-test",
     };
-    window.bbDesktop = createRoomDesktopApi(desktopInfo);
+    window.roomDesktop = createRoomDesktopApi(desktopInfo);
     renderButton(false);
     expect(screen.getByTestId("browser-overlay-state").textContent).toBe(
       "visible",

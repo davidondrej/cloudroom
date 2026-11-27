@@ -9,6 +9,10 @@ import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { binding, command, saveStatus } from "../../src/services/cloudroom/store.js";
 import { setCopyLogins } from "../../src/services/cloudroom/sync.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
+import {
+  reportQueuedCommandSuccess,
+  waitForQueuedCommand,
+} from "../helpers/commands.js";
 import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import { seedEnvironment, seedHostSession, seedProjectWithSource, seedThread, seedThreadRuntimeState } from "../helpers/seed.js";
 import { cloudroomCommands, cloudroomThreads, createThread, getThread, setProjectGitRemoteUrlIfMissing, threads } from "@cloudroom/db";
@@ -1163,7 +1167,23 @@ it("a Teleport check whose cached sandbox address stopped answering wakes it aga
     res.end(JSON.stringify({ thread: input.thread, state: "awake", generation: wakes, issue: null, origin: relayUrl, token: "t".repeat(64) }));
   });
   const websiteUrl = await listen(websiteServer);
-  const check = () => harness.app.request(`/api/v1/cloudroom/threads/${thread.id}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "check" }) });
+  const check = async () => {
+    const response = harness.app.request(
+      `/api/v1/cloudroom/threads/${thread.id}/teleport`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "check" }),
+      },
+    );
+    // The host answers the saved-conversation size query (#2280).
+    const sizes = await waitForQueuedCommand(
+      harness,
+      ({ command }) => command.type === "thread.teleport",
+    );
+    await reportQueuedCommandSuccess(harness, sizes, { files: [] });
+    return response;
+  };
   try {
     await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
     expect((await check()).status).toBe(200);

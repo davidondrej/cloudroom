@@ -105,7 +105,7 @@ function renderBrowserChrome(
     onNativeFocus?: () => void;
   } = {},
 ) {
-  window.bbDesktop = createRoomDesktopApi(desktopInfo, harness.api);
+  window.roomDesktop = createRoomDesktopApi(desktopInfo, harness.api);
   return render(
     <>
       <BrowserTabContent
@@ -136,7 +136,7 @@ describe("BrowserTabContent persistent navigation", () => {
     cleanup();
     vi.restoreAllMocks();
     window.localStorage.clear();
-    delete window.bbDesktop;
+    delete window.roomDesktop;
   });
 
   it("keeps the top navigation visible through pointer and focus changes", () => {

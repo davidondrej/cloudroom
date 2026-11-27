@@ -10,6 +10,7 @@
  * Env knobs (passed by tests through thread/start envVars):
  * - FAKE_ACP_LOAD_SESSION=1  → advertise + accept session/load
  * - FAKE_ACP_FAIL_LOAD=1     → advertise session/load, then fail it
+ * - FAKE_ACP_HANG_LOAD=1     → advertise session/load, then never answer it
  * - FAKE_ACP_FORK_SESSION=1  → advertise + accept session/fork
  * - FAKE_ACP_FORK_LOG        → write the session/fork params as JSON
  * - FAKE_ACP_FORK_REUSE_SOURCE_ID=1
@@ -89,6 +90,7 @@ import {
 } from "node:fs";
 
 const failLoad = process.env.FAKE_ACP_FAIL_LOAD === "1";
+const hangLoad = process.env.FAKE_ACP_HANG_LOAD === "1";
 const loadSession = process.env.FAKE_ACP_LOAD_SESSION === "1" || failLoad;
 const forkSession = process.env.FAKE_ACP_FORK_SESSION === "1";
 const forkReuseSourceId = process.env.FAKE_ACP_FORK_REUSE_SOURCE_ID === "1";
@@ -810,6 +812,9 @@ async function handleMessage(message) {
       }
       if (loadSession) {
         captureMcpServers(message);
+        if (hangLoad) {
+          return;
+        }
         if (usageOnLoad) {
           notifyUpdate(
             { sessionUpdate: "usage_update", used: 24_000, size: 128_000 },

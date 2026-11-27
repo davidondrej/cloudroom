@@ -21,7 +21,7 @@ type MainFailureHandler = (error: unknown) => void;
 const entrypointDir = dirname(fileURLToPath(import.meta.url));
 
 function resolveEntrypointBridgeBundleDir(): string | undefined {
-  return existsSync(join(entrypointDir, "bb-provider-bridge-worker.mjs"))
+  return existsSync(join(entrypointDir, "room-provider-bridge-worker.mjs"))
     ? entrypointDir
     : undefined;
 }

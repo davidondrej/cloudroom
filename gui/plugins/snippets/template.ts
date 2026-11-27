@@ -1,5 +1,5 @@
 import { calculate } from "./arithmetic.ts";
-import type { Library } from "./library.ts";
+import type { Library, Snippet } from "./library.ts";
 
 interface Field {
   name: string;
@@ -14,6 +14,43 @@ interface Context {
 }
 const token =
   /\{(argument|clipboard|cursor|date|time|datetime|day|uuid|snippet|calculator)\b((?:"[^"]*"|[^{}"])*)\}/g;
+// Pre-computed ASCII bitmaps match V8's Unicode regexes identically with O(1) lookup.
+const ASCII_DELIMITER = new Uint8Array(128);
+const ASCII_WORD = new Uint8Array(128);
+for (let i = 0; i < 128; i++) {
+  const ch = String.fromCharCode(i);
+  if (/^[\s\p{P}]$/u.test(ch)) ASCII_DELIMITER[i] = 1;
+  if (/^[\p{L}\p{N}_]$/u.test(ch)) ASCII_WORD[i] = 1;
+}
+function isLowSurrogate(code: number) {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+function isHighSurrogate(code: number) {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+function trailingDelimiter(text: string): string | undefined {
+  const len = text.length;
+  if (!len) return undefined;
+  const code = text.charCodeAt(len - 1);
+  if (code < 128) return ASCII_DELIMITER[code] ? text[len - 1] : undefined;
+  const start =
+    isLowSurrogate(code) && len > 1 && isHighSurrogate(text.charCodeAt(len - 2))
+      ? len - 2
+      : len - 1;
+  const ch = text.slice(start);
+  return /^[\s\p{P}]$/u.test(ch) ? ch : undefined;
+}
+function hasWordBoundaryBefore(text: string, endExclusive: number): boolean {
+  const pos = endExclusive - 1;
+  if (pos < 0) return true;
+  const code = text.charCodeAt(pos);
+  if (code < 128) return !ASCII_WORD[code];
+  const start =
+    isLowSurrogate(code) && pos > 0 && isHighSurrogate(text.charCodeAt(pos - 1))
+      ? pos - 1
+      : pos;
+  return !/^[\p{L}\p{N}_]$/u.test(text.slice(start, pos + 1));
+}
 function options(source: string) {
   return Object.fromEntries(
     Array.from(source.matchAll(/(\w+)=(?:"([^"]*)"|([^\s|]+))/g), (m) => [
@@ -35,6 +72,7 @@ const attributes: Record<string, string[]> = {
   cursor: [],
 };
 function* placeholders(source: string) {
+  if (!source.includes("{")) return;
   for (const match of source.matchAll(token)) {
     const [, kind, body] = match;
     if (
@@ -113,9 +151,25 @@ function dateValue(kind: string, attrs: Record<string, string>, now: Date) {
   );
 }
 
-function reference(body: string, library: Library) {
+function buildByName(library: Library): Map<string, Snippet[]> {
+  const byName = new Map<string, Snippet[]>();
+  for (const snippet of library) {
+    const bucket = byName.get(snippet.name);
+    if (bucket) bucket.push(snippet);
+    else byName.set(snippet.name, [snippet]);
+  }
+  return byName;
+}
+
+function reference(
+  body: string,
+  library: Library,
+  byName?: Map<string, Snippet[]>,
+) {
   const name = options(body).name;
-  const matches = library.filter((s) => s.name === name);
+  const matches = byName
+    ? (byName.get(name) ?? [])
+    : library.filter((s) => s.name === name);
   if (
     !matches.length ||
     matches.some((s) => s.text !== matches[0].text) ||
@@ -129,9 +183,11 @@ function walk(
   source: string,
   library: Library,
   visit: (kind: string, body: string) => void,
+  byName?: Map<string, Snippet[]>,
 ) {
   for (const [, kind, body] of placeholders(source)) {
-    if (kind === "snippet") walk(reference(body, library), library, visit);
+    if (kind === "snippet")
+      walk(reference(body, library, byName), library, visit, byName);
     else visit(kind, body);
   }
 }
@@ -142,28 +198,37 @@ export function requiresClipboard(source: string, library: Library) {
   });
   return required;
 }
-export function argumentFields(source: string, library: Library): Field[] {
+export function argumentFields(
+  source: string,
+  library: Library,
+  byName?: Map<string, Snippet[]>,
+): Field[] {
   const fields = new Map<string, Field>();
   let index = 0;
-  walk(source, library, (kind, body) => {
-    const attrs = options(body);
-    if (kind === "calculator" && !attrs.expression) {
-      fields.set("calculator", {
-        name: "calculator",
-        initial: "",
-        choices: [],
-      });
-      return;
-    }
-    if (kind !== "argument") return;
-    const name = attrs.name ?? String(++index);
-    if (!fields.has(name))
-      fields.set(name, {
-        name,
-        initial: attrs.default ?? "",
-        choices: attrs.options?.split(",").map((s) => s.trim()) ?? [],
-      });
-  });
+  walk(
+    source,
+    library,
+    (kind, body) => {
+      const attrs = options(body);
+      if (kind === "calculator" && !attrs.expression) {
+        fields.set("calculator", {
+          name: "calculator",
+          initial: "",
+          choices: [],
+        });
+        return;
+      }
+      if (kind !== "argument") return;
+      const name = attrs.name ?? String(++index);
+      if (!fields.has(name))
+        fields.set(name, {
+          name,
+          initial: attrs.default ?? "",
+          choices: attrs.options?.split(",").map((s) => s.trim()) ?? [],
+        });
+    },
+    byName,
+  );
   if ([...fields.keys()].filter((k) => k !== "calculator").length > 3)
     throw new Error("A snippet can use up to three arguments.");
   return [...fields.values()];
@@ -198,10 +263,12 @@ function modified(value: string, body: string) {
   }
   return value;
 }
-export function renderSnippet(
+function renderSnippetInternal(
   source: string,
   library: Library,
-  context: Context = {},
+  context: Context,
+  byName?: Map<string, Snippet[]>,
+  skipArgumentFields = false,
 ) {
   const values = context.values ?? {};
   if (
@@ -210,7 +277,9 @@ export function renderSnippet(
     Object.values(values).some((v) => typeof v !== "string")
   )
     throw new Error("Arguments must be a JSON object of strings.");
-  const fields = argumentFields(source, library),
+  const fields = skipArgumentFields
+      ? []
+      : argumentFields(source, library, byName),
     now = context.now ?? new Date();
   let index = 0;
   function render(template: string): { text: string; cursor?: number } {
@@ -226,7 +295,7 @@ export function renderSnippet(
         innerCursor: number | undefined;
       switch (kind) {
         case "snippet": {
-          const referenced = render(reference(body, library));
+          const referenced = render(reference(body, library, byName));
           value = referenced.text;
           innerCursor = referenced.cursor;
           break;
@@ -286,7 +355,257 @@ export function renderSnippet(
   }
   return render(source);
 }
+export function renderSnippet(
+  source: string,
+  library: Library,
+  context: Context = {},
+) {
+  return renderSnippetInternal(source, library, context);
+}
 export type ExpansionMode = "immediate" | "keep" | "discard" | "off";
+export interface CompiledSnippet {
+  snippet: Snippet;
+  staticResult: { text: string; cursor?: number } | null;
+  hasArgs: boolean;
+  needsClipboard: boolean;
+  compileError: boolean;
+}
+interface TrieNode {
+  children: Map<number, TrieNode> | null;
+  entries: CompiledSnippet[] | null;
+  hasConflict: boolean;
+  keywordLen: number;
+}
+export interface CompiledMatch {
+  compiled: CompiledSnippet;
+  snippet: Snippet;
+  choices: Snippet[];
+  remove: number;
+  suffix: string;
+}
+export interface SnippetIndex {
+  readonly library: Library;
+  readonly mode: ExpansionMode;
+  readonly withinWords: boolean;
+  readonly maxLookback: number;
+  readonly byName: Map<string, Snippet[]>;
+  canEndWith(text: string): boolean;
+  match(before: string): CompiledMatch | undefined;
+  compiledOf(snippet: Snippet): CompiledSnippet | undefined;
+  renderSync(
+    compiled: CompiledSnippet,
+    context?: Context,
+  ): { text: string; cursor?: number };
+}
+
+function compileSnippet(
+  snippet: Snippet,
+  library: Library,
+  byName: Map<string, Snippet[]>,
+): CompiledSnippet {
+  if (!snippet.text.includes("{")) {
+    return {
+      snippet,
+      staticResult: { text: snippet.text, cursor: undefined },
+      hasArgs: false,
+      needsClipboard: false,
+      compileError: false,
+    };
+  }
+  try {
+    const found = [...placeholders(snippet.text)];
+    if (!found.length) {
+      return {
+        snippet,
+        staticResult: { text: snippet.text, cursor: undefined },
+        hasArgs: false,
+        needsClipboard: false,
+        compileError: false,
+      };
+    }
+    if (
+      found.length === 1 &&
+      found[0][1] === "cursor" &&
+      !found[0][2].includes("|")
+    ) {
+      const m = found[0];
+      const cursor = m.index!;
+      return {
+        snippet,
+        staticResult: {
+          text:
+            snippet.text.slice(0, cursor) +
+            snippet.text.slice(cursor + m[0].length),
+          cursor,
+        },
+        hasArgs: false,
+        needsClipboard: false,
+        compileError: false,
+      };
+    }
+    let hasArgs = false;
+    let needsClipboard = false;
+    let argIndex = 0;
+    const argNames = new Set<string>();
+    walk(
+      snippet.text,
+      library,
+      (kind, body) => {
+        if (kind === "clipboard") needsClipboard = true;
+        else if (kind === "calculator") {
+          if (!options(body).expression) hasArgs = true;
+        } else if (kind === "argument") {
+          hasArgs = true;
+          argNames.add(options(body).name ?? String(++argIndex));
+        }
+      },
+      byName,
+    );
+    if (argNames.size > 3) {
+      return {
+        snippet,
+        staticResult: null,
+        hasArgs: false,
+        needsClipboard: false,
+        compileError: true,
+      };
+    }
+    return {
+      snippet,
+      staticResult: null,
+      hasArgs,
+      needsClipboard,
+      compileError: false,
+    };
+  } catch {
+    return {
+      snippet,
+      staticResult: null,
+      hasArgs: false,
+      needsClipboard: false,
+      compileError: true,
+    };
+  }
+}
+
+export function compileLibrary(
+  items: Library,
+  mode: ExpansionMode,
+  withinWords: boolean,
+): SnippetIndex {
+  const byName = buildByName(items);
+  const compiledBySnippet = new Map<Snippet, CompiledSnippet>();
+  const root: TrieNode = {
+    children: null,
+    entries: null,
+    hasConflict: false,
+    keywordLen: 0,
+  };
+  const endAscii = new Uint8Array(128);
+  let maxKeywordLen = 0;
+
+  for (const snippet of items) {
+    const compiled = compileSnippet(snippet, items, byName);
+    compiledBySnippet.set(snippet, compiled);
+    if (mode === "off" || !snippet.keyword) continue;
+    const kw = snippet.keyword;
+    const lastCode = kw.charCodeAt(kw.length - 1);
+    if (lastCode < 128) endAscii[lastCode] = 1;
+    let node = root;
+    for (let i = kw.length - 1; i >= 0; i--) {
+      const code = kw.charCodeAt(i);
+      if (!node.children) node.children = new Map();
+      let next = node.children.get(code);
+      if (!next) {
+        next = {
+          children: null,
+          entries: null,
+          hasConflict: false,
+          keywordLen: 0,
+        };
+        node.children.set(code, next);
+      }
+      node = next;
+    }
+    if (!node.entries) {
+      node.entries = [compiled];
+      node.keywordLen = kw.length;
+    } else {
+      if (compiled.snippet.text !== node.entries[0].snippet.text) {
+        node.hasConflict = true;
+      }
+      node.entries.push(compiled);
+    }
+    if (kw.length > maxKeywordLen) maxKeywordLen = kw.length;
+  }
+
+  const maxLookback = maxKeywordLen ? maxKeywordLen + 4 : 0;
+
+  return {
+    library: items,
+    mode,
+    withinWords,
+    maxLookback,
+    byName,
+    canEndWith(text: string) {
+      if (mode === "off" || !maxKeywordLen || !text.length) return false;
+      const code = text.charCodeAt(text.length - 1);
+      if (mode === "immediate") {
+        return code < 128
+          ? endAscii[code] === 1
+          : (root.children?.has(code) ?? false);
+      }
+      return code < 128
+        ? ASCII_DELIMITER[code] === 1
+        : trailingDelimiter(text) !== undefined;
+    },
+    match(before: string) {
+      if (mode === "off" || !maxKeywordLen || !before.length) return undefined;
+      let end = before.length;
+      let delimiter = "";
+      if (mode !== "immediate") {
+        const d = trailingDelimiter(before);
+        if (d === undefined) return undefined;
+        delimiter = d;
+        end -= d.length;
+      }
+      let node: TrieNode | undefined = root;
+      let best: TrieNode | undefined;
+      for (let i = end - 1; i >= 0; i--) {
+        node = node.children?.get(before.charCodeAt(i));
+        if (!node) break;
+        if (node.entries && (withinWords || hasWordBoundaryBefore(before, i))) {
+          best = node;
+        }
+      }
+      if (!best) return undefined;
+      const first = best.entries![0];
+      return {
+        compiled: first,
+        snippet: first.snippet,
+        choices: best.hasConflict ? best.entries!.map((e) => e.snippet) : [],
+        remove: best.keywordLen + delimiter.length,
+        suffix: mode === "keep" ? delimiter : "",
+      };
+    },
+    compiledOf(snippet: Snippet) {
+      return compiledBySnippet.get(snippet);
+    },
+    renderSync(compiled: CompiledSnippet, context: Context = {}) {
+      if (compiled.staticResult && !compiled.compileError) {
+        return compiled.staticResult;
+      }
+      return renderSnippetInternal(
+        compiled.snippet.text,
+        items,
+        context,
+        byName,
+        !compiled.hasArgs && !compiled.compileError,
+      );
+    },
+  };
+}
+
 export function matchKeyword(
   before: string,
   items: Library,
@@ -294,26 +613,29 @@ export function matchKeyword(
   withinWords: boolean,
 ) {
   if (mode === "off") return;
-  const delimiter =
-    mode === "immediate" ? "" : before.match(/[\s\p{P}]$/u)?.[0];
+  const delimiter = mode === "immediate" ? "" : trailingDelimiter(before);
   if (delimiter === undefined) return;
-  const input = before.slice(0, before.length - delimiter.length);
-  const matches = items
-    .filter((s) => {
-      if (!s.keyword || !input.endsWith(s.keyword)) return false;
-      return (
-        withinWords ||
-        !/[\p{L}\p{N}_]$/u.test(input.slice(0, -s.keyword.length))
-      );
-    })
-    .sort((a, b) => b.keyword.length - a.keyword.length);
+  const end = before.length - delimiter.length;
+  const input = delimiter ? before.slice(0, end) : before;
+  let bestLen = 0;
+  let matches: Snippet[] = [];
+  for (const s of items) {
+    const len = s.keyword.length;
+    if (!len || len < bestLen || !input.endsWith(s.keyword)) continue;
+    if (!withinWords && !hasWordBoundaryBefore(input, end - len)) continue;
+    if (len > bestLen) {
+      bestLen = len;
+      matches = [s];
+    } else {
+      matches.push(s);
+    }
+  }
   const first = matches[0];
   if (!first) return;
-  const choices = matches.filter((row) => row.keyword === first.keyword);
   return {
     snippet: first,
-    choices: choices.some((row) => row.text !== first.text) ? choices : [],
-    remove: first.keyword.length + delimiter.length,
+    choices: matches.some((row) => row.text !== first.text) ? matches : [],
+    remove: bestLen + delimiter.length,
     suffix: mode === "keep" ? delimiter : "",
   };
 }

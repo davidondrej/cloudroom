@@ -216,8 +216,7 @@ impl Manager {
                 return Ok(models);
             }
             Err(e)
-                if kind == runtime::Kind::Antigravity
-                    && e.kind() == std::io::ErrorKind::PermissionDenied =>
+                if kind == runtime::Kind::Antigravity && runtime::antigravity::signed_out(&e) =>
             {
                 return Err(Error::Conflict(runtime::antigravity::SIGN_IN));
             }

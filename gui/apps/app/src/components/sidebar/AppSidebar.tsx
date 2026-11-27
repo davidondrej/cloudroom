@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useSetAtom } from "jotai";
+import { useAtomValue, useSetAtom } from "jotai";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
@@ -36,6 +36,7 @@ import {
   EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS,
   getSidebarThreadNavigationTargets,
   getSidebarThreadShortcutTargets,
+  revealSidebarProject,
   revealSidebarThread,
   SidebarThreadShortcutKeysContext,
   type SidebarThreadShortcutPresentation,
@@ -51,6 +52,10 @@ import {
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
 import { SidebarNeedsYou } from "./SidebarNeedsYou";
+import {
+  sidebarProjectRevealRequestAtom,
+  sidebarProjectRevealStateAtom,
+} from "./sidebarCollapsedAtoms";
 import { closeSidebarPurposeCardAtom } from "@/components/thread/ThreadPurposeHoverCard";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
@@ -245,11 +250,38 @@ export function AppSidebar({
     isHiddenHostedBody ? false : activateLastPinnedThread(),
   );
 
+  const projectRevealState = useAtomValue(sidebarProjectRevealStateAtom);
+  const setProjectRevealRequest = useSetAtom(sidebarProjectRevealRequestAtom);
+
   useEffect(() => {
     if (activeThreadId && !isHiddenHostedBody) {
       revealSidebarThread(sidebarRef.current, activeThreadId);
     }
   }, [activeThreadId, isHiddenHostedBody]);
+
+  useEffect(() => {
+    if (
+      isHiddenHostedBody ||
+      projectRevealState.status === "idle" ||
+      projectRevealState.status === "waiting-expand"
+    ) {
+      return;
+    }
+    const clearRequest = () => {
+      setProjectRevealRequest((current) =>
+        current?.id === projectRevealState.id ? null : current,
+      );
+    };
+    if (projectRevealState.status === "skip") {
+      clearRequest();
+      return;
+    }
+    return revealSidebarProject(
+      sidebarRef.current,
+      projectRevealState.projectId,
+      clearRequest,
+    );
+  }, [isHiddenHostedBody, projectRevealState, setProjectRevealRequest]);
 
   useEffect(() => {
     if (isAppCommandModifierHeld) {

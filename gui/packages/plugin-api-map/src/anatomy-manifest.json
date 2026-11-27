@@ -106,7 +106,7 @@
         {
           "path": "apps/app/src/components/plugin/PluginAppOverlays.tsx",
           "anchors": [
-            "data-bb-plugin-app-overlays=\"\"",
+            "data-room-plugin-app-overlays=\"\"",
             "slotKind=\"appOverlay\"",
             "crashFallback={null}"
           ]

@@ -6,8 +6,21 @@ import {
 
 const SEEN_LIMIT = 100;
 
+interface DesktopBridge {
+  platform?: unknown;
+  focusWindow?: unknown;
+}
+
+function getDesktopBridge(): DesktopBridge | undefined {
+  const win = window as {
+    roomDesktop?: DesktopBridge;
+    bbDesktop?: DesktopBridge;
+  };
+  return win.roomDesktop ?? win.bbDesktop;
+}
+
 export function clientChannel(): ClientChannel {
-  return "bbDesktop" in window ? "desktop" : "web";
+  return "roomDesktop" in window || "bbDesktop" in window ? "desktop" : "web";
 }
 
 export function notificationPermission():
@@ -19,7 +32,7 @@ export function notificationPermission():
 }
 
 function isMacDesktop(): boolean {
-  const desktop: unknown = (window as { bbDesktop?: unknown }).bbDesktop;
+  const desktop: unknown = getDesktopBridge();
   return (
     typeof desktop === "object" &&
     desktop !== null &&
@@ -31,9 +44,7 @@ function isMacDesktop(): boolean {
 // Windows ignores renderer focus for a background or minimized window; the desktop
 // app's native focus restores and foregrounds it.
 function focusWindowsDesktop(): void {
-  const desktop = (
-    window as { bbDesktop?: { platform?: unknown; focusWindow?: unknown } }
-  ).bbDesktop;
+  const desktop = getDesktopBridge();
   if (desktop?.platform === "windows" && typeof desktop.focusWindow === "function") {
     // Best effort: a failing bridge must not block navigation or cleanup.
     try {

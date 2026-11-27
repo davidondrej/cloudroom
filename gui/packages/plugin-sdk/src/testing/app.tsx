@@ -195,6 +195,7 @@ export type NavigateCall =
       options: Parameters<BbNavigate["openThreadPanel"]>[0];
     }
   | { method: "openUrl"; url: string }
+  | { method: "experimental_openAddProject" }
   | {
       method: "experimental_openFilePreview";
       options: ExperimentalFileOpenOptions;
@@ -653,6 +654,13 @@ function useSlotEnv(hook: string): SlotEnv {
     );
   }
   return env;
+}
+
+function useTestSidebarThreadIds(): readonly string[] {
+  const { threads } = useSlotEnv(
+    "experimental_useSidebarThreadIds",
+  ).sidebarThreads;
+  return useMemo(() => threads.map((thread) => thread.id), [threads]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1347,7 @@ const testPluginSdkApp = {
   experimental_useSidebarThreads(): PluginSidebarThreadsState {
     return useSlotEnv("experimental_useSidebarThreads").sidebarThreads;
   },
+  experimental_useSidebarThreadIds: useTestSidebarThreadIds,
   experimental_useProviders(): PluginProvidersState {
     return useSlotEnv("experimental_useProviders").providers;
   },
@@ -2186,6 +2195,10 @@ export function renderSlot<
     openUrl(url) {
       navigateCalls.push({ method: "openUrl", url });
       return options.openUrl?.(url) ?? false;
+    },
+    experimental_openAddProject() {
+      navigateCalls.push({ method: "experimental_openAddProject" });
+      return false;
     },
     experimental_openFilePreview(fileOptions) {
       navigateCalls.push({

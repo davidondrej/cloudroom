@@ -28,6 +28,7 @@ import {
   createPhoneCode,
   createPhoneSession,
   createShareCode,
+  deleteAccountServers,
   deleteMachine,
   deviceLabelFromUserAgent,
   endSession,
@@ -44,6 +45,7 @@ import {
   registerServer,
   registerVps,
   retireAccountMacs,
+  retireAccountServers,
   retireKey,
   retireServer,
   serverByCredential,
@@ -462,14 +464,14 @@ async function machineLabel(request: Request, env: Env): Promise<Response> {
   return json({ label: machine.handle });
 }
 
-/** The account a website call is about. Only the website may call, with the shared secret. */
-async function websiteAccount(request: Request, env: Env): Promise<string | Response> {
+/** The account and body of a website call. Only the website may call, with the shared secret. */
+async function websiteCall(request: Request, env: Env): Promise<{ userId: string; body: Record<string, unknown> } | Response> {
   const secret = env.CONNECT_SIGNAL_SECRET ?? "";
   const [given, wanted] = await Promise.all([sha256Hex(bearer(request)), sha256Hex(secret)]);
   if (!secret || given !== wanted) return json({ error: "Not allowed." }, 401);
-  const body = (await request.json().catch(() => null)) as { user_id?: unknown } | null;
-  const userId = typeof body?.user_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.user_id) ? body.user_id : null;
-  return userId ?? json({ error: "Invalid account." }, 400);
+  const raw = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+  const userId = typeof raw?.user_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(raw.user_id) ? raw.user_id : null;
+  return userId && raw ? { userId, body: raw } : json({ error: "Invalid account." }, 400);
 }
 
 /** Tells each Mac's relay object to `action` (revoke-visitors, close). False if one did not answer. */
@@ -483,17 +485,22 @@ async function controlAll(env: Env, handles: string[], action: string): Promise<
 }
 
 /** The website signed the account out everywhere (password reset, account deleted; #1920): its phones and codes go,
- *  and its Mac keys retire, so an old key can't open its Macs. Safe to repeat. */
+ *  and its Mac keys retire, so an old key can't open its Macs. With `delete_servers`, all server rows go too. Safe to repeat. */
 export async function accountSignedOut(request: Request, env: Env): Promise<Response> {
-  const userId = await websiteAccount(request, env);
-  if (userId instanceof Response) return userId;
-  // Keys first, so a Mac can't make a new sign-in between the two.
-  const macs = await retireAccountMacs(env.DB, userId);
+  const verified = await websiteCall(request, env);
+  if (verified instanceof Response) return verified;
+  const { userId, body } = verified;
+  const deleteServers = body.delete_servers === true;
+  // Keys first, so a Mac (or host/VPS when deleting) can't make a new sign-in between the two.
+  const toClose = deleteServers
+    ? await retireAccountServers(env.DB, userId)
+    : await retireAccountMacs(env.DB, userId);
   const { revoked, tokenHashes } = await beginRevokeAllSessions(env.DB, userId);
-  // Both always run: a phone stream that would not close must not keep every Mac's tunnel open.
-  const closed = await Promise.all([controlAll(env, await accountHandles(env.DB, userId), "revoke-visitors"), controlAll(env, macs, "close")]);
+  // Both always run: a phone stream that would not close must not keep every tunnel open.
+  const closed = await Promise.all([controlAll(env, await accountHandles(env.DB, userId), "revoke-visitors"), controlAll(env, toClose, "close")]);
   if (!closed.every(Boolean)) return json({ error: "Could not close connections. Try again." }, 503);
   await completeRevokeSessions(env.DB, tokenHashes);
+  if (deleteServers) await deleteAccountServers(env.DB, userId);
   return json({ revoked });
 }
 
@@ -502,8 +509,9 @@ const SIGNAL_SEEN_MS = 30 * 86_400_000;
 /** The website says an account's Cloud threads changed (#237): each of its app computers online fetches them. Only
  *  the website may send it, with the shared secret; VPS hosts, remote hosts and phones never get it. */
 async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-  const userId = await websiteAccount(request, env);
-  if (userId instanceof Response) return userId;
+  const verified = await websiteCall(request, env);
+  if (verified instanceof Response) return verified;
+  const { userId } = verified;
   ctx.waitUntil((async () => {
     const seen = Date.now() - SIGNAL_SEEN_MS;
     for (const server of await accountServers(env.DB, userId)) {

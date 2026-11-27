@@ -43,6 +43,7 @@ import {
   type PluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
 import { ThreadPendingInteractionBanner } from "@/components/thread/pending-interactions/ThreadPendingInteractionBanner";
+import { isChatCardPluginInteraction } from "@/lib/plugin-slot-resolvers";
 import {
   QueuedMessagesList,
   type QueuedMessageInlineEditor,
@@ -100,12 +101,14 @@ import { plainError } from "@/lib/fix-prompts";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useThreadReadTracking } from "@/hooks/useThreadReadTracking";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
-import { showMutationErrorToast } from "@/lib/mutation-errors";
+import { isDefiniteRejection, showMutationErrorToast } from "@/lib/mutation-errors";
+import { FailedMessageNotice } from "@/components/promptbox/banner/FailedMessageNotice";
 import type { PromptDraftScope } from "@/hooks/usePromptDraftStorage";
 import { appToast } from "@/components/ui/app-toast";
 import {
   buildSideChatSubmitMode,
   canSubmitFollowUpShortcut,
+  promptDraftToInput,
   shouldQueueFollowUpMessage,
 } from "@cloudroom/client-core";
 import { useActiveComposerDraft } from "./useActiveComposerDraft";
@@ -291,9 +294,13 @@ function EmbeddedThreadChatWithComposer({
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
   );
+  // Like the main thread: a plugin request (the Secrets form) replaces the composer; only a chat card (a GPU) keeps it.
   const hasComposerBlockingPendingInteraction =
     activePendingInteraction !== null &&
-    activePendingInteraction.payload.kind !== "plugin";
+    !(
+      activePendingInteraction.origin?.kind === "plugin" &&
+      isChatCardPluginInteraction(activePendingInteraction.origin.pluginId)
+    );
   const pendingInteractionsInitialLoading = isPendingInteractionStateUnknown(
     pendingInteractionsQuery.data,
     pendingInteractionsQuery.isFetching,
@@ -742,38 +749,37 @@ function EmbeddedThreadChatWithComposer({
     threadId,
     promptDraft.clearIfCurrentMatches,
   );
-  const handleSubmit = useCallback(() => {
-    const submittedDraft = currentPromptDraft;
-    const submittedInput = currentPromptDraftInput;
-    if (runCopyCommand(submittedDraft)) return;
+  // Reads the stored draft, not this render's copy: a voice message can send after the chat closes.
+  // Resolves true once the message is sent or queued.
+  const handleSubmit = useCallback(async (): Promise<boolean> => {
+    const submittedDraft = promptDraft.getCurrent();
+    const submittedInput = promptDraftToInput(submittedDraft);
+    if (runCopyCommand(submittedDraft)) return false;
     if (submittedInput.length === 0 || isTurnSubmitting) {
-      return;
+      return false;
     }
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
-    void defaultSendOrQueueInput(submittedInput)
-      .catch((error) => {
-        if (!isMountedRef.current) {
-          return;
-        }
-        promptDraft.restoreIfEmpty(submittedDraft);
-        showMutationErrorToast({
-          error,
-          fallbackMessage: "Failed to send message",
-          lifecycleOperation: shouldQueueFollowUpMessage(displayStatus)
-            ? "queue_message"
-            : "send_message",
-        });
-      })
-      .finally(() => {
-        if (isMountedRef.current) {
-          setIsTurnSubmitting(false);
-        }
+    try {
+      await defaultSendOrQueueInput(submittedInput);
+      return true;
+    } catch (error) {
+      promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error) });
+      showMutationErrorToast({
+        error,
+        fallbackMessage: "Failed to send message",
+        lifecycleOperation: shouldQueueFollowUpMessage(displayStatus)
+          ? "queue_message"
+          : "send_message",
       });
+      return false;
+    } finally {
+      if (isMountedRef.current) {
+        setIsTurnSubmitting(false);
+      }
+    }
   }, [
-    currentPromptDraft,
-    currentPromptDraftInput,
     defaultSendOrQueueInput,
     displayStatus,
     isTurnSubmitting,
@@ -822,7 +828,7 @@ function EmbeddedThreadChatWithComposer({
       return;
     }
 
-    promptDraft.clearIfCurrentMatches(submittedDraft);
+    const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
     setIsTurnSubmitting(true);
     void sendThreadMessage
@@ -836,10 +842,10 @@ function EmbeddedThreadChatWithComposer({
         reportQueuedSendDelivery(result.delivery);
       })
       .catch((error) => {
+        promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error) });
         if (!isMountedRef.current) {
           return;
         }
-        promptDraft.restoreIfEmpty(submittedDraft);
         showMutationErrorToast({
           error,
           fallbackMessage: "Failed to send message",
@@ -1050,6 +1056,10 @@ function EmbeddedThreadChatWithComposer({
       ? "Provisioning thread..."
       : "Reply…";
 
+  const voiceTarget = useMemo(
+    () => ({ draftScope: composer.draftScope, send: handleSubmit }),
+    [composer.draftScope, handleSubmit],
+  );
   const bottomComposerConfig = useMemo<FollowUpComposerProps>(
     () => ({
       history: {
@@ -1069,6 +1079,7 @@ function EmbeddedThreadChatWithComposer({
       steerActiveThreadOnEnter,
       submitMode,
       threadRuntimeDisplayStatus: displayStatus,
+      voiceTarget,
     }),
     [
       canSubmitModifierShortcut,
@@ -1082,6 +1093,7 @@ function EmbeddedThreadChatWithComposer({
       promptDraft.setTextAndMentions,
       steerActiveThreadOnEnter,
       submitMode,
+      voiceTarget,
     ],
   );
   const inlineComposerConfig = useMemo<FollowUpComposerProps | null>(
@@ -1410,8 +1422,7 @@ function EmbeddedThreadChatWithComposer({
     />
   ) : pendingInteractionsInitialLoading ? (
     <PendingInteractionsQueryBanner state="loading" />
-  ) : activePendingInteraction !== null &&
-    activePendingInteraction.payload.kind !== "plugin" ? (
+  ) : hasComposerBlockingPendingInteraction ? (
     <ThreadPendingInteractionBanner
       interaction={activePendingInteraction}
       threadId={threadId}
@@ -1451,7 +1462,7 @@ function EmbeddedThreadChatWithComposer({
               : undefined
           }
           attachments={bottomAttachmentsConfig}
-          stack={queuedMessagesStack}
+          stack={<><FailedMessageNotice storageKey={promptDraft.storageKey} />{queuedMessagesStack}</>}
           pendingInteraction={pendingInteractionBanner}
           composer={bottomComposerConfig}
           pluginComposerHost={bottomPluginComposerHost}

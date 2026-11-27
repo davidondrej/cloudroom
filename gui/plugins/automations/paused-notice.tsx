@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { SyntheticEvent } from "react";
-import { useBbNavigate } from "@get-bb/plugin-sdk/app";
+import {
+  experimental_useSidebarThreadIds,
+  useBbNavigate,
+} from "@get-bb/plugin-sdk/app";
 import {
   HoverCard,
   HoverCardContent,
@@ -100,6 +103,16 @@ const resume = (loop: PausedLoop) =>
 
 const stop = (event: SyntheticEvent) => event.stopPropagation();
 
+// The app's loop icon on the threads loops started or wake (#1136, gui/apps/app/src/lib/loop-threads.ts). Each label
+// sends its own set, and null when it goes, so a copy that remounts never clears another's icons.
+const sendLoopThreads = (
+  owner: string,
+  threads: Record<string, string> | null,
+) =>
+  window.dispatchEvent(
+    new CustomEvent("cloudroom:loop-threads", { detail: { owner, threads } }),
+  );
+
 /** The agent whose Cloud login paused this Cloud loop: Reconnect fixes it, not Resume. */
 export const loginOf = (loop: Pick<PausedLoop, "kind" | "reason">) =>
   loop.kind === "cloud" ? cloudLoginProvider(loop.reason) : null;
@@ -110,31 +123,61 @@ export function PausedLoopsLabel() {
   const [done, setDone] = useState<Record<string, string>>({});
   const [offset, setOffset] = useState(14);
   const label = useRef<HTMLSpanElement>(null);
-  // Only the newest answer counts: one that started before a Resume may arrive after it.
+  // Only the newest answer counts: one that started before a Resume may arrive after it. Icons count separately, so
+  // an icons-only read never drops the paused list (#1136).
   const latest = useRef(0);
-  const load = (fresh = false) => {
-    if (document.visibilityState !== "visible") return;
-    const request = ++latest.current;
-    rpc("paused_loops", fresh ? { fresh: true } : null).then(
+  const latestIcons = useRef(0);
+  // This mount's ID for its loop icons; null once Loops is turned off or hidden, so a late answer can't bring them back.
+  const owner = useRef<string | null>(null);
+  // The open threads the sidebar already shows: the read looks up only these for loop icons, not all run history.
+  // From the app's cache, so showing Loops again costs no request (not even hosts).
+  const shown = [...experimental_useSidebarThreadIds()].sort().join(" ");
+  const threads = useRef(shown);
+  const load = (fresh = false, iconsOnly = false) => {
+    const id = owner.current;
+    if (id === null || document.visibilityState !== "visible") return;
+    const request = iconsOnly ? null : ++latest.current;
+    const icons = ++latestIcons.current;
+    rpc("paused_loops", {
+      ...(fresh ? { fresh: true } : {}),
+      ...(iconsOnly ? { iconsOnly: true } : {}),
+      threads: threads.current ? threads.current.split(" ") : [],
+    }).then(
       (result) => {
-        if (request === latest.current)
-          setLoops((result as { loops: PausedLoop[] }).loops);
+        if (owner.current !== id) return;
+        const read = result as {
+          loops?: PausedLoop[];
+          threads: Record<string, string>;
+        };
+        if (read.loops && request === latest.current) setLoops(read.loops);
+        if (icons === latestIcons.current) sendLoopThreads(id, read.threads);
       },
       () => {},
     );
   };
   useEffect(() => {
+    const id = Math.random().toString(36).slice(2);
+    owner.current = id;
     const poll = () => load();
     poll();
     const timer = window.setInterval(poll, POLL_MS);
     document.addEventListener("visibilitychange", poll);
     window.addEventListener(LOOPS_CHANGED, poll);
     return () => {
+      owner.current = null;
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", poll);
       window.removeEventListener(LOOPS_CHANGED, poll);
+      sendLoopThreads(id, null);
     };
   }, []);
+  // A thread opened or closed (or the sidebar loaded after the first read): only the icons, so a new loop thread gets
+  // its icon at once without reading the paused loops again.
+  useEffect(() => {
+    if (threads.current === shown) return;
+    threads.current = shown;
+    load(false, true);
+  }, [shown]);
   useCloudLoginFixed(() => load(true));
   const run = (list: PausedLoop[]) => {
     for (const loop of list) {

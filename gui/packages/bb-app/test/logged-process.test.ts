@@ -102,8 +102,10 @@ describe("spawnLoggedProcess", () => {
     },
   );
 
-  it("preserves output across child restarts, including early failures", async () => {
+  it("preserves output across child restarts and moves an oversized log aside", async () => {
     const logDir = scratchDir();
+    const logPath = join(logDir, "server-stdio.log");
+    writeFileSync(logPath, "old\n".repeat(3 * 1024 * 1024));
     for (const message of ["first startup", "second startup"]) {
       const child = spawnLoggedProcess({
         command: process.execPath,
@@ -117,9 +119,10 @@ describe("spawnLoggedProcess", () => {
       });
       expect(await waitForExit(child)).toBe(1);
     }
-    expect(readFileSync(join(logDir, "server-stdio.log"), "utf8")).toBe(
+    expect(readFileSync(logPath, "utf8")).toBe(
       "first startup\nsecond startup\n",
     );
+    expect(statSync(`${logPath}.1`).size).toBe(10 * 1024 * 1024);
   });
 
   it("fails instead of falling back to terminal output when logs cannot be opened", () => {

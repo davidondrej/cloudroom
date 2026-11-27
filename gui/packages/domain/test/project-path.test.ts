@@ -44,6 +44,10 @@ describe("project-path", () => {
 
   it("normalizes trailing separators without collapsing roots", () => {
     expect(normalizeProjectPathInput("/srv/repos/bb/")).toBe("/srv/repos/bb");
+    expect(normalizeProjectPathInput("/srv/repos/bb/\r\n")).toBe(
+      "/srv/repos/bb",
+    );
+    expect(normalizeProjectPathInput("/tmp/Demo \n")).toBe("/tmp/Demo ");
     expect(normalizeProjectPathInput("/mnt/c/Users/michael/bb/")).toBe(
       "/mnt/c/Users/michael/bb",
     );
@@ -58,6 +62,7 @@ describe("project-path", () => {
       "c:\\Users\\michael\\bb",
       "C:/Users/michael/bb/",
       "C:\\Users\\\\michael\\.\\bb",
+      ` ${windowsProjectPath} \t`,
     ]) {
       expect(normalizeProjectPathInput(spelling)).toBe(windowsProjectPath);
     }

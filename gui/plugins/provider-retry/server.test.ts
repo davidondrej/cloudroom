@@ -11,6 +11,7 @@ import {
   MAX_RETRY_ATTEMPTS,
   OVERLOAD_RETRY_BASE_MS,
   RESET_BUFFER_MS,
+  RESET_GRACE_MS,
   RESET_JITTER_MS,
   decideRetry,
 } from "./src/retry-policy.js";
@@ -179,28 +180,35 @@ describe("provider retry policy", () => {
     );
   });
 
-  it("never schedules a retry in the past when the reset has already passed", () => {
-    const decision = decideRetry({
-      failure: failure({
-        rateLimits: rateLimits({
-          windows: [
-            {
-              providerKey: "primary",
-              label: "Current session",
-              status: "blocked",
-              resetsAtMs: NOW_MS - 60_000,
-            },
-          ],
+  it("retries a reset that just passed, and declines one long past", () => {
+    // A provider a little late to reset heals on a retry; one repeating a
+    // stale reset would be retried every 15 s until the attempt cap (#2678).
+    const passed = (agoMs: number) =>
+      decideRetry({
+        failure: failure({
+          rateLimits: rateLimits({
+            windows: [
+              {
+                providerKey: "primary",
+                label: "Current session",
+                status: "blocked",
+                resetsAtMs: NOW_MS - agoMs,
+              },
+            ],
+          }),
         }),
-      }),
-      maximumWaitMs: null,
-      now: NOW_MS,
-      random: 0,
-    });
-    expect(decision).toEqual({
+        maximumWaitMs: null,
+        now: NOW_MS,
+        random: 0,
+      });
+    expect(passed(60_000)).toEqual({
       kind: "retry",
       sendAt: NOW_MS + RESET_BUFFER_MS,
       reason: "Rate limited",
+    });
+    expect(passed(RESET_GRACE_MS)).toEqual({
+      kind: "decline",
+      reason: "reset-passed",
     });
   });
 

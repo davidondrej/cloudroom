@@ -27,7 +27,7 @@
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "better-sqlite3": "12.10.0",
+    "better-sqlite3": "13.0.3",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "vitest": "^4.1.1"
   }

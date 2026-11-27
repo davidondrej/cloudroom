@@ -12,6 +12,7 @@ import { reasoningLevelSchema } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
+import { copyThreadAttachmentsToProject } from "../projects/attachments.js";
 import { ELSEWHERE, type CloudThreadStates } from "./cloud-threads.js";
 import { isCloudProvider } from "./events.js";
 import { cloudRepository } from "./project-copy.js";
@@ -212,10 +213,11 @@ export class CloudSync {
       if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account || state !== await this.state()) return;
       if (page.recheck_ms !== this.every.up || page.recheck_offline_ms !== this.every.down) { this.every = { up: page.recheck_ms, down: page.recheck_offline_ms }; this.schedule(); }
       let stopAt: string | null | undefined;
+      const movedAttachments: { threadId: string; sourceProjectId: string; targetProjectId: string }[] = [];
       this.host.quietly(null, () => {
         for (const [index, row] of page.threads.entries()) {
           try {
-            this.apply(row, state, buffer, first);
+            this.apply(row, state, buffer, first, movedAttachments);
             if (state.failing?.thread === row.thread) state.failing = null;
           } catch (error) {
             this.deps.logger?.warn({ threadId: row.thread, error: error instanceof Error ? error.message : String(error) }, "A Cloud thread could not be applied");
@@ -230,8 +232,9 @@ export class CloudSync {
             state.failing = null;
           }
         }
-        buffer.flushInto(this.deps.hub);
+        if (movedAttachments.length === 0) buffer.flushInto(this.deps.hub);
       });
+      await this.flushMovedAttachments(buffer, movedAttachments);
       if (stopAt !== undefined) {
         state.cursor = stopAt;
         await this.save();
@@ -263,18 +266,20 @@ export class CloudSync {
         const page = await this.host.sandboxes.threads(cursor, { pinnedOnly: true });
         if ((await this.host.sandboxes.account().catch(() => null))?.userId !== account || state !== await this.state()) return;
         const buffer = new NotificationBuffer();
+        const movedAttachments: { threadId: string; sourceProjectId: string; targetProjectId: string }[] = [];
         let failed = false;
         this.host.quietly(null, () => {
           for (const row of page.threads) {
             try {
-              this.apply(row, state, buffer, false);
+              this.apply(row, state, buffer, false, movedAttachments);
             } catch (error) {
               failed = true;
               this.deps.logger?.warn({ threadId: row.thread, error: error instanceof Error ? error.message : String(error) }, "A pinned Cloud thread could not be backfilled");
             }
           }
-          buffer.flushInto(this.deps.hub);
+          if (movedAttachments.length === 0) buffer.flushInto(this.deps.hub);
         });
+        await this.flushMovedAttachments(buffer, movedAttachments);
         if (failed) { await this.save(); return; }
         cursor = page.next;
         more = page.more;
@@ -300,10 +305,27 @@ export class CloudSync {
     return pinned;
   }
 
+  private async flushMovedAttachments(
+    buffer: NotificationBuffer,
+    movedAttachments: readonly { threadId: string; sourceProjectId: string; targetProjectId: string }[],
+  ): Promise<void> {
+    if (movedAttachments.length === 0) return;
+    await Promise.all(
+      movedAttachments.map((move) => copyThreadAttachmentsToProject(this.deps, move)),
+    );
+    this.host.quietly(null, () => buffer.flushInto(this.deps.hub));
+  }
+
   /** When the page being applied was asked for. */
   private asked = 0;
   /** One row, by itself: adopt it, or bring this computer's copy in line. */
-  private apply(row: ThreadChange, state: SyncState, buffer: NotificationBuffer, first: boolean): void {
+  private apply(
+    row: ThreadChange,
+    state: SyncState,
+    buffer: NotificationBuffer,
+    first: boolean,
+    movedAttachments?: { threadId: string; sourceProjectId: string; targetProjectId: string }[],
+  ): void {
     if (row.state === "deleted") {
       state.deleted = state.deleted.filter((id) => id !== row.thread);
       if (state.account) this.dropPendingDelete(state, state.account, row.thread);
@@ -369,7 +391,10 @@ export class CloudSync {
     const parent = unsent.includes("parent") ? undefined : this.parentOf(row, thread);
     if (parent !== undefined && parent !== thread.parentThreadId) updateThread(this.deps.db, buffer, thread.id, { parentThreadId: parent });
     const project = unsent.includes("project") ? null : this.project(row, state);
-    if (project && project !== thread.projectId) updateThread(this.deps.db, buffer, thread.id, { projectId: project });
+    if (project && project !== thread.projectId) {
+      movedAttachments?.push({ threadId: thread.id, sourceProjectId: thread.projectId, targetProjectId: project });
+      updateThread(this.deps.db, buffer, thread.id, { projectId: project });
+    }
     // Another computer's switch: follow the new session from here on, never back to one this thread left.
     if (row.session !== saved.sessionId) {
       this.host.detach(thread.id);
@@ -533,12 +558,14 @@ export class CloudSync {
     const state = await this.state();
     if (!state?.deferred[threadId]) return;
     const buffer = new NotificationBuffer();
+    const movedAttachments: { threadId: string; sourceProjectId: string; targetProjectId: string }[] = [];
     this.host.quietly(null, () => {
       const waiting = state.deferred[threadId] ?? [];
       delete state.deferred[threadId];
-      for (const child of waiting) this.apply(child as ThreadChange, state, buffer, false);
-      buffer.flushInto(this.deps.hub);
+      for (const child of waiting) this.apply(child as ThreadChange, state, buffer, false, movedAttachments);
+      if (movedAttachments.length === 0) buffer.flushInto(this.deps.hub);
     });
+    await this.flushMovedAttachments(buffer, movedAttachments);
     await this.save();
   }
 

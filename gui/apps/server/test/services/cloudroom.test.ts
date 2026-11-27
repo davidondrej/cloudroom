@@ -6,10 +6,15 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { expect, it, vi } from "vitest";
 import * as sync from "../../src/services/cloudroom/sync.js";
-import { listQueuedCommands } from "../helpers/commands.js";
+import {
+  listQueuedCommands,
+  reportQueuedCommandError,
+  reportQueuedCommandSuccess,
+  waitForQueuedCommand,
+} from "../helpers/commands.js";
 import { cloudroom } from "../../src/services/cloudroom/commands.js";
 import { appRequestId, installTag, readInstallTag } from "../../src/services/cloudroom/cloud-threads.js";
-import { binding, command, coreStates, saveBinding, saveCommandState, saveStatus, saveTeleportProgress } from "../../src/services/cloudroom/store.js";
+import { binding, command, coreStates, saveBinding, saveCommandState, saveStatus, saveTeleportProgress, teleportProgress } from "../../src/services/cloudroom/store.js";
 import { projectRecords } from "../../src/services/cloudroom/events.js";
 import type { SessionRecord } from "../../src/services/cloudroom/client.js";
 import { getLastThreadOutput } from "../../src/services/threads/thread-data.js";
@@ -1603,21 +1608,39 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
   seedThreadRuntimeState(harness.deps, { threadId: thread.id, environmentId: environment.id, providerThreadId: "native-1", model: "test-model" });
   const service = cloudroom(harness.deps);
   const heldChecks: ((body: unknown) => void)[] = [];
+  let passChecks = false;
   const core = createServer(async (req, res) => {
     const json = (body: unknown) => { res.writeHead(req.method === "POST" ? 202 : 200, { "Content-Type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.url === "/v1/health") return json({});
     if (req.url === "/v1/ready") return json({ ready: true });
     if (req.url === "/v1/capabilities") return json({ version: 1, repository: "/test", stop: true, resume: true, launch_settings: true, teleport: true, harnesses: [{ id: "codex", model: "test-model" }] });
-    if (req.url === "/v1/teleports/check") return void heldChecks.push(json);
+    if (req.url === "/v1/teleports/check")
+      return passChecks ? json({ ok: true }) : void heldChecks.push(json);
     res.writeHead(404); res.end();
   });
   core.listen(0, "127.0.0.1"); await once(core, "listening");
   const address = core.address(); if (!address || typeof address === "string") throw new Error("fixture did not listen");
   const api = (path: string, body?: unknown) => harness.app.request(`/api/v1${path}`, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   const phase = async () => ((await (await api(`/threads/${thread.id}`)).json()) as { teleport?: { phase: string } }).teleport?.phase;
+  const hostCommand = (type: string) =>
+    waitForQueuedCommand(harness, ({ command }) => command.type === type);
+  // The host's answer to the saved-conversation size query.
+  const sizes = async (size = 1) =>
+    reportQueuedCommandSuccess(harness, await hostCommand("thread.teleport"), {
+      files: [
+        {
+          path: thread.id,
+          size,
+          sha256: "",
+          kind: "native",
+          executable: false,
+        },
+      ],
+    });
   try {
     await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40) });
     const started = api(`/cloudroom/threads/${thread.id}/teleport`, { action: "start" });
+    await sizes();
     await vi.waitFor(() => expect(heldChecks).toHaveLength(1));
     expect(await phase()).toBe("checking");
     teleports(harness.deps).recover();
@@ -1641,12 +1664,46 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
     expect(await phase()).toBe("cancelled");
 
     const stopped = api(`/cloudroom/threads/${thread.id}/teleport`, { action: "start" });
+    await sizes();
     await vi.waitFor(() => expect(heldChecks).toHaveLength(2));
     teleports(harness.deps).abandon(thread.id);
     heldChecks[1]!({ ok: true });
     const response = await stopped;
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({ code: "teleport_interrupted", message: expect.stringContaining("stopped or archived") });
+
+    // A saved conversation over the host's limit is refused before anything stops (#2280).
+    for (const action of ["check", "start"]) {
+      const big = api(`/cloudroom/threads/${thread.id}/teleport`, { action });
+      await sizes(300 * 1024 * 1024);
+      expect(await (await big).json()).toMatchObject({
+        code: "teleport_history_size",
+        message: expect.stringContaining("at most 256 MB"),
+      });
+    }
+    // One the host still refuses after the stop ends like a Cancel: the thread works locally again and says why.
+    passChecks = true;
+    const late = api(`/cloudroom/threads/${thread.id}/teleport`, {
+      action: "start",
+    });
+    await sizes();
+    expect((await late).status).toBe(202);
+    const stop = await hostCommand("thread.stop");
+    await reportQueuedCommandSuccess(harness, stop, {
+      providerCheckpointId: null,
+    });
+    const capture = await hostCommand("thread.teleport");
+    await reportQueuedCommandError(harness, capture, {
+      errorCode: "command_failed",
+      errorMessage: "Native history exceeds the bounded capture size",
+    });
+    await vi.waitFor(() =>
+      expect(teleportProgress(harness.db, thread.id)).toMatchObject({
+        phase: "cancelled",
+        error: expect.stringContaining("stays local"),
+      }),
+    );
+    expect(harness.db.select().from(cloudroomThreads).all()).toHaveLength(0);
 
     harness.db
       .insert(events)
@@ -1666,6 +1723,7 @@ it("shows Teleport the moment it starts, and never leaves a failed or interrupte
           await api(`/cloudroom/threads/${thread.id}/teleport`, { action })
         ).json(),
       ).toMatchObject({ code: "teleport_history_size" });
+    // Refused sizes never reach Cloud.
     expect(heldChecks).toHaveLength(2);
   } finally {
     service.stop(); core.closeAllConnections(); await new Promise<void>((resolve) => core.close(() => resolve())); await harness.cleanup();

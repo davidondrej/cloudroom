@@ -16,14 +16,24 @@ import {
 } from "../helpers/test-app.js";
 
 const INSTALL = "/api/v1/plugins/install";
+const SKILL_INSTALL = "/api/v1/skills-registry/install";
+const SKILL_ID = "github.com/owner/repo/review";
 const MAC_ACCESS = "/api/v1/cloudroom/account/mac-access";
 const SOURCE = "npm:some-plugin@1.0.0";
 // What the phone relay sends: it runs in the server, so the harness's own token is on every request.
 const PHONE = { "x-bb-gate-auth": "session" };
 
+const installSkill = vi.hoisted(() =>
+  vi.fn(async () => ({ filePath: "/skills/review/SKILL.md" })),
+);
+vi.mock("../../src/services/skills/registry-skill-install.js", () => ({
+  installServerRegistrySkill: installSkill,
+}));
+
 let harness: TestAppHarness | null = null;
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await harness?.cleanup();
   harness = null;
 });
@@ -115,6 +125,82 @@ describe("human clicks (ADR 0260)", () => {
         body: { ok: true, plugin: { id: "some-plugin" } },
       },
     });
+  });
+
+  it("installs a registry skill only after a person approves the entry shown", async () => {
+    const { app, post, signed, signer } = await start();
+    // skills.sh answers for whichever entry is asked for.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async (url: string) =>
+          new Response(
+            `<script type="application/ld+json">${JSON.stringify({
+              "@type": "SoftwareApplication",
+              name: "Review",
+              url,
+              interactionStatistic: { userInteractionCount: 1 },
+            })}</script>`,
+          ),
+      ),
+    );
+    const body = { registrySkillId: SKILL_ID };
+    const click = signer.sign("POST", SKILL_INSTALL) ?? "";
+    expect(
+      (await post(SKILL_INSTALL, { [HUMAN_CLICK_HEADER]: click }, body)).status,
+    ).toBe(200);
+    // Replayed, forged with another key, and signed for a plugin install instead.
+    for (const header of [
+      click,
+      createHumanClickSigner().sign("POST", SKILL_INSTALL) ?? "",
+      signer.sign("POST", INSTALL) ?? "",
+    ]) {
+      expect(
+        (await post(SKILL_INSTALL, { [HUMAN_CLICK_HEADER]: header }, body))
+          .status,
+      ).toBe(403);
+    }
+    expect(installSkill).toHaveBeenCalledTimes(1);
+
+    // Unsigned: held, shown with its ID and source, and run only after a click.
+    const asked = await post(SKILL_INSTALL, {}, body);
+    const { requestId } = (await asked.json()) as { requestId: string };
+    expect(asked.status).toBe(403);
+    expect(
+      await (await app.request("/api/v1/human-clicks")).json(),
+    ).toMatchObject({
+      requests: [
+        {
+          id: requestId,
+          action: "skill-registry-install",
+          rows: [
+            { label: "skill", value: "Review" },
+            { label: "registry ID", value: SKILL_ID },
+            { label: "source", value: "github.com/owner/repo" },
+            { label: "reviewed", value: "no: anyone can publish to skills.sh" },
+          ],
+        },
+      ],
+    });
+    expect(installSkill).toHaveBeenCalledTimes(1);
+    expect(
+      (await signed(`/api/v1/human-clicks/${requestId}/approve`)).status,
+    ).toBe(200);
+    expect(installSkill).toHaveBeenCalledTimes(2);
+    expect(installSkill).toHaveBeenLastCalledWith(
+      expect.objectContaining({ packageRef: "owner/repo", skillId: "review" }),
+    );
+
+    // A source the installer would refuse is never shown.
+    expect(
+      (
+        await post(
+          SKILL_INSTALL,
+          {},
+          { registrySkillId: "github.com/-x/review" },
+        )
+      ).status,
+    ).toBe(422);
   });
 
   it("refuses a request it can't describe instead of showing it", async () => {

@@ -21,6 +21,7 @@ import { readJson } from "../helpers/json.js";
 import {
   seedEnvironment,
   seedHost,
+  seedHostSession,
   seedProjectWithSource,
   seedStoredEvent,
   seedThread,
@@ -356,6 +357,78 @@ describe("thread runtime stop", () => {
       );
       expect(acceptedStart.status).toBe(200);
       expect(isThreadQueueAutoSendPaused(harness.db, thread.id)).toBe(false);
+    });
+  });
+
+  it("settles a Stop that ended a message before it was sent as stopped, not failed", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-stopped-before-send",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/stopped-before-send-source",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/stopped-before-send-environment",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        status: "idle",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-stopped-before-send",
+      });
+      const sendResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/queued-messages`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            input: [{ type: "text", text: "Send while offline" }],
+            permissionMode: "full",
+          }),
+        },
+      );
+      expect(sendResponse.status).toBe(201);
+      const submit = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "turn.submit" && command.threadId === thread.id,
+      );
+      const stopResponsePromise = harness.app.request(
+        `/api/v1/threads/${thread.id}/stop`,
+        { method: "POST" },
+      );
+      const stop = await waitForQueuedCommand(
+        harness,
+        ({ command }) =>
+          command.type === "thread.stop" && command.threadId === thread.id,
+      );
+
+      await reportQueuedCommandError(harness, submit, {
+        errorCode: "stopped_before_send",
+        errorMessage:
+          "Stopped before Antigravity started. Your message was not sent.",
+      });
+      await reportQueuedCommandSuccess(harness, stop, {
+        providerCheckpointId: null,
+      });
+      expect((await stopResponsePromise).status).toBe(200);
+
+      await vi.waitFor(() =>
+        expect(getThread(harness.db, thread.id)?.status).toBe("idle"),
+      );
+      const types = listEvents(harness.db, { threadId: thread.id }).map(
+        (event) => event.type,
+      );
+      expect(types).toContain("client/turn/rejected");
+      expect(types).toContain("system/error");
     });
   });
 

@@ -28,7 +28,7 @@ function isImeComposing(event: KeyboardEvent): boolean {
   return event.isComposing || event.keyCode === 229;
 }
 
-const STYLE_MARKER = "data-bb-tasks-editor-styles";
+const STYLE_MARKER = "data-room-tasks-editor-styles";
 const EDITOR_CSS = `
 .bb-tasks-editor .tiptap {
   outline: none; width: 100%; font-size: 14px; line-height: 1.65;

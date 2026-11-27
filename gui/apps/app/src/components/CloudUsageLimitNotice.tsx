@@ -8,6 +8,7 @@ import { useCloudroomAccount, type CloudDisk } from "@/hooks/queries/cloudroom-q
 import { fetchWithAppSurface } from "@/lib/app-surface";
 import { sdk } from "@/lib/sdk";
 import { openUpgrade, useUpgradePromptViewed } from "@/lib/upgrade-prompt";
+import { limitDay } from "@/components/CloudQueue";
 
 async function askForMoreUsage() {
   const response = await fetchWithAppSurface("/api/v1/cloudroom/account/more-usage", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -24,27 +25,40 @@ const UPGRADES: Record<string, { name: string; price: string }> = {
 /** One-click amounts of extra credits, in dollars. $1 buys 1,000 credits. */
 const AMOUNTS = [10, 25, 50];
 
-/** Out of Cloud Credits, as a row in the chat where the work stopped (ADR 20261118-214337): one title, the next plan
- *  up, then one-click amounts of extra credits (ADR 20261112-235440). An amount opens its checkout on the website, and
- *  "Other" opens the billing page. Plans with no upgrade (Ultra, Business) can still ask the team. `launchCap` is
- *  Free's monthly cap on new cloud threads: extra credits lift it too (ADR 20261124-160120). No buttons until the plan
- *  is known. */
-export function CloudUsageLimitNotice({ launchCap = false, className }: { launchCap?: boolean; className?: string }) {
+/** Out of Cloud Credits, as a row in the chat where the work stopped (ADR 20261118-214337): one title with the day Cloud
+ *  comes back, that the message waits for it, the next plan up, Local for free (David, 2026-11-26), then one-click
+ *  amounts of extra credits (ADR 20261112-235440). An amount opens its checkout on the website, and "Other" opens the
+ *  billing page. Plans with no upgrade (Ultra, Business) can still ask the team. `launchCap` is Free's monthly cap on new
+ *  cloud threads: extra credits lift it too (ADR 20261124-160120). No buttons until the plan is known. `onRunLocal`, only
+ *  while a message waits to start: stops it here and opens it in a new Local thread. */
+export function CloudUsageLimitNotice({ launchCap = false, onRunLocal, className }: { launchCap?: boolean; onRunLocal?: () => void; className?: string }) {
   const ask = useMutation({ mutationFn: askForMoreUsage });
-  const plan = useCloudroomAccount().data?.plan ?? null;
+  const account = useCloudroomAccount().data;
+  const plan = account?.plan ?? null;
   const upgrade = plan ? UPGRADES[plan] : undefined;
+  const day = limitDay(account?.planUsage?.resetsAt);
   useUpgradePromptViewed(upgrade ? "limit_notice" : null);
   return (
     <div role="status" aria-label="Cloud usage limit" className={cn("flex flex-col gap-3 py-1", className)}>
-      <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
-        <Icon name="Cloud" className="size-[18px] shrink-0 text-muted-foreground" aria-hidden />
-        {launchCap ? "You used Free's 10 Cloud threads this month" : "You're out of Cloud Credits"}
-      </p>
+      <div className="flex flex-col gap-1">
+        <p className="flex items-center gap-2.5 text-base font-semibold text-foreground">
+          <Icon name="Cloud" className="size-[18px] shrink-0 text-muted-foreground" aria-hidden />
+          {launchCap
+            ? day ? `Free's 10 Cloud threads are used up until ${day}` : "You used Free's 10 Cloud threads this month"
+            : day ? `You're out of Cloud Credits until ${day}` : "You're out of Cloud Credits"}
+        </p>
+        {onRunLocal && <p className="pl-7 text-sm text-muted-foreground">Your message is saved and runs when Cloud is back. Or run it on your computer now, for free.</p>}
+      </div>
       {plan && (
         <div className="flex flex-wrap items-center gap-2 pl-7">
           {upgrade && (
             <Button type="button" size="sm" onClick={() => openUpgrade("limit_notice")}>
               Upgrade to {upgrade.name}<span className="font-normal opacity-70">{upgrade.price}</span>
+            </Button>
+          )}
+          {onRunLocal && (
+            <Button type="button" size="sm" variant="outline" onClick={onRunLocal}>
+              <Icon name="Laptop" aria-hidden />Run it on Local<span className="font-normal opacity-70">free</span>
             </Button>
           )}
           <span className="px-1 text-sm text-muted-foreground">{upgrade ? "or add" : "Add credits"}</span>

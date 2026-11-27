@@ -66,7 +66,10 @@ import {
   ProvidersSettingsSection,
 } from "@/components/settings/ProvidersSettingsSection";
 import { CodeRendererSettings } from "@/components/settings/CodeRendererSettings";
-import { CollapseSubagentsSetting } from "@/components/settings/CollapseSubagentsSetting";
+import {
+  CollapseSubagentsSetting,
+  SubagentBarSetting,
+} from "@/components/settings/CollapseSubagentsSetting";
 import { SidebarThreadListSetting } from "@/components/settings/SidebarThreadListSetting";
 import { SidebarFooterSettings } from "@/components/settings/SidebarFooterSettings";
 import { SidebarNavigationSetting } from "@/components/settings/SidebarNavigationSetting";
@@ -103,7 +106,7 @@ import { KeyboardSettingsSection } from "@/components/settings/KeyboardSettingsS
 import { BrowserSettingsSection } from "@/components/settings/BrowserSettingsSection";
 import { AdvancedMachineSettings, MachinesSettingsSection } from "@/components/settings/MachinesSettingsSection";
 import { CloudroomAccountSettings } from "@/components/settings/CloudroomAccountSettings";
-import { InviteSettingsCard } from "@/components/InviteOffer";
+import { ReferralsSettingsSection } from "@/components/settings/ReferralsSettingsSection";
 import { ProjectsSettingsSection } from "@/components/settings/ProjectsSettingsSection";
 import { ArchivedThreadsSettingsSection } from "@/components/settings/ArchivedThreadsSettingsSection";
 import { ImportChatsSettingsSection } from "@/components/settings/ImportChats";
@@ -872,6 +875,7 @@ export function AppearanceSettingsSection({
         <SidebarThreadListSetting />
         <SidebarNavigationSetting />
         <CollapseSubagentsSetting />
+        <SubagentBarSetting />
         <HarnessIconsSetting />
         <CodeRendererSettings />
         <SettingsWithControl label="Theme">
@@ -1520,6 +1524,8 @@ export function SettingsView() {
     content = <CloudroomAccountSettings />;
   } else if (activeSection === "analytics") {
     content = <AnalyticsTabs />;
+  } else if (activeSection === "referrals") {
+    content = <ReferralsSettingsSection />;
   } else if (activeSection === "machines") {
     content = <MachinesSettingsPage />;
   } else if (activeSection === "updates") {
@@ -1584,7 +1590,6 @@ export function SettingsView() {
   } else {
     content = (
       <>
-        <InviteSettingsCard />
         <GeneralSettingsSection
           desktopBrowserAvailable={desktopBrowserAvailable}
           generalSettingsDisabled={

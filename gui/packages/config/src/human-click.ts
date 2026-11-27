@@ -24,6 +24,7 @@ const ACTIONS = [
   ["plugin-install", /^\/api\/v1\/plugins\/install$/u],
   ["plugin-catalog-install", /^\/api\/v1\/plugin-catalog\/install$/u],
   ["plugin-update", /^\/api\/v1\/plugins\/[^/]+\/update$/u],
+  ["skill-registry-install", /^\/api\/v1\/skills-registry\/install$/u],
   ["approve", /^\/api\/v1\/human-clicks\/[^/]+\/approve$/u],
   ["decline", /^\/api\/v1\/human-clicks\/[^/]+\/decline$/u],
   ["mac-access", /^\/api\/v1\/cloudroom\/account\/mac-access$/u],

@@ -53,6 +53,7 @@ export const commands = [
 const threadHostSchema = z.object({
   host: z.object({ id: z.string() }).nullable().optional(),
   providerId: z.string().nullable().optional(),
+  executionTarget: z.string().nullable().optional(),
 });
 
 export function decideGate(args: {
@@ -67,7 +68,7 @@ export function decideGate(args: {
   | { kind: "error"; message: string } {
   const { tool, input } = args;
   if (BLOCKED_TOOLS.has(tool))
-    return { kind: "error", message: `${tool} changes Cua Driver itself and is not available to agents.` };
+    return { kind: "error", message: `${tool} is not available to agents in Cloudroom.` };
   if (tool === "launch_app") {
     const name = input.bundle_id ?? input.name;
     return typeof name === "string" && name
@@ -229,18 +230,26 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     if (!listed(list, app.key)) await room.storage.kv.set(key, [...list, app]);
   };
 
+  // A Cloud thread gets here only through Mac access (`room-cli mac computer-use` in its sandbox), so it uses this
+  // computer as itself: its sidebar highlight, approval cards, and app locks work as for a Local thread.
   async function threadInfo(threadId: string) {
     const thread = threadHostSchema.parse(await room.sdk.threads.get({ threadId, include: "host" }));
-    return { hostId: thread.host?.id ?? null, provider: thread.providerId ?? null };
+    const cloud = !thread.host && thread.executionTarget === "cloud";
+    return {
+      hostId: thread.host?.id ?? (cloud ? await localHostId(true) : null),
+      provider: thread.providerId ?? null,
+      cloud,
+    };
   }
 
-  async function localHostId() {
+  // `thisComputer`: never another connected machine, which a Cloud thread's call must not control.
+  async function localHostId(thisComputer = false) {
     const hosts = z
       .array(z.object({ id: z.string(), status: z.string(), machineProviderId: z.string().nullable().optional() }))
       .parse(await room.sdk.hosts.list());
     return (
       hosts.find((entry) => entry.status === "connected" && !entry.machineProviderId)?.id ??
-      hosts.find((entry) => entry.status === "connected")?.id ??
+      (thisComputer ? null : hosts.find((entry) => entry.status === "connected")?.id) ??
       null
     );
   }
@@ -369,6 +378,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     threadId: string,
     hostId: string,
     seen: { app: string | null },
+    cloud: boolean,
   ) {
     const tool = argv[1];
     if (!tool) return fail("usage", "Usage: room-cli computer-use call <tool> ['<json-args>'] [--purpose <text>]");
@@ -439,7 +449,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     const shotsKey = threadId.replace(/[^A-Za-z0-9_-]/g, "_");
     const result = await host.call(
       "call",
-      { tool, args: input, session, shotsKey },
+      { tool, args: input, session, shotsKey, ...(cloud ? { inline: true as const } : {}) },
       { hostId, timeoutMs: 150_000, ...(ctx.signal ? { signal: ctx.signal } : {}) },
     );
     if (tool === "end_session") {
@@ -452,12 +462,19 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     return acceptFocusedWindow(tool, input, { exitCode: result.exitCode, stdout: withConsentHint(result.stdout), stderr: result.stderr }, listWindows);
   }
 
-  async function trackedCall(argv: string[], ctx: PluginCliContext, threadId: string, hostId: string, provider: string | null) {
+  async function trackedCall(
+    argv: string[],
+    ctx: PluginCliContext,
+    threadId: string,
+    hostId: string,
+    provider: string | null,
+    cloud: boolean,
+  ) {
     const startedAt = Date.now();
     const seen: { app: string | null } = { app: null };
     let result: PluginCliResult;
     try {
-      result = await runCall(argv, ctx, threadId, hostId, seen);
+      result = await runCall(argv, ctx, threadId, hostId, seen, cloud);
     } catch (error) {
       result = fail("error", error instanceof Error ? error.message : String(error));
     }
@@ -483,9 +500,8 @@ export default async function computerUsePlugin(room: BbPluginApi) {
   async function runCli(argv: string[], ctx: PluginCliContext): Promise<PluginCliResult> {
     const threadId = ctx.threadId;
     if (!threadId) return fail("no_thread", "Run this from a Cloudroom thread (ROOM_THREAD_ID is not set).");
-    const { hostId, provider } = await threadInfo(threadId);
-    if (!hostId)
-      return fail("no_host", "This thread has no local machine. In Cloud threads use `room-cli computer-use` instead.");
+    const { hostId, provider, cloud } = await threadInfo(threadId);
+    if (!hostId) return fail("no_host", "This thread has no connected computer to control.");
     switch (argv[0]) {
       case "status": {
         const current = await settings(hostId);
@@ -504,7 +520,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
         return { exitCode: 0, stdout: text };
       }
       case "call":
-        return trackedCall(argv, ctx, threadId, hostId, provider);
+        return trackedCall(argv, ctx, threadId, hostId, provider, cloud);
       default:
         return fail("usage", "Usage: room-cli computer-use status | setup | tools [<tool>] | call <tool> ['<json>']");
     }

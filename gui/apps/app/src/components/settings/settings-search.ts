@@ -118,6 +118,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Sidebar", "thread list"],
     ["Navigation", "sidebar"],
     ["Collapse subagents", "sidebar child threads subthreads fold hide expand"],
+    ["Subagent bar", "child threads subthreads top bar header hide show"],
     ["Harness icons", "sidebar claude code codex provider agent logo"],
     ["Source code", "syntax highlighting renderer"],
     ["Diffs", "changes renderer"],
@@ -178,7 +179,7 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Cloudroom account", "sign in login email account sign out"],
     ["Plan & billing", "billing plan subscription invoices upgrade pro ultra payment cloud credits buy packs"],
     ["Connected", "github claude code codex logins connected"],
-    ["Invite friends", "invite friend referral share $400 credits"],
+    ["Partner program", "refer referral affiliate partner 40% earn commission link invite friend share"],
     ["Or connect your own Core", "self-hosted core url api token server"],
   ]),
   ...entries("analytics", undefined, [
@@ -188,6 +189,10 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
     ["Tokens", "analytics tokens written read cache usage threads wave"],
     ["Prompts", "analytics prompts hours of the week streak busiest hour punch card"],
     ["Skills", "analytics stats usage most used least used skill runs ridgeline"],
+  ]),
+  ...entries("referrals", undefined, [
+    ["Refer a friend, earn 40% for life", "affiliate partner program referral link earn 40% payouts dub commissions"],
+    ["Auto-credit Monthly Wrapped", "referral affiliate wrapped share x link"],
   ]),
   ...entries("machines", undefined, [
     [`${COMPUTER_TITLE} access`, "mac computer access cloud agents permission full read-only ask off"],

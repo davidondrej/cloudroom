@@ -11,14 +11,100 @@ import {
   createRequestTimeoutFetch,
   type BbSdk,
 } from "@cloudroom/sdk/node";
+import { subscribe } from "node:diagnostics_channel";
+import { writeFileSync } from "node:fs";
 import type { Dispatcher } from "undici";
 
 type CliRequestInit = RequestInit & { dispatcher?: Dispatcher };
 
+// In a loop's script (#2656): on exit, leave the loop's file only if a request to Cloudroom failed in transport and
+// Cloudroom never answered at all (no response headers from its origin), so its outage never turns the loop off.
+const unavailableFile = process.env.ROOM_LOOP_UNAVAILABLE_FILE;
+const cloudroomOrigin = unavailableFile
+  ? originOf(process.env.ROOM_SERVER_URL)
+  : null;
+let answered = false;
+let transportFailed = false;
+if (unavailableFile && cloudroomOrigin) {
+  subscribe("undici:request:headers", (message) => {
+    if (
+      (message as { request?: { origin?: unknown } }).request?.origin ===
+      cloudroomOrigin
+    )
+      answered = true;
+  });
+  process.on("exit", () => {
+    if (!transportFailed || answered) return;
+    try {
+      writeFileSync(unavailableFile, "");
+    } catch {}
+  });
+}
+
+function originOf(url: string | undefined): string | null {
+  try {
+    return url === undefined ? null : new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+// Codes that mean Cloudroom didn't answer. Anything else (a bad port, a blocked connection) is this shell's own setup.
+const NO_ANSWER_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ETIMEDOUT",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+]);
+
+/** Every request to Cloudroom fails here first, under the caller proof and before a command wraps the error. It counts
+ *  when a code above, or our own timeout, is in the error or its causes (AggregateError too), and no EPERM or EACCES. */
+function noteLoopTransportFailure(
+  input: RequestInfo | URL,
+  error: unknown,
+): void {
+  if (
+    !cloudroomOrigin ||
+    originOf(input instanceof Request ? input.url : String(input)) !==
+      cloudroomOrigin
+  )
+    return;
+  let noAnswer = false;
+  const pending = [error];
+  const seen = new Set<unknown>();
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (typeof current !== "object" || current === null || seen.has(current))
+      continue;
+    seen.add(current);
+    const { code, name, cause, errors } = current as {
+      code?: unknown;
+      name?: unknown;
+      cause?: unknown;
+      errors?: unknown;
+    };
+    if (code === "EPERM" || code === "EACCES") return;
+    if (
+      (typeof code === "string" && NO_ANSWER_CODES.has(code)) ||
+      name === "TimeoutError" ||
+      name === "BbRequestTimeoutError"
+    )
+      noAnswer = true;
+    pending.push(cause, ...(Array.isArray(errors) ? errors : []));
+  }
+  if (noAnswer) transportFailed = true;
+}
+
 export const CLI_READ_TIMEOUT_MS = 45_000;
 
 const callerProofFetch = createCallerProofFetch((input, init) =>
-  fetch(input, init),
+  fetch(input, init).catch((error: unknown) => {
+    noteLoopTransportFailure(input, error);
+    throw error;
+  }),
 );
 
 const HUMAN_CLICK_POLL_MS = 1_000;
@@ -28,7 +114,7 @@ const HUMAN_CLICK_WAIT_MS = 11 * 60_000;
 const refusal = (code: string, message: string): Response =>
   Response.json({ code, message, error: message }, { status: 403 });
 
-// A plugin install or update needs a click in the Cloudroom app (ADR 0260).
+// A plugin or skill install, or a plugin update, needs a click in the app (ADR 0260).
 // The server keeps the request and shows it there. Wait for the answer, then
 // reply as the action itself did, so callers need no code of their own.
 async function waitForHumanClick(
@@ -123,6 +209,7 @@ export function createCliRoomSdk(baseUrl: string, timeoutMs?: number): BbSdk {
       try {
         return await timeoutFetch(input, init);
       } catch (error) {
+        noteLoopTransportFailure(input, error);
         if (error instanceof BbRequestTimeoutError) {
           const proxy = await import("./plugin-cli-proxy.js");
           error.message = proxy.describeUnreachableServer(

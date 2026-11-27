@@ -5,7 +5,7 @@ Reads local agent chats (Claude Code, Codex, Pi, OpenCode, Hermes), keeps only t
 (trimmed, secrets masked), flags automated chats, and writes small text files for cloud readers.
 
   extract.py index OUT [--days 90]                      -> OUT/index.jsonl, OUT/stats.json
-  extract.py slices OUT [--n 30] [--chars 900]          -> OUT/slices/slice-NN.txt (all kept chats, at most 100 KB each)
+  extract.py slices OUT [--max-readers N] [--chars 900] -> OUT/slices/slice-NN.txt (~100 KB each; with N, the newest chats that fit)
   extract.py groups OUT [--top 12] [--per 15] [--chars 2500] -> OUT/groups/group-NN.txt + OUT/groups/overview.txt
   extract.py sessions OUT --ids c-1a2b3c4d,x-... [--chars 6000]  -> prints those chats
   extract.py reduce OUT [--top 25]                       -> counts the tags in OUT/reports/*.txt, prints a compact digest
@@ -14,13 +14,27 @@ import glob, hashlib, io, json, locale, os, re, sqlite3, sys, time
 from collections import Counter, defaultdict
 
 H = os.path.expanduser("~")
-SECRET = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----"
+# A PEM header or footer may wrap onto the next line ("-----BEGIN RSA\nPRIVATE KEY-----").
+SECRET = re.compile(r"-----BEGIN\s[A-Z\s]*PRIVATE\s+KEY-----.*?-----END\s[A-Z\s]*PRIVATE\s+KEY-----"
                     r"|(sk-[A-Za-z0-9_\-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}"
                     r"|xox[abpr]-[A-Za-z0-9\-]{10,}|eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}|\b[A-Za-z0-9_\-]{40,}\b)"
-                    r"|AIza[0-9A-Za-z_\-]{35}|\b[rsp]k_(?:live|test)_[0-9A-Za-z]{16,}|\bBearer\s+[A-Za-z0-9._~+/\-]{12,}=*")
+                    r"|AIza[0-9A-Za-z_\-]{35}|\b[rsp]k_(?:live|test)_[0-9A-Za-z]{16,}|\bBearer\s+[A-Za-z0-9._~+/\-]{12,}=*", re.S)
 URL_PASSWORD = re.compile(r"(\b[a-z][a-z0-9+.\-]*://[^\s:/@]+:)[^\s@/]+(@)", re.I)
+# English labels; their value may still sit on the next line ("password:\nHunter22!"), as before #2478.
 SECRET_VALUE = re.compile(r"(?i)(\b[\w.\-]*(?:passw(?:or)?d|pwd|secret|token|api[_\-]?key|access[_\-]?key|auth|credential)s?[\w.\-]*[\"']?\s*[:=]\s*[\"']?)"
                           r"(?!\[masked\])[^\s\"'&,;]{6,}")
+# Password labels in common languages. LINE_VALUE and SPACED_PASSWORD mask a value on the label's own line only (#2478).
+PASSWORD = r"passw(?:or)?d|passwort|kennwort|(?<![a-z])pw(?![a-z])|mot de passe|contrase[ñn]a|(?:senha|has[łl]o|heslo)(?![a-z])|wachtwoord|пароль|密码|パスワード"
+VALUE = r"[^\s\"'&,;，。、；]"
+# A value that looks like a secret: it has a digit or a symbol inside a word.
+SHAPE = rf"{VALUE}*?(?:\d|\w[^\w\s\"'&,;，。、；./\-]\w)"
+# A whole word that holds a label and ends in : or =. Checking the : or = first keeps plain words fast.
+# Unquoted CJK text without that shape is a sentence ("密码：修改后无法登录"), not a secret.
+LINE_VALUE = re.compile(rf"(?i)((?<![\w.\-])(?=[\w.\-]*[\"']? ?[:=：])(?=[\w.\-]*?(?:{PASSWORD}|(?<![a-z])passe?(?![a-z])|pwd|secret|token|api[_\-]?key|access[_\-]?key|auth|credential))"
+                        rf"[\w.\-]*[\"']? ?[:=：] ?[\"']?)(?!\[masked\])(?!(?<![\"'])(?=[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])(?!{SHAPE})){VALUE}{{6,}}")
+# A password label and a space, then a value with a digit or an inner symbol. Never a key ("pw DB2_PASS: x") or a word holding [masked].
+SPACED_PASSWORD = re.compile(rf"(?i)(\b(?:{PASSWORD}) [\"']?)(?={SHAPE})(?!{VALUE}*\[masked\])"
+                             rf"{VALUE}{{6,}}(?!{VALUE})(?<![:=：])(?![\"']? ?[:=：])")
 NOISE = re.compile(r"\[MESSAGE FROM NON-USER SOURCE - NOT USER INPUT\]\s*Automatic Cloudroom note: this session has started or resumed\. Messages after this note come from the user\."
                    r"|<system-reminder>.*?</system-reminder>|<(local-)?command-[a-z-]+>.*?</(local-)?command-[a-z-]+>"
                    r"|<environment_context>.*?</environment_context>|<user_instructions>.*?</user_instructions>"
@@ -32,8 +46,16 @@ AUTO = ["Loop note", "room-cli loop report", "<webhook_events>", "[Local fork]",
 
 def clean(text):
     text = NOISE.sub(" ", text or "")
-    text = SECRET.sub("[masked]", re.sub(r"\s+", " ", text))
-    return SECRET_VALUE.sub(r"\1[masked]", URL_PASSWORD.sub(r"\1[masked]\2", text)).strip()
+    # One space per gap, but a line break stays a line break until the end, so a label's value never comes from the next line.
+    text = re.sub(r"\s+", lambda m: "\n" if "\n" in m.group() else " ", text)
+    text = URL_PASSWORD.sub(r"\1[masked]\2", SECRET.sub("[masked]", text))
+    # Every rule looks at the same text and all values they find are masked, so one rule's match can't hide another's value.
+    out, end = "", 0
+    for a, b in sorted((m.end(1), m.end()) for rule in (SECRET_VALUE, LINE_VALUE, SPACED_PASSWORD) for m in rule.finditer(text)):
+        if a >= end:
+            out += text[end:a] + "[masked]"
+        end = max(end, b)
+    return (out + text[end:]).replace("\n", " ").strip()
 
 
 def cut(text, n):
@@ -293,19 +315,32 @@ def day_index(ts, days=91):
     return index if 0 <= index < days else None
 
 
-def cmd_slices(out, n=30, chars=900, max_bytes=100_000):
-    keep = sorted(kept(load(out)), key=lambda c: (c["repo"], c["ts"]))
+def cmd_slices(out, chars=900, max_bytes=100_000, max_readers=0):
+    """Slices of about max_bytes (~110 chats, what reader.md expects), as few as fit: a small history needs 1-2 readers,
+    not 30 (#2645). With max_readers (Free plans), the newest chats that fit in that many slices; older ones are skipped."""
+    keep = sorted(kept(load(out)), key=lambda c: c["ts"], reverse=True)
     os.makedirs(os.path.join(out, "slices"), exist_ok=True)
-    blocks = [(c, chat_block(c, chars).encode()) for c in keep]
-    target = min(max_bytes, -(-sum(len(b) for _, b in blocks) // n))
-    slices, current, chats = [], b"", []
+    for old in glob.glob(os.path.join(out, "slices", "slice-*.txt")):  # a re-run with fewer slices: readers.py starts one per file
+        os.remove(old)
+    blocks, total = [], 0
+    for c in keep:
+        block = chat_block(c, chars).encode()
+        if max_readers and blocks and total + len(block) > max_readers * max_bytes:
+            break
+        blocks.append((c, block))
+        total += len(block)
+    skipped = len(keep) - len(blocks)
+    blocks.sort(key=lambda b: (b[0]["repo"], b[0]["ts"]))
+    # n even slices in (repo, date) order: each is total/n plus at most one chat, so never more than n readers
+    n, pos = max(1, -(-total // max_bytes)), 0
+    parts = [([], []) for _ in range(n)]
     for c, block in blocks:
-        if current and len(current) + len(block) > target:
-            slices.append((current, chats))
-            current, chats = b"", []
-        current += block
+        data, chats = parts[min(n - 1, pos * n // max(total, 1))]
+        data.append(block)
         chats.append(c)
-    slices += [(current, chats)] if current else []
+        pos += len(block)
+    slices = [(b"".join(data), chats) for data, chats in parts if chats]
+    keep = [c for c, _ in blocks]
     days, per_slice = [0] * 91, {}
     for i, (data, part) in enumerate(slices, 1):
         with open(os.path.join(out, "slices", f"slice-{i:02d}.txt"), "wb") as f:
@@ -317,7 +352,8 @@ def cmd_slices(out, n=30, chars=900, max_bytes=100_000):
     progress = {"chats": len(keep), "days": days, "secrets": sum(data.count(b"[masked]") for data, _ in slices), "slices": per_slice}
     json.dump(progress, open(os.path.join(out, "slices", "progress.json"), "w"))
     sizes = [len(data) for data, _ in slices]
-    print(f"{len(slices)} slices, {len(keep)} chats, {sum(sizes)} bytes, largest {max(sizes, default=0)}")
+    print(f"{len(slices)} slices, {len(keep)} chats, {sum(sizes)} bytes, largest {max(sizes, default=0)}"
+          + (f", {skipped} older chats skipped (Free plan reads the newest)" if skipped else ""))
 
 
 STOP = set("""the and for that this with you your are was have from not but all can will just what when how then they them there
@@ -416,13 +452,13 @@ def cmd_reduce(out, top=25):
 if __name__ == "__main__":
     if sys.platform == "win32":  # a redirected Windows stdout uses the ANSI code page (cp1252), which can't print most chat text
         sys.stdout.reconfigure(encoding="utf-8")
-    a = sys.argv[1:]
+    a = [x for arg in sys.argv[1:] for x in (arg.split("=", 1) if arg.startswith("--") and "=" in arg else [arg])]  # --flag=value too
     opts = {a[i][2:]: a[i + 1] for i in range(2, len(a) - 1, 2) if a[i].startswith("--")}
     num = lambda k, d: int(opts.get(k, d))
     if a[0] == "index":
         cmd_index(a[1], num("days", 90))
     elif a[0] == "slices":
-        cmd_slices(a[1], num("n", 30), num("chars", 900))
+        cmd_slices(a[1], num("chars", 900), max_readers=num("max-readers", 0))
     elif a[0] == "groups":
         cmd_groups(a[1], num("top", 12), num("per", 15), num("chars", 2500))
     elif a[0] == "sessions":

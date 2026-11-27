@@ -25,7 +25,10 @@ import {
   getProjectComposeRoutePath,
   getSettingsProjectRoutePath,
 } from "@/lib/route-paths";
-import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
+import {
+  useSidebarNavigation,
+  useSidebarNavigationThreadSelection,
+} from "@/hooks/queries/sidebar-navigation-query";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import { toPluginSidebarThread } from "./plugin-sidebar-threads";
@@ -110,6 +113,15 @@ export function useSidebarThreads(): PluginSidebarThreadsState {
       sections: data.sections,
     };
   }, [data, hostNamesById, query.isError]);
+}
+
+const NO_THREAD_IDS: readonly string[] = [];
+const threadIds = (threads: ThreadListEntry[]) =>
+  threads.map((thread) => thread.id);
+
+/** The same threads' IDs, from the cache only: no hosts read, no request. */
+export function useSidebarThreadIds(): readonly string[] {
+  return useSidebarNavigationThreadSelection(threadIds).data ?? NO_THREAD_IDS;
 }
 
 function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {

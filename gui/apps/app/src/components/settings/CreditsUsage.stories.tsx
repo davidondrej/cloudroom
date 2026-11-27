@@ -67,21 +67,108 @@ function tokenDay(model: number, day: number) {
   const written = Math.round((MODELS[model]![1] / 1840) * 2_400_000 * rand(day + model * 40) * (day === 12 ? 2.2 : 1) * (model === 3 && day < 20 ? 0 : 1));
   return { written, read: written * 9, cached: written * 260 };
 }
+const RANKED: [string, string, number, number][] = [
+  ["Billing refactor", "Claude Code", 0.31, 8],
+  ["Nightly audit (loop)", "Claude Code", 0.17, 0],
+  ["Speed up the search ranker", "Codex", 0.12, 2],
+  ["Fix flaky login test", "Claude Code", 0.08, 0],
+  ["Docs cleanup", "Codex", 0.06, 0],
+  ["Write the checkout tests", "Claude Code", 0.05, 0],
+  ["Recipe site redesign", "Claude Code", 0.04, 3],
+  ["Upgrade dependencies", "Codex", 0.03, 0],
+];
+/** The range's tokens written, shared out as the server ranks threads: the top 8, then the rest as one row. */
+function rankedThreads(wrote: number) {
+  const threads = RANKED.map(([name, agent, part, children], i) => ({
+    id: `thr-${i}`,
+    projectId: PERSONAL_PROJECT_ID,
+    name,
+    agent,
+    written: Math.round(wrote * part),
+    children,
+  }));
+  return {
+    threads,
+    otherThreads: {
+      count: 23,
+      written: wrote - sum(threads.map((thread) => thread.written)),
+    },
+  };
+}
 /** The four stats worked out from thread history, as the server sends them. */
 function usageAnalytics() {
   const base = { startDate: START, days: DAYS };
   return {
-    agentHours: { ...base, agentHours: { local: days((d) => 9 * rand(d)), cloud: days((d) => (d === 22 ? 26 : 7 * rand(d + 50))), you: days((d) => (d === 22 ? 1.2 : 5 * rand(d + 90))) } },
-    models: { ...base, models: { local: 1502, cloud: 1002, list: MODELS.map(([name, total], m) => ({ name, total, daily: days((d) => Math.round((total / DAYS) * rand(d + m * 40) * (m === 3 && d < 20 ? 0 : 1))) })) } },
-    tokens: { ...base, tokens: {
-      // Two ranges of days: the one before, then this one.
-      written: [...days((d) => Math.round(1_600_000 * rand(d + 30))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).written)))],
-      read: [...days((d) => Math.round(9_000_000 * rand(d + 60))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).read)))],
-      cached: [...days((d) => Math.round(260_000_000 * rand(d + 90))), ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).cached)))],
-      models: MODELS.map(([name], m) => ({ name, written: days((d) => tokenDay(m, d).written), read: days((d) => tokenDay(m, d).read), cached: days((d) => tokenDay(m, d).cached) })),
-      top: Array.from({ length: DAYS }, (_, d) => THREADS.slice(0, 3).map(([name], k) => { const written = Math.round((d === 12 && k === 0 ? 3_100_000 : 700_000 / (k + 1)) * rand(d + k)); return { name, written, read: written * 8, cached: written * 240 }; })),
-    } },
-    prompts: { ...base, prompts: { daily: days((d) => Math.round(70 * rand(d))), hours: Array.from({ length: 168 }, (_, i) => Math.round(18 * work(i % 24) * rand(i) * (i >= 120 ? 0.3 : 1))) } },
+    agentHours: {
+      ...base,
+      agentHours: {
+        local: days((d) => 9 * rand(d)),
+        cloud: days((d) => (d === 22 ? 26 : 7 * rand(d + 50))),
+        you: days((d) => (d === 22 ? 1.2 : 5 * rand(d + 90))),
+      },
+    },
+    models: {
+      ...base,
+      models: {
+        local: 1502,
+        cloud: 1002,
+        list: MODELS.map(([name, total], m) => ({
+          name,
+          total,
+          daily: days((d) =>
+            Math.round(
+              (total / DAYS) * rand(d + m * 40) * (m === 3 && d < 20 ? 0 : 1),
+            ),
+          ),
+        })),
+      },
+    },
+    tokens: {
+      ...base,
+      tokens: {
+        // Two ranges of days: the one before, then this one.
+        written: [
+          ...days((d) => Math.round(1_600_000 * rand(d + 30))),
+          ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).written))),
+        ],
+        read: [
+          ...days((d) => Math.round(9_000_000 * rand(d + 60))),
+          ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).read))),
+        ],
+        cached: [
+          ...days((d) => Math.round(260_000_000 * rand(d + 90))),
+          ...days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).cached))),
+        ],
+        models: MODELS.map(([name], m) => ({
+          name,
+          written: days((d) => tokenDay(m, d).written),
+          read: days((d) => tokenDay(m, d).read),
+          cached: days((d) => tokenDay(m, d).cached),
+        })),
+        top: Array.from({ length: DAYS }, (_, d) =>
+          THREADS.slice(0, 3).map(([name], k) => {
+            const written = Math.round(
+              (d === 12 && k === 0 ? 3_100_000 : 700_000 / (k + 1)) *
+                rand(d + k),
+            );
+            return { name, written, read: written * 8, cached: written * 240 };
+          }),
+        ),
+        // Every thread ranked by tokens written in the range; a parent counts its children.
+        ...rankedThreads(
+          sum(days((d) => sum(MODELS.map((_, m) => tokenDay(m, d).written)))),
+        ),
+      },
+    },
+    prompts: {
+      ...base,
+      prompts: {
+        daily: days((d) => Math.round(70 * rand(d))),
+        hours: Array.from({ length: 168 }, (_, i) =>
+          Math.round(18 * work(i % 24) * rand(i) * (i >= 120 ? 0.3 : 1)),
+        ),
+      },
+    },
   };
 }
 

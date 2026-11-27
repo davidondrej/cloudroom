@@ -103,6 +103,7 @@ interface ThreadTellCommandOptions {
   sendAt?: string;
   requestId?: string;
   messageFile?: string;
+  parent?: boolean;
 }
 
 interface ThreadActionOptions {
@@ -561,8 +562,14 @@ export function registerActionsCommands(
     );
 
   parent
-    .command("tell <id> [message]")
-    .description("Send a follow-up message to a thread")
+    .command("tell [id] [message]")
+    .description(
+      "Send a follow-up message to a thread, or with --parent to the thread that started this one",
+    )
+    .option(
+      "--parent",
+      "Send to this thread's saved parent instead of <id> (needs ROOM_THREAD_ID)",
+    )
     .option(
       "--message-file <path>",
       "Read the message from a UTF-8 file, or - for stdin (use it for long messages)",
@@ -603,10 +610,19 @@ export function registerActionsCommands(
     .action(
       action(
         async (
-          id: string,
-          argument: string | undefined,
+          idArgument: string | undefined,
+          messageArgument: string | undefined,
           opts: ThreadTellCommandOptions,
         ) => {
+          // With --parent the only positional is the message, as in Cloud's CLI (core/src/session/thread.rs).
+          if (opts.parent && messageArgument !== undefined) {
+            throw new Error("Pass either a thread ID or --parent, not both.");
+          }
+          const explicitId = opts.parent ? null : idArgument;
+          if (explicitId === undefined || explicitId === "") {
+            throw new Error("Missing thread ID. Pass <id> or use --parent.");
+          }
+          const argument = opts.parent ? idArgument : messageArgument;
           const { messageFile } = opts;
           if (argument !== undefined && messageFile !== undefined) {
             throw new Error(
@@ -628,6 +644,7 @@ export function registerActionsCommands(
               "Missing message: pass it as an argument or with --message-file PATH (- reads stdin).",
             );
           }
+          const id = explicitId ?? (await requireParentThreadId(getUrl));
           const response = await postThreadMessage({
             getUrl,
             threadId: id,
@@ -1077,6 +1094,26 @@ export function describeQueueWait(row: {
     case "plugin":
       return `${waitingOn.pluginId}: ${waitingOn.reason}`;
   }
+}
+
+/** `tell --parent`: the caller's parent as saved now, so a thread the user moved reaches its new parent, as in Cloud. */
+async function requireParentThreadId(getUrl: () => string): Promise<string> {
+  const callerId = resolveContextThreadId();
+  if (!callerId) {
+    throw new Error(
+      "--parent needs ROOM_THREAD_ID: run it inside a Cloudroom thread, or pass a thread ID.",
+    );
+  }
+  const caller = await createCliRoomSdk(
+    getUrl(),
+    CLI_READ_TIMEOUT_MS,
+  ).threads.get({ threadId: callerId });
+  if (!caller.parentThreadId) {
+    throw new Error(
+      `Thread ${callerId} has no parent that \`thread tell --parent\` can reach.`,
+    );
+  }
+  return caller.parentThreadId;
 }
 
 export function resolveSenderThreadId(

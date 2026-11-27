@@ -2,12 +2,13 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import { access, mkdir, stat } from "node:fs/promises";
+import { access, mkdir, rm, stat } from "node:fs/promises";
 import {
   gitShell,
   normalizeWindowsEnv,
   terminateWindowsProcessTrees,
 } from "@cloudroom/process-utils";
+import { UNAVAILABLE } from "./data.js";
 import {
   AUTOMATION_SCRIPT_TIMEOUT_MAX_MS,
   type AutomationScriptInterpreter,
@@ -126,6 +127,8 @@ export interface ScriptRunResult {
   exitCode: number | null;
   output: string;
   timedOut: boolean;
+  /** A room-cli in the script got no answer from Cloudroom (#2656). */
+  unavailable?: boolean;
 }
 
 interface ScriptRunOutcome {
@@ -139,12 +142,13 @@ interface ScriptRunOutcome {
 export function mapScriptResultToRun(
   result: ScriptRunResult,
 ): ScriptRunOutcome {
+  const unavailable = result.unavailable ? UNAVAILABLE : "";
   if (result.timedOut) {
     return {
       status: "failed",
       output: result.output.length > 0 ? result.output : null,
       exitCode: null,
-      error: "Script timed out",
+      error: `${unavailable}Script timed out`,
       skipReason: null,
     };
   }
@@ -153,7 +157,7 @@ export function mapScriptResultToRun(
       status: "failed",
       output: result.output.length > 0 ? result.output : null,
       exitCode: result.exitCode,
-      error: `Script exited with code ${result.exitCode}`,
+      error: `${unavailable}Script exited with code ${result.exitCode}`,
       skipReason: null,
     };
   }
@@ -358,6 +362,9 @@ export async function executeStoredScript(args: {
     args.interpreter ?? resolveDefaultInterpreter(args.scriptFile);
   const roomPath = await resolveRoomBinary();
   const warning = roomPath === null ? `${ROOM_NOT_INJECTED_WARNING}\n` : "";
+  const unavailableDir = join(args.pluginDataDir, "unavailable");
+  const unavailableFile = join(unavailableDir, args.runId);
+  await mkdir(unavailableDir, { recursive: true });
   const scriptEnv: NodeJS.ProcessEnv = {
     ...process.env,
     ...(args.env ?? {}),
@@ -366,6 +373,7 @@ export async function executeStoredScript(args: {
     ROOM_PROJECT_ID: args.projectId,
     BB_AUTOMATION_ID: args.automationId,
     BB_AUTOMATION_RUN_ID: args.runId,
+    ROOM_LOOP_UNAVAILABLE_FILE: unavailableFile,
   };
   if (roomPath !== null) {
     scriptEnv.ROOM_CLI = roomPath;
@@ -385,5 +393,9 @@ export async function executeStoredScript(args: {
     timeoutMs: Math.min(args.timeoutMs, AUTOMATION_SCRIPT_TIMEOUT_MAX_MS),
     env: windowsShell?.env ?? scriptEnv,
   });
-  return { ...result, output: `${warning}${result.output}` };
+  const unavailable = await rm(unavailableFile).then(
+    () => true,
+    () => false,
+  );
+  return { ...result, output: `${warning}${result.output}`, unavailable };
 }

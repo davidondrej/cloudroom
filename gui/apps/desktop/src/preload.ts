@@ -19,7 +19,7 @@ import {
   type RoomDesktopBrowserRevealRequest,
   roomDesktopInfoSchema,
   roomDesktopWindowStateSchema,
-  type BbDesktopApi,
+  type RoomDesktopApi,
   type RoomDesktopAppCommandHandler,
   type RoomDesktopBrowserApi,
   type RoomDesktopBrowserFindResultHandler,
@@ -375,7 +375,7 @@ function browserImportApi(): Pick<
   };
 }
 
-const roomDesktopApi: BbDesktopApi = {
+const roomDesktopApi: RoomDesktopApi = {
   browser: roomBrowserApi,
   get lastCheckedAt() {
     return currentInfo.lastCheckedAt;
@@ -589,4 +589,6 @@ if (typeof window !== "undefined" && typeof document !== "undefined") {
 void invokeDesktopInfo(ROOM_DESKTOP_GET_INFO_CHANNEL);
 void invokeDesktopWindowState();
 
+contextBridge.exposeInMainWorld("roomDesktop", roomDesktopApi);
+// Compat: keep window.bbDesktop for remote servers running older frontends.
 contextBridge.exposeInMainWorld("bbDesktop", roomDesktopApi);

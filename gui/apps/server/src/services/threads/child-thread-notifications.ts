@@ -48,6 +48,7 @@ import {
 } from "./system-message-kind.js";
 import { getLastThreadOutput, getTurnErrorText } from "./thread-data.js";
 import { waitForHeldMessageDrain } from "./queued-message-dispatch.js";
+import { waitForHeldTurnFailures } from "../plugins/plugin-thread-events.js";
 import { isParentNotifiableChildThread } from "./thread-parent.js";
 import { failureHold } from "./turn-failed.js";
 
@@ -645,6 +646,8 @@ async function flushChildThreadTurnNotificationBatch(
   try {
     // Progress messages a settled interaction just released go first (#851).
     await waitForHeldMessageDrain(parentThreadId);
+    // After an app restart, the children's retries are queued only once plugins load, and the report says so.
+    await waitForHeldTurnFailures();
     const sequence = (id: string) => batch.childReport.sequences[id] ?? 0;
     // Failures that continued on another account since their report, in one
     // read for the batch: each reports when that turn ends instead (#2255).

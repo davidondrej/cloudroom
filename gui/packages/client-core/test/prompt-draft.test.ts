@@ -9,6 +9,7 @@ import {
   isPromptDraftEmpty,
   numberMessageContextInDraft,
   parsePromptDraftStorage,
+  prependPromptDraft,
   promptDraftToInput,
   promptInputToDraft,
   serializePromptDraftStorage,
@@ -412,6 +413,31 @@ describe("appendQuoteAndAttachmentsToDraft", () => {
     };
 
     expect(appendQuoteAndAttachmentsToDraft(base, "", [attachment])).toBe(base);
+  });
+});
+
+describe("prependPromptDraft", () => {
+  it("keeps two quotes with the same label apart and shifts later mentions", () => {
+    const failed = appendMessageContextToDraft(emptyPromptDraftState(), "old quote", 1);
+    const quoted = appendMessageContextToDraft(emptyPromptDraftState(), "new quote", 1);
+    const text = `${quoted.text}ask /automation`;
+    const start = text.indexOf("/automation");
+    const current = {
+      ...quoted,
+      text,
+      mentions: [{ start, end: start + 11, resource: AUTOMATION_COMMAND_RESOURCE }],
+    };
+    const merged = prependPromptDraft(failed, current)!;
+    const mention = merged.mentions[0]!;
+    expect(merged.text.slice(mention.start, mention.end)).toBe("/automation");
+    expect(promptDraftToInput(merged)[0]).toMatchObject({
+      text: expect.stringMatching(/old quote[\s\S]*new quote/),
+    });
+  });
+
+  it("does not merge after an unclosed code fence", () => {
+    const failed = { ...emptyPromptDraftState(), text: "```ts\nconst a = 1;" };
+    expect(prependPromptDraft(failed, { ...emptyPromptDraftState(), text: "next" })).toBeNull();
   });
 });
 

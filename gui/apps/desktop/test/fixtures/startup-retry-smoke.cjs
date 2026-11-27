@@ -6,7 +6,7 @@ const { app, ipcMain } = require("electron");
 
 const desktopRoot = process.env.BB_STARTUP_SMOKE_APP_PATH;
 const scenario = process.env.BB_STARTUP_SMOKE_SCENARIO ?? "custom";
-const channel = "bb-desktop:retry-startup";
+const channel = "room-desktop:retry-startup";
 const loads = [];
 let contents;
 
@@ -95,7 +95,7 @@ async function run() {
     return;
   }
   assert.equal(
-    await contents.executeJavaScript("typeof window.bbDesktop"),
+    await contents.executeJavaScript("typeof window.roomDesktop"),
     "object",
   );
   assert.equal(

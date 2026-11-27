@@ -12,6 +12,7 @@ import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getLocalStorage } from "@/lib/browser-storage";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { drawWrappedCard, wrappedMidMonth, wrappedMonthName, WRAPPED_CARD, type Wrapped as Month } from "@/lib/wrapped-card";
+import { autoCreditWrappedAtom, useReferrals } from "@/components/settings/ReferralsSettingsSection";
 
 // Monthly Wrapped (docs/scopes/wrapped.md): from the 1st, a small card at the top right says last month is wrapped.
 // The corner module decides when that card may show (docs/scopes/corner-cards.md).
@@ -70,6 +71,8 @@ const copyPng = (canvas: HTMLCanvasElement) => navigator.clipboard.write([new Cl
 
 function Story({ wrapped, onClose }: { wrapped: Month; onClose: () => void }) {
   const [canvas, setCanvas] = useState<HTMLCanvasElement | null>(null);
+  const autoCreditWrapped = useAtomValue(autoCreditWrappedAtom);
+  const referralLink = useReferrals().data?.link ?? null;
   const name = wrappedMonthName(wrapped.month);
   useEffect(() => {
     if (!canvas) return;
@@ -95,7 +98,8 @@ function Story({ wrapped, onClose }: { wrapped: Month; onClose: () => void }) {
   // X can't attach an image from a link, so the image goes to the clipboard and the post opens ready to paste.
   const share = async (target: HTMLCanvasElement) => {
     await copyPng(target);
-    const text = `My ${name} in Cloudroom: ${wrapped.agents.toLocaleString("en-US")} agents started${wrapped.hours > 0 ? `, ${wrapped.hours} hours` : ""}.\n\ncloudroom.dev/wrapped`;
+    const shareUrl = autoCreditWrapped && referralLink ? referralLink.replace(/^https?:\/\//, "") : "cloudroom.dev/wrapped";
+    const text = `My ${name} in Cloudroom: ${wrapped.agents.toLocaleString("en-US")} agents started${wrapped.hours > 0 ? `, ${wrapped.hours} hours` : ""}.\n\n${shareUrl}`;
     openUrlInExternalBrowser(`https://x.com/intent/post?text=${encodeURIComponent(text)}`);
   };
   return (

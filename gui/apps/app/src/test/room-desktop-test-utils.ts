@@ -1,5 +1,5 @@
 import type {
-  BbDesktopApi,
+  RoomDesktopApi,
   RoomDesktopBrowserApi,
   RoomDesktopInfo,
 } from "@cloudroom/desktop-contract";
@@ -32,7 +32,7 @@ export function createNoopDesktopBrowserApi(): RoomDesktopBrowserApi {
 export function createRoomDesktopApi(
   info: RoomDesktopInfo,
   browser: RoomDesktopBrowserApi = createNoopDesktopBrowserApi(),
-): BbDesktopApi {
+): RoomDesktopApi {
   return {
     ...info,
     browser,

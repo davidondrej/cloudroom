@@ -63,7 +63,7 @@ function installColorSchemeMediaQuery(initialDark: boolean): {
 
 afterEach(() => {
   cleanup();
-  delete window.bbDesktop;
+  delete window.roomDesktop;
   window.localStorage.clear();
   vi.restoreAllMocks();
   vi.resetModules();
@@ -75,7 +75,7 @@ describe("desktop theme synchronization", () => {
     const setThemeCalls: RoomDesktopTheme[] = [];
     const desktopApi = createRoomDesktopApi(desktopInfo);
     desktopApi.setTheme = (theme) => setThemeCalls.push(theme);
-    window.bbDesktop = desktopApi;
+    window.roomDesktop = desktopApi;
 
     const { useDesktopThemeSync } = await import("./useDesktopThemeSync");
     const { usePreferredTheme } = await import("./useTheme");

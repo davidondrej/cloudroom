@@ -304,39 +304,37 @@ async function runProviderInstallationOnHost(
       action: command.action,
     });
     if (!run.available) {
-      // Another update (auto-update, a second click) may have just finished:
-      // a current CLI means the update is done, not failed.
-      if (command.action === "update") {
-        let status: ProviderInstallationStatus | null = null;
-        try {
-          status = await options.providerInstallationStatus(maintenanceArgs);
-        } catch {
-          // Unreadable status: report the refusal below.
-        }
-        if (
-          status?.installed &&
-          status.currentVersion !== null &&
-          !status.needsUpdate &&
-          !status.versionUnsupported
-        ) {
-          return {
-            events: [
-              {
-                type: "output",
-                provider: command.providerId,
-                stream: "stdout",
-                text: `Already up to date (${status.currentVersion}).\n`,
-              },
-              {
-                type: "completed",
-                provider: command.providerId,
-                exitCode: 0,
-                signal: null,
-                success: true,
-              },
-            ],
-          };
-        }
+      // Another install or update (auto-update, Connect, a second click) may
+      // have just finished: a working, current CLI means done, not failed (#2623).
+      let status: ProviderInstallationStatus | null = null;
+      try {
+        status = await options.providerInstallationStatus(maintenanceArgs);
+      } catch {
+        // Unreadable status: report the refusal below.
+      }
+      if (
+        status?.installed &&
+        status.currentVersion !== null &&
+        !status.needsUpdate &&
+        !status.versionUnsupported
+      ) {
+        return {
+          events: [
+            {
+              type: "output",
+              provider: command.providerId,
+              stream: "stdout",
+              text: `${command.action === "install" ? "Already installed" : "Already up to date"} (${status.currentVersion}).\n`,
+            },
+            {
+              type: "completed",
+              provider: command.providerId,
+              exitCode: 0,
+              signal: null,
+              success: true,
+            },
+          ],
+        };
       }
       return {
         events: [

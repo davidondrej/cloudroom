@@ -185,7 +185,7 @@ export const WRAPPED_ACTIONS = ["viewed", "opened", "closed", "saved", "copied",
 export const CLOUD_CHOICE_ACTIONS = ["picked_local", "cloud_blocked", "forced_local", "switched_agent"] as const;
 export const CLOUD_CHOICE_REASONS = ["signed_out", "agent_unsupported", "agent_not_in_cloud", "claude_not_connected", "queue", "region"] as const;
 export const UPGRADE_PROMPTS = ["limit_notice", "queue", "queue_badge", "capacity_card", "capacity_badge", "limit_link", "plan_card", "free_tip", "auto_delete", "try_cloud", "new_thread_cloud", "limit_notice_pack", "mac_battery", "mac_cpu", "mac_memory", "mac_heat", "mac_disk", "mac_network", "moment_slept", "moment_quit", "moment_crowded", "one_click_scan"] as const;
-export const ACTIVATION_STEPS = ["cloud", "subagents", "second", "phone", "loop"] as const;
+export const ACTIVATION_STEPS = ["cloud", "skill", "loop", "subagents", "phone"] as const;
 export type ActivationStep = (typeof ACTIVATION_STEPS)[number];
 export const POPUPS = ["credits", "star", "install", "star_card", "cloud_card"] as const;
 export type Popup = (typeof POPUPS)[number];
@@ -374,12 +374,16 @@ export async function createTelemetryService(
   if (!args.enabled || args.appVersion === DEFAULTS.appVersion) {
     return noopTelemetryService;
   }
-  const distinctId = await readOrCreateSecretFile({
+  let distinctId: Promise<string> | null = null;
+  const readDistinctId = () => (distinctId ??= readOrCreateSecretFile({
     bytes: 16,
     dataDir: args.dataDir,
     encoding: "hex",
     fileName: TELEMETRY_ID_FILE_NAME,
-  });
+  }).catch((error: unknown) => {
+    distinctId = null;
+    throw error;
+  }));
   let telemetryEnabled = args.telemetryEnabled;
   let planSource: () => string | null = () => null;
   let privacyFilter: TelemetryPrivacyFilter | null = null;
@@ -393,8 +397,10 @@ export async function createTelemetryService(
       const batch = queue.slice(0, BATCH_SIZE);
       const { website, authorization } = await targetSource();
       if (optOuts !== startedAt) return; // Turned off during that wait: this copy of the batch must not leave.
+      const installId = await readDistinctId();
+      if (optOuts !== startedAt) return;
       const response = await fetch(`${website}/api/desktop/events`, {
-        body: JSON.stringify({ install_id: distinctId, events: batch }),
+        body: JSON.stringify({ install_id: installId, events: batch }),
         headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
         method: "POST",
         redirect: "error",

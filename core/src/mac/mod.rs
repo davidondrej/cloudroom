@@ -1229,6 +1229,7 @@ room-cli mac pull MAC_PATH [VM_PATH]
 room-cli mac push VM_PATH [MAC_PATH]
 room-cli mac result JOB
 room-cli mac status
+room-cli mac computer-use status | tools [TOOL] | call TOOL ['JSON'] [--purpose WHY]
 Runs on the user's paired Mac as the user, in their home folder by default.
 Flags go before COMMAND: room-cli mac run --cwd DIR 'COMMAND'. Later words,
 flags included, go to COMMAND. DIR is relative to their home folder, or absolute.
@@ -1266,6 +1267,8 @@ else under that new name, which must not exist yet.";
             let value = request(&socket, "POST", "/jobs", Some(body)).await?;
             print_result(value).await
         }
+        // Before `--help`, which goes to the Mac's own `computer-use`.
+        ("computer-use", rest) => computer_use(&socket, rest).await,
         (_, rest) if rest.iter().any(|w| matches!(w.as_str(), "--help" | "-h")) => {
             println!("{usage}");
             Ok(0)
@@ -1300,6 +1303,98 @@ else under that new name, which must not exist yet.";
                 2
             })
         }
+    }
+}
+
+/// The Cloudroom app's CLI on the user's computer: its `~/.local/bin` link, else the macOS app's copy, else PATH's.
+const APP_CLI: &str = "c=\"$HOME/.local/bin/room-cli\"; [ -x \"$c\" ] || \
+     c=/Applications/Cloudroom.app/Contents/Resources/app.asar.unpacked/node_modules/bb-app/host-daemon/dist/room-cli; \
+     [ -x \"$c\" ] || c=room-cli;";
+/// Where `mac computer-use` saves the screenshots its replies carry.
+const SHOTS: &str = "/tmp/cloudroom-mac-computer-use";
+
+/// `room-cli mac computer-use ARGS`: the app's Computer Use on the user's computer, as this thread, so its sidebar row
+/// shows it and the user approves each app in this thread (docs/scopes/computer-use.md). This sandbox's own screen
+/// stays `room-cli computer-use`. Every call counts as a change: Read-only refuses it, Ask first asks.
+async fn computer_use(socket: &str, args: &[String]) -> io::Result<i32> {
+    let thread = std::env::var("ROOM_THREAD_ID").unwrap_or_default();
+    if thread.is_empty()
+        || !thread
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(io::Error::other(
+            "Run this from a Cloudroom thread (ROOM_THREAD_ID is not set).",
+        ));
+    }
+    let mut random = [0; 8];
+    io::Read::read_exact(&mut fs::File::open("/dev/urandom")?, &mut random)?;
+    let id = hex(&random);
+    // The reply follows its own line: a login shell's startup text can come first (#1012).
+    let mark = format!("cloudroom-computer-use-{id}");
+    let words: Vec<String> = args.iter().map(|word| literal(word)).collect();
+    let command = format!(
+        "{APP_CLI} echo {mark}; ROOM_THREAD_ID={thread} \"$c\" computer-use {}",
+        words.join(" ")
+    );
+    let body = json!({"command":command,"stdin":"","cwd":null,"write":true});
+    let mut value = request(socket, "POST", "/jobs", Some(body)).await?;
+    if value["state"] == "done"
+        && let Some(stdout) = value["stdout"].as_str().and_then(unhex)
+    {
+        value["stdout"] = hex(&save_shots(&stdout, &mark, &id)?).into();
+    }
+    print_result(value).await
+}
+
+/// Drops what came before `mark`, and saves the screenshots the app sends Cloud threads inline (`NAME_png_b64`) here,
+/// as `NAME_file` paths like a Local thread gets: the agent can't read the user's computer's files.
+fn save_shots(stdout: &[u8], mark: &str, id: &str) -> io::Result<Vec<u8>> {
+    let text = String::from_utf8_lossy(stdout);
+    let reply = text
+        .split_once(&format!("{mark}\n"))
+        .map_or(&*text, |(_, reply)| reply);
+    let Ok(mut value) = serde_json::from_str::<Value>(reply) else {
+        return Ok(reply.as_bytes().to_vec());
+    };
+    let mut count = 0;
+    shots_to_files(&mut value, id, &mut count)?;
+    if count == 0 {
+        return Ok(reply.as_bytes().to_vec());
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&value)?).into_bytes())
+}
+
+fn shots_to_files(value: &mut Value, id: &str, count: &mut usize) -> io::Result<()> {
+    match value {
+        Value::Array(items) => items
+            .iter_mut()
+            .try_for_each(|item| shots_to_files(item, id, count)),
+        Value::Object(map) => {
+            for key in map.keys().cloned().collect::<Vec<_>>() {
+                let image = key
+                    .strip_suffix("_b64")
+                    .and_then(|key| key.rsplit_once('_'))
+                    .filter(|(_, kind)| matches!(*kind, "png" | "jpeg" | "jpg"));
+                if let Some((name, kind)) = image
+                    && let Some(data) = map.get(&key).and_then(Value::as_str)
+                {
+                    *count += 1;
+                    let file = format!(
+                        "{SHOTS}/{name}-{id}-{count}.{}",
+                        if kind == "png" { "png" } else { "jpg" }
+                    );
+                    fs::create_dir_all(SHOTS)?;
+                    fs::write(&file, crate::fs::unbase64(data))?;
+                    map.remove(&key);
+                    map.insert(format!("{name}_file"), file.into());
+                } else if let Some(entry) = map.get_mut(&key) {
+                    shots_to_files(entry, id, count)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

@@ -95,8 +95,9 @@ export interface ProviderRegistryService {
 }
 
 // The default harness order starts with these, when installed; every other harness follows in install order
-// (ADR 20261121-135940).
-const LEADING_PROVIDER_IDS = ["claude-code", "codex", "acp-antigravity", "acp-cursor"];
+// (ADR 20261126-220000).
+const CLOUDROOM_AGENT_ID = "cloudroom-agent";
+const LEADING_PROVIDER_IDS = ["claude-code", "codex", "acp-antigravity", CLOUDROOM_AGENT_ID, "acp-cursor"];
 function leadingIndex(id: string): number {
   const index = LEADING_PROVIDER_IDS.indexOf(id);
   return index === -1 ? LEADING_PROVIDER_IDS.length : index;
@@ -254,7 +255,13 @@ export function createProviderRegistryService(
         if (id === defaultProviderId) return Number.MAX_SAFE_INTEGER - customOrder.length;
         return usage.get(id) ?? 0;
       };
-      return entries.sort((a, b) => rank(b) - rank(a));
+      const sorted = entries.sort((a, b) => rank(b) - rank(a));
+      // In the usage order Cloudroom Agent never drops below 4th: it is the way past a plan limit. A dragged order wins.
+      const agentAt = sorted.findIndex(({ info }) => info.id === CLOUDROOM_AGENT_ID);
+      if (customOrder.length === 0 && agentAt > 3 && !hiddenProviderIds.includes(CLOUDROOM_AGENT_ID)) {
+        sorted.splice(3, 0, ...sorted.splice(agentAt, 1));
+      }
+      return sorted;
     },
 
     getUserDefaultProviderId() {

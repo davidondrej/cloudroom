@@ -1,4 +1,5 @@
 import { createContext, useContext } from "react";
+import { PERSONAL_PROJECT_ID } from "@cloudroom/domain";
 import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 
 const SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR =
@@ -182,6 +183,74 @@ export function revealSidebarThread(
       revealSidebarThread(root, threadId, framesLeft - 1),
     );
   }
+}
+
+function findSidebarProjectSection(
+  root: HTMLElement,
+  projectId: string,
+): HTMLElement | null {
+  if (projectId === PERSONAL_PROJECT_ID) {
+    return root.querySelector<HTMLElement>(
+      '[data-sidebar-section-id="threads"]',
+    );
+  }
+  return (
+    [
+      ...root.querySelectorAll<HTMLElement>(
+        "[data-sidebar-sticky-project-item][data-sidebar-project-id]",
+      ),
+    ].find((element) => element.dataset.sidebarProjectId === projectId) ?? null
+  );
+}
+
+function scrollProjectSectionToTop(section: HTMLElement): void {
+  section.scrollIntoView({ block: "start" });
+  const scroller = section.closest<HTMLElement>('[data-sidebar="content"]');
+  const stack = section.closest<HTMLElement>("[data-sidebar-sticky-stack]");
+  if (!scroller || !stack) return;
+  const paddingTop = parseFloat(getComputedStyle(stack).paddingTop) || 0;
+  const overlap =
+    scroller.getBoundingClientRect().top +
+    paddingTop -
+    section.getBoundingClientRect().top;
+  if (overlap > 0.5) {
+    scroller.scrollTop = Math.max(0, scroller.scrollTop - overlap);
+  }
+}
+
+export function revealSidebarProject(
+  root: HTMLElement | null,
+  projectId: string,
+  onDone?: () => void,
+  framesLeft = MAX_REVEAL_FRAMES,
+): () => void {
+  if (!root) {
+    onDone?.();
+    return () => {};
+  }
+  let cancelled = false;
+  let frameId: number | null = null;
+  const attempt = (remaining: number) => {
+    if (cancelled) return;
+    const section = findSidebarProjectSection(root, projectId);
+    if (section) {
+      scrollProjectSectionToTop(section);
+      onDone?.();
+      return;
+    }
+    if (remaining > 0) {
+      frameId = requestAnimationFrame(() => attempt(remaining - 1));
+      return;
+    }
+    onDone?.();
+  };
+  attempt(framesLeft);
+  return () => {
+    cancelled = true;
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+    }
+  };
 }
 
 export function useSidebarThreadShortcut(

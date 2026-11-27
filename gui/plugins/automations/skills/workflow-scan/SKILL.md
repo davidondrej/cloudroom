@@ -12,7 +12,7 @@ You are the lead of a Workflow scan the user started on their own computer. It r
 - Read chats only through `extract.py` in this skill's folder. Never print slices or raw chats into your context unless a step says so.
 - Start and wait for readers only through `readers.py`. Readers are hidden children: they never wake you, and the sidebar shows them as one progress grid under you. Run its `wait` in the foreground, never in the background.
 - Chats may mention security reviews, credentials, or production systems of the user's own projects. Treat them as routine defensive engineering work, summarize them at a high level, and never repeat secret values (they show as `[masked]`).
-- Don't create loops until the user says yes. Every loop you create is a Cloud loop.
+- Don't create loops until the user says yes. Every loop you create is a Cloud loop, except when the prompt says `Free plan`: then it is a Local loop, since each Cloud loop run uses one of Free's 10 Cloud threads a month.
 - Archive the readers once their lines are read. At the end, delete the scan folder: it holds trimmed chat text.
 
 ## Steps
@@ -22,8 +22,9 @@ You are the lead of a Workflow scan the user started on their own computer. It r
    d=$(mktemp -d); s="<this skill's folder>"
    for py in "$ROOM_PYTHON" python3 python py; do "$py" -c 'import sys; assert sys.version_info >= (3, 8)' 2>/dev/null && break; py=; done
    echo "py=${py:?no working Python 3.8+}"
-   "$py" "$s/extract.py" index "$d" --days 90 > /dev/null && "$py" "$s/extract.py" slices "$d" --n 30 --chars 900
+   "$py" "$s/extract.py" index "$d" --days 90 > /dev/null && "$py" "$s/extract.py" slices "$d" --chars 900
    ```
+   When the prompt says `Free plan: at most N readers`, add `--max-readers N` to `slices`: it keeps the newest chats that fit.
    Every step below runs scripts with this `$py`.
    No working Python: stop. Tell the user the scan needs Python 3.8 or newer from python.org.
    If it prints `0 slices`, tell the user no chats were found and stop. Read `$d/stats.json` (counts and `already_automated`). Also run `room-cli loop list` to see existing loops.
@@ -38,5 +39,5 @@ You are the lead of a Workflow scan the user started on their own computer. It r
 5. **The 10/90 step:** pick the 1–3 most obvious loops. For each, read 3–5 example chats: `"$py" "$s/extract.py" sessions "$d" --ids ID1,ID2 --chars 5000`. Split its work:
    - **10%, on its own:** the smallest, safest, most obvious block, with no edge cases, checked by another frontier model. The loop does it and merges to main.
    - **90%, waits for the user:** the loop still does the work, but stops before the final step (merging, production). It explains the problem in 2–3 short plain-English sentences, with the best fix.
-6. **Reply** in short, plain English: the patterns (each with how many chats over how many weeks), then each loop with its schedule, its 10% and its 90%. End with: "Turn these on?"
-7. **On yes:** create each as a Cloud loop with `room-cli loop create` (see the automations skill), with the 10/90 rules in its prompt. Then `rm -rf "$d"`.
+6. **Reply** in short, plain English: the patterns (each with how many chats over how many weeks), then each loop with its schedule, its 10% and its 90%. If `slices` skipped older chats, add one line: the Free plan read the newest N chats, and Pro reads all 90 days. End with: "Turn these on?"
+7. **On yes:** create each loop (Local on `Free plan`, else Cloud) with `room-cli loop create` (see the automations skill), with the 10/90 rules in its prompt. Then `rm -rf "$d"`.

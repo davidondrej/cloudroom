@@ -306,9 +306,9 @@ const ARTIFACTS = {
     ["host daemon entry", c.daemonEntry],
     ["bundled room CLI", join(c.daemonBundleDir, "room-cli")],
     ["bundled room CLI chunks", join(c.daemonBundleDir, "room-cli-chunks"), "chunks"],
-    ["provider bridge worker", join(c.daemonBundleDir, "bb-provider-bridge-worker.mjs")],
-    ["parcel watcher child", join(c.daemonBundleDir, "bb-parcel-watcher-child.mjs")],
-    ["plugin host worker", join(c.daemonBundleDir, "bb-plugin-host-worker.mjs")],
+    ["provider bridge worker", join(c.daemonBundleDir, "room-provider-bridge-worker.mjs")],
+    ["parcel watcher child", join(c.daemonBundleDir, "room-parcel-watcher-child.mjs")],
+    ["plugin host worker", join(c.daemonBundleDir, "room-plugin-host-worker.mjs")],
   ],
   app: (c: AppContext) => [
     ...ARTIFACTS.host(c),

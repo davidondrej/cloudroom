@@ -47,6 +47,7 @@ import {
 } from "./prompt-box-types";
 import { handlePromptKey } from "./prompt-keys";
 import { ComposerPlusMenuSlot } from "./PromptBoxActionsMenu";
+import { canReadClipboardImages, readClipboardImages } from "./prompt-paste";
 import {
   PromptActionRow,
   PromptAttachmentFailures,
@@ -376,6 +377,35 @@ export function PromptBoxInternal({
   );
   const fileDrop = usePromptFileDrop(onAttachFiles ? attachFiles : undefined);
 
+  // Phones: the keyboard cannot paste an image into a web page, so the plus menu reads it.
+  // The error is kept with the draft it was shown for, so the next edit hides it.
+  const draftKey = `${attachments.length}:${value}`;
+  const [pasteImageError, setPasteImageError] = useState<{
+    draftKey: string;
+    text: string;
+  } | null>(null);
+  const pasteImage = async () => {
+    setPasteImageError(null);
+    try {
+      const images = await readClipboardImages();
+      if (images.length > 0) return attachFiles(images);
+      setPasteImageError({
+        draftKey,
+        text: "No image on the clipboard. Copy a screenshot, then tap Paste image.",
+      });
+    } catch {
+      setPasteImageError({
+        draftKey,
+        text: "Cloudroom cannot read the clipboard. Allow clipboard access for this site, then tap Paste image again.",
+      });
+    }
+  };
+  const attachmentError =
+    attachmentConfig.error ??
+    (pasteImageError?.draftKey === draftKey ? pasteImageError.text : null);
+  const canPasteImage =
+    onAttachFiles !== undefined && isPointerCoarse && canReadClipboardImages();
+
   const playVoiceCompletionTransition = voiceAction.playCompletion;
   useImperativeHandle(
     promptBoxRef,
@@ -639,9 +669,9 @@ export function PromptBoxInternal({
                   failures={attachmentConfig.failures ?? []}
                   onDismiss={attachmentConfig.onDismissFailure}
                 />
-                {attachmentConfig.error ? (
+                {attachmentError ? (
                   <div className="mx-3 mb-1 mt-1 text-xs text-destructive">
-                    {attachmentConfig.error}
+                    {attachmentError}
                   </div>
                 ) : null}
               </div>
@@ -662,6 +692,9 @@ export function PromptBoxInternal({
                         onAttachFiles
                           ? () => fileInputRef.current?.click()
                           : undefined
+                      }
+                      onPasteImage={
+                        canPasteImage ? () => void pasteImage() : undefined
                       }
                       onAction={typeahead.insertAction}
                       includePluginContributions={

@@ -8,7 +8,7 @@ and each spawn and wait saves progress for the scan's progress card (room-cli lo
   readers.py wait DIR [--max 540]      -> blocks until every reader is done or --max seconds pass; restarts a failed,
                                           archived or never-started (pending 5 minutes) reader once; prints "done" (and
                                           writes DIR/lines.txt, without chat IDs that are not in a reader's slice) or
-                                          "running N/M"; a failed room-cli read is retried until --max, then it exits with the error
+                                          "running: N/M read, F failed, P not started yet"; a failed room-cli read is retried until --max, then it exits with the error
   readers.py archive DIR               -> archives every reader thread
 
 Other scans reuse it (the Cyber scan): SCAN_READER_PROMPT, SCAN_TITLE and SCAN_READER_REASONING, set on spawn, replace
@@ -89,6 +89,17 @@ def start(d, state, n):
                   "--model", state["model"], "--reasoning-level", state.get("reasoning") or "low", "--title", f"{state.get('title') or 'Workflow scan'} · reader {n}", *prompt_args)
     state["readers"][n] = {"id": thread["id"], "tries": tries, "at": time.time()}
     state["all"].append(thread["id"])
+    return thread.get("status")
+
+
+def max_readers():
+    """The scan's reader cap that the app saved on its thread (Free plans, #2645); None when uncapped or unknown."""
+    if not os.environ.get("ROOM_THREAD_ID"):
+        return None
+    try:
+        return json.loads(cli("loop", "scan-progress", "--data={}", "--json", check=True, timeout=60).stdout).get("maxReaders")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return None
 
 
 def spawn(d, provider, model):
@@ -96,7 +107,11 @@ def spawn(d, provider, model):
     state = load(d) if started else {"provider": provider, "model": model, "readers": {}, "all": [],
                                      "prompt": os.environ.get("SCAN_READER_PROMPT"), "title": os.environ.get("SCAN_TITLE"),
                                      "reasoning": os.environ.get("SCAN_READER_REASONING")}
-    for path in sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt"))):
+    paths = sorted(glob.glob(os.path.join(d, "slices", "slice-*.txt")))
+    cap = max_readers()
+    if cap is not None and len(paths) > cap:  # the lead skipped --max-readers: start none rather than spend Free's threads
+        sys.exit(f"The Free plan allows {cap} readers here, not {len(paths)}. Run step 1 again with --max-readers {cap}, then spawn again.")
+    for path in paths:
         n = os.path.basename(path)[6:-4]
         if n not in state["readers"]:
             try:
@@ -104,10 +119,11 @@ def spawn(d, provider, model):
             except subprocess.CalledProcessError as e:  # never print e: it holds the spawn command and its chat-containing prompt (#2376)
                 why = ((e.stderr or "").strip().splitlines() or [f"room-cli exited with status {e.returncode}"])[-1]
                 fix = "Cloud readers need Cloudroom sign-in: ask the user to sign in, then run" if "sign in" in why.lower() and "cloudroom" in why.lower() else "Run"
-                sys.exit(f"Reader {n} could not start: {why}\n{len(state['readers'])} readers started. {fix} the same command again: it starts only the missing readers.")
+                sys.exit(f"Reader {n} could not start: {why}\n{len(state['readers'])} reader threads created. {fix} the same command again: it starts only the missing readers.")
             save(d, state)
     report(d, state, "reading")
-    print(f"{len(state['readers'])} readers started")
+    # a created thread can still be pending, or fail before it runs: wait says which ones ran (#2675)
+    print(f"{len(state['readers'])} reader threads created; wait shows how many read, failed or have not started yet")
 
 
 def slice_ids(d, n):
@@ -158,11 +174,13 @@ def wait(d, limit=540):
         threads = read(errors, "thread", "list", "--project", PROJECT, "--include-hidden")
         status = {t["id"]: t["status"] for t in threads or []}
         for n, r in list(state["readers"].items()):
-            if errors or time.time() > end:  # a stalled app makes every read wait out its 45 s timeout: end the pass
+            if errors:  # a stalled app makes every read wait out its 45 s timeout: end the pass
                 break
             now = status.get(r["id"], "error")
             stuck = now == "pending" and time.time() - r.setdefault("at", time.time()) > PENDING  # never started
             if "output" in r or now not in ("idle", "error") and not stuck:
+                continue
+            if time.time() > end and (now == "idle" or r["tries"] < 2):  # past --max: skip reads and restarts, still record a failed last try (#2675)
                 continue
             got = read(errors, "thread", "output", r["id"]) if now == "idle" else {}
             if got is None:
@@ -174,7 +192,7 @@ def wait(d, limit=540):
             if r["tries"] < 2:
                 cli("thread", "archive", r["id"])
                 try:
-                    start(d, state, n)
+                    status[state["readers"][n]["id"]] = start(d, state, n) or "pending"  # the replacement counts as not started (#2675)
                     continue
                 except (subprocess.CalledProcessError, ValueError):  # Cloud unreachable; never print e: it holds the prompt (#2376)
                     stuck = True
@@ -199,7 +217,9 @@ def wait(d, limit=540):
                 print(f"{last[0][1]} of {len(state['readers'])} readers answered only: {last[0][0]}")
             return
         if time.time() + 20 > end:  # the next pass would start past --max
-            running = f"running {done}/{len(state['readers'])}"
+            readers = state["readers"].values()  # a reader that failed before starting counts as failed, never as read (#2675)
+            ok, pending = sum(bool(r.get("output")) for r in readers), sum("output" not in r and status.get(r["id"]) == "pending" for r in readers)
+            running = f"running: {ok}/{len(readers)} read, {done - ok} failed" + (f", {pending} not started yet" if threads is not None else "")
             if errors:
                 sys.exit(f"{running}. room-cli could not read the readers ({errors[-1]}). They keep working: run wait again.")
             return print(running)

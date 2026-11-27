@@ -10,7 +10,6 @@ import {
 import { AppLayout } from "./components/layout/AppLayout";
 import { CloudroomAccountPanels } from "./components/CloudroomAccountPanels";
 import { Onboarding } from "./components/Onboarding";
-import { InviteOffer } from "./components/InviteOffer";
 import { StarPrompt } from "./components/StarPrompt";
 import { PlanLoops } from "./components/PlanLoops";
 import { Wrapped } from "./components/Wrapped";
@@ -463,7 +462,6 @@ export function App() {
               <ActivationChecklist />
               <Onboarding />
               <MoveToApplicationsPrompt />
-              <InviteOffer />
               <CreditsExplainer />
               <PlanLoops />
               <StarPrompt />

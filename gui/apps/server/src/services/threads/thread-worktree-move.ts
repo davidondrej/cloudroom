@@ -13,18 +13,21 @@ import {
   getEnvironment,
   getThread,
   isThreadQueueAutoSendPaused,
+  listLatestThreadStateEventRowsByThreadIds,
   listQueuedThreadMessages,
   updateThread,
   type DbQueryConnection,
   type EnvironmentRow,
 } from "@cloudroom/db";
 import {
+  LEGACY_CODEX_GOAL_EXTENSION_KIND,
   PERSONAL_PROJECT_ID,
   THREAD_HARNESS_SWITCH_OPERATION,
   threadScope,
   type PromptInput,
   type Thread,
 } from "@cloudroom/domain";
+import { extractThreadTimelineGoal } from "@cloudroom/thread-view";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
 import { prepareLocalForkWorktree } from "../cloudroom/fork.js";
@@ -44,6 +47,7 @@ import type { DeferredFirstTurnContext } from "./deferred-first-turn-context.js"
 import { attemptDispatch } from "./dispatch-attempt.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 import { createAutomaticQueuedMessageEligibility } from "./queued-messages.js";
+import { setThreadGoal } from "./thread-commands.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import { buildEnvironmentProvisionCommand } from "./thread-create-helpers.js";
 import {
@@ -58,6 +62,7 @@ import {
 import { historySeed } from "./thread-harness-switch.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
 import { latestOperationSeed } from "./thread-transcript.js";
+import { toThreadEventWithMeta } from "./timeline.js";
 
 // `room-cli thread worktree` moves a Local thread into a new Cloudroom-managed worktree. It keeps its ID and chat,
 // like a project move. The worktree starts from the thread's current commit when its turn ends. Other agents may
@@ -76,6 +81,10 @@ interface Request {
   autoContinue: boolean;
   carry: string[];
   from: string;
+  /** The sequence of the active Goal's latest row when the move paused it, or null without one. */
+  goalSince: number | null;
+  /** Settles once the move's Goal pause reached the provider, so the move never runs ahead of it. */
+  goalPause: Promise<void>;
   operationId: string;
 }
 interface MoveResult {
@@ -85,6 +94,8 @@ interface MoveResult {
 }
 const pending = new Map<string, Request>();
 const moving = new Set<string>();
+/** Moved threads whose paused Goal goes on once their next turn, which carries the move's note, starts. */
+const heldGoals = new Map<string, number>();
 
 const note = (
   deps: AppDeps,
@@ -138,10 +149,17 @@ export function requestThreadWorktreeMove(
     );
   const now = settled(deps, thread);
   const self = options.self ?? true;
+  const goalSince = activeGoalSequence(deps, thread);
   const request: Request = {
     autoContinue: !now && self,
     carry: [...carry],
     from: folder.path,
+    goalSince,
+    // An active Goal starts its next turn as soon as one ends, so the move would never find the thread settled (#2549).
+    goalPause:
+      goalSince === null
+        ? Promise.resolve()
+        : setThreadGoal(deps, thread, { status: "paused" }).catch(() => {}),
     operationId: createEventId(),
   };
   pending.set(thread.id, request);
@@ -239,7 +257,10 @@ export async function applyPendingThreadWorktreeMove(
     // Sends wait until the move ends, so no turn starts in the old folder; queued messages stay queued.
     moved = await withThreadContextClearGuard(
       threadId,
-      () => moveToNewWorktree(deps, threadId, request.carry),
+      async () => {
+        await request.goalPause;
+        return moveToNewWorktree(deps, threadId, request.carry);
+      },
       BUSY,
     );
     // Always save the path note for native-resuming providers so whichever turn runs first (auto-resume, queued, or user) carries it.
@@ -279,6 +300,16 @@ export async function applyPendingThreadWorktreeMove(
   } finally {
     moving.delete(threadId);
   }
+  // A moved thread's Goal goes on once a turn that tells the agent the new folder starts: the hidden one below, a
+  // queued message, or the user's next. A failed move lets it go on at once; a retry or a Stop keeps it paused.
+  if (
+    request.goalSince !== null &&
+    pending.get(threadId) !== request &&
+    !isThreadQueueAutoSendPaused(deps.db, threadId)
+  ) {
+    if (moved) heldGoals.set(threadId, request.goalSince);
+    else resumeHeldGoal(deps, threadId, request.goalSince);
+  }
   const continued =
     request.autoContinue && moved !== null
       ? await continueAfterWorktreeMove(deps, threadId)
@@ -286,6 +317,54 @@ export async function applyPendingThreadWorktreeMove(
   if (!continued) {
     requestQueuedMessageDispatch(deps, { kind: "thread-ready", threadId });
   }
+}
+
+/** The latest Goal row's sequence while the Goal is active, on a provider with Goals. */
+function activeGoalSequence(deps: AppDeps, thread: Thread): number | null {
+  const goals = deps.providerRegistry
+    .get(thread.providerId)
+    ?.info.composerActions?.some((action) => action.kind === "goal");
+  if (!goals) return null;
+  const goal = extractThreadTimelineGoal(
+    listLatestThreadStateEventRowsByThreadIds(deps.db, {
+      threadIds: [thread.id],
+      kind: LEGACY_CODEX_GOAL_EXTENSION_KIND,
+    }).map(toThreadEventWithMeta),
+  );
+  return goal?.status === "active" ? goal.sourceSeq : null;
+}
+
+/** Resumes the Goal on an open thread only if it stayed active until the move paused it and paused since: never after
+ *  the user resumed or paused it again, or after it completed or was cleared. */
+function resumeHeldGoal(deps: AppDeps, threadId: string, since: number): void {
+  const thread = getThread(deps.db, threadId);
+  if (!thread || thread.archivedAt !== null || thread.deletedAt !== null)
+    return;
+  const statuses = deps.db
+    .select({
+      status: sql<
+        string | null
+      >`coalesce(json_extract(${events.data}, '$.payload.status'), json_extract(${events.data}, '$.status'))`,
+    })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, threadId),
+        gt(events.sequence, since),
+        sql`${events.type} IN ('thread/goal/updated', 'thread/goal/cleared', 'thread/extensionState/updated')`,
+        sql`(${events.type} <> 'thread/extensionState/updated' OR json_extract(${events.data}, '$.kind') = ${LEGACY_CODEX_GOAL_EXTENSION_KIND})`,
+      ),
+    )
+    .orderBy(asc(events.sequence))
+    .all()
+    .map((row) => row.status);
+  const paused = statuses.indexOf("paused");
+  if (
+    paused !== -1 &&
+    statuses.slice(0, paused).every((status) => status === "active") &&
+    statuses.slice(paused).every((status) => status === "paused")
+  )
+    void setThreadGoal(deps, thread, { status: "active" }).catch(() => {});
 }
 
 function canAutoContinueAfterMove(deps: AppDeps, threadId: string): Thread | null {
@@ -349,10 +428,23 @@ async function continueAfterWorktreeMove(
   }
 }
 
-/** A turn that ends in an error never fires the thread-ready hook, so its pending move starts here. */
+/** A turn that ends in an error never fires the thread-ready hook, so its pending move starts here. A held Goal goes
+ *  on here once the moved thread's next turn starts: its command already went to the computer. */
 export function watchFailedTurnsForWorktreeMoves(deps: AppDeps): void {
   deps.hub.onThreadChanged((threadId, changes) => {
-    if (changes.includes("status-changed") && pending.has(threadId) && getThread(deps.db, threadId)?.status === "error")
+    if (!changes.includes("status-changed")) return;
+    const since = heldGoals.get(threadId);
+    if (
+      since !== undefined &&
+      getThread(deps.db, threadId)?.status === "active"
+    ) {
+      heldGoals.delete(threadId);
+      resumeHeldGoal(deps, threadId, since);
+    }
+    if (
+      pending.has(threadId) &&
+      getThread(deps.db, threadId)?.status === "error"
+    )
       setImmediate(() => void applyPendingThreadWorktreeMove(deps, threadId));
   });
 }

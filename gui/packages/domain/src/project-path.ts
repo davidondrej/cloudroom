@@ -28,13 +28,17 @@ export function isAbsoluteProjectPath(path: string): boolean {
 }
 
 export function normalizeProjectPathInput(path: string): string {
-  const trimmedPath = path.trim();
+  // Whitespace before an absolute path is never part of it, and a trailing
+  // line break or tab comes from pasted or command output. A POSIX folder
+  // name can end in spaces (`Demo `), so keep those exact (#2666).
+  const trimmedPath = path.trimStart().replace(/[\t\n\v\f\r]+$/u, "");
   if (!trimmedPath) {
     return "";
   }
 
   if (isWindowsDriveProjectPath(trimmedPath)) {
-    return normalizeHostPath(trimmedPath) ?? trimmedPath;
+    const windowsPath = trimmedPath.trimEnd();
+    return normalizeHostPath(windowsPath) ?? windowsPath;
   }
 
   if (trimmedPath === "/") {

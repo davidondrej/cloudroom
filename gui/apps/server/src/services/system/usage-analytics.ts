@@ -5,6 +5,7 @@ import type {
 } from "@cloudroom/server-contract";
 import { sql } from "drizzle-orm";
 import type { AppDeps } from "../../types.js";
+import { byTopParent } from "../cloudroom/loop-usage.js";
 import { timeInApp } from "../cloudroom/time-in-app.js";
 import { rangeStart } from "./skill-usage.js";
 
@@ -149,6 +150,7 @@ interface TokenRow {
 const TOKEN_KINDS = ["written", "read", "cached"] as const;
 type TokenUse = Record<(typeof TOKEN_KINDS)[number], number>;
 const TOKEN_MODELS_SHOWN = 4;
+const TOKEN_THREADS_SHOWN = 8;
 const noTokens = (): TokenUse => ({ written: 0, read: 0, cached: 0 });
 const allTokens = (use: TokenUse) => use.written + use.read + use.cached;
 
@@ -158,7 +160,11 @@ const allTokens = (use: TokenUse) => use.written + use.read + use.cached;
  * later one. A drop means the provider restarted its count. Rough: a restart inside a pruned gap loses tokens.
  * Each difference counts for the model of the prompt before it, so a thread that switched models is split right.
  */
-function tokens(db: DbQueryConnection, range: Range) {
+function tokens(
+  db: DbQueryConnection,
+  range: Range,
+  agentName: (providerId: string) => string,
+) {
   // One range early, so this range can be compared with the one before.
   const from = range.start - range.days * DAY_MS, span = range.days * 2;
   const rows = db.all<TokenRow>(sql`
@@ -179,6 +185,7 @@ function tokens(db: DbQueryConnection, range: Range) {
   const daily = { written: zeros(span), read: zeros(span), cached: zeros(span) };
   const models = new Map<string, ReturnType<typeof lists>>();
   const threads = zeros(range.days).map(() => new Map<string, TokenUse & { name: string }>());
+  const written = new Map<string, number>();
   let thread = "", last = noTokens(), model = modelName(null);
   for (const row of rows) {
     if (row.thread !== thread) { thread = row.thread; last = noTokens(); model = modelName(null); }
@@ -201,6 +208,7 @@ function tokens(db: DbQueryConnection, range: Range) {
     for (const kind of TOKEN_KINDS) { byModel[kind][day]! += use[kind]; byThread[kind] += use[kind]; }
     models.set(model, byModel);
     threads[day]!.set(thread, byThread);
+    written.set(thread, (written.get(thread) ?? 0) + use.written);
   }
   const sum = (values: number[]) => values.reduce((total, value) => total + value, 0);
   const list = [...models].map(([name, use]) => ({ name, ...use, total: sum(use.written) + sum(use.read) + sum(use.cached) }))
@@ -221,11 +229,34 @@ function tokens(db: DbQueryConnection, range: Range) {
     }
     return [...keep];
   });
-  return { ...daily, models: list.map(({ total: _total, ...one }) => one), top };
+  // Every thread ranked by tokens written in the range, a parent with its children; the rest share one "Other" row.
+  const ranked = byTopParent(db, written).map(
+    ({ id, projectId, title, providerId, tokens, children }) => ({
+      id,
+      projectId,
+      name: title,
+      agent: agentName(providerId),
+      written: tokens,
+      children,
+    }),
+  );
+  const others = ranked.splice(TOKEN_THREADS_SHOWN);
+  return {
+    ...daily,
+    models: list.map(({ total: _total, ...one }) => one),
+    top,
+    threads: ranked,
+    otherThreads: others.length
+      ? {
+          count: others.length,
+          written: others.reduce((total, one) => total + one.written, 0),
+        }
+      : null,
+  };
 }
 
 export async function readUsageAnalytics(
-  deps: Pick<AppDeps, "config" | "db">,
+  deps: Pick<AppDeps, "config" | "db" | "providerRegistry">,
   query: SystemUsageAnalyticsQuery,
   now = Date.now(),
 ): Promise<SystemUsageAnalyticsResponse> {
@@ -235,9 +266,20 @@ export async function readUsageAnalytics(
   if (query.metric === "agentHours") {
     // Time in the app is saved per server-local day, in minutes.
     const active = (await timeInApp(deps)).days;
-    response.agentHours = { ...agentHours(deps.db, range), you: round(zeros(days).map((_, day) => (active[dateOf(range, day)] ?? 0) / 60)) };
-  } else if (query.metric === "models") response.models = models(readPrompts(deps.db, range), range);
-  else if (query.metric === "tokens") response.tokens = tokens(deps.db, range);
+    response.agentHours = {
+      ...agentHours(deps.db, range),
+      you: round(
+        zeros(days).map((_, day) => (active[dateOf(range, day)] ?? 0) / 60),
+      ),
+    };
+  } else if (query.metric === "models")
+    response.models = models(readPrompts(deps.db, range), range);
+  else if (query.metric === "tokens")
+    response.tokens = tokens(
+      deps.db,
+      range,
+      (id) => deps.providerRegistry.get(id)?.info.displayName ?? id,
+    );
   else response.prompts = prompts(readPrompts(deps.db, range), range);
   return response;
 }

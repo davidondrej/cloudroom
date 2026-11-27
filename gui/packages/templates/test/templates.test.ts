@@ -8,7 +8,7 @@ import { templateDefinitions } from "../src/generated/templates.generated.js";
 
 describe("@cloudroom/templates", () => {
   it("documents project creation machine routing", () => {
-    const guide = renderTemplate("bbGuideProjects", {});
+    const guide = renderTemplate("roomGuideProjects", {});
 
     expect(guide).toContain("room-cli project create --name");
     expect(guide).toContain("--machine <id-or-name>");
@@ -17,7 +17,7 @@ describe("@cloudroom/templates", () => {
   });
 
   it("documents automation updates that keep omitted settings", () => {
-    const guide = renderTemplate("bbGuideAutomations", {});
+    const guide = renderTemplate("roomGuideAutomations", {});
 
     expect(guide).toContain("room-cli loop update <loopId>");
     expect(guide).toContain("and keeps every");
@@ -29,7 +29,7 @@ describe("@cloudroom/templates", () => {
   });
 
   it("documents project-aware thread references", () => {
-    const guide = renderTemplate("bbGuideThreads", {});
+    const guide = renderTemplate("roomGuideThreads", {});
 
     expect(guide).toContain("@thread:thr_abc123");
     expect(guide).toContain("do not construct thread URLs manually");
@@ -108,6 +108,9 @@ describe("@cloudroom/templates", () => {
       "Put generated executables in `/tmp` or the project.",
     );
     expect(local).not.toContain("/var/tmp");
+    // #2538: a quiet background wait can stop after 10 minutes (Metal), so agents set a wake instead.
+    expect(cloud).toContain("a quiet wait (polling, `sleep`, a Monitor) can stop after 10 minutes.");
+    expect(cloud).not.toContain("awake for 2 hours, then stop");
   });
 
   it("offers Mac access everywhere and Local computer use only off Windows", () => {

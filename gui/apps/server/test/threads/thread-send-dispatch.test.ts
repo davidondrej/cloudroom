@@ -1367,6 +1367,104 @@ describe("turn submit failure settlement", () => {
       expect(eventTypes).not.toContain("system/error");
     });
   });
+
+  // A session that never ran a turn holds nothing, so it continues by itself; one that ran a turn waits for the user.
+  it.each([false, true])(
+    "reruns a message in a fresh session Codex can't reopen (#335, ran a turn: %s)",
+    async (ranTurn) => {
+      await withTestHarness(async (harness) => {
+        const { environment, thread } = seedProviderThreadFixture({
+          harness,
+          value: 10,
+        });
+        if (ranTurn) {
+          seedTurnStarted(harness.deps, {
+            environmentId: environment.id,
+            providerThreadId: "provider-send-dispatch-10",
+            sequence: 3,
+            threadId: thread.id,
+            turnId: "turn-saved",
+          });
+        }
+        await sendThreadMessage(harness.deps, {
+          environment,
+          payload: {
+            input: textInput("what is the code word?"),
+            mode: "queue-if-active",
+            model: "gpt-5",
+            permissionMode: "full",
+            reasoningLevel: "medium",
+            serviceTier: "default",
+          },
+          thread,
+          trigger: "user",
+        });
+        const failed = await waitForQueuedCommand(
+          harness,
+          (candidate) =>
+            candidate.command.type === "turn.submit" &&
+            candidate.command.threadId === thread.id,
+        );
+        await reportQueuedCommandError(harness, failed, {
+          errorCode: "command_failed",
+          errorMessage:
+            "no rollout found for thread id provider-send-dispatch-10",
+        });
+        const freshStart = () =>
+          waitForQueuedCommand(
+            harness,
+            (candidate) =>
+              candidate.command.type === "thread.start" &&
+              candidate.command.threadId === thread.id,
+            2_000,
+          );
+        if (ranTurn) {
+          await expect(freshStart()).rejects.toThrow("Timed out");
+          expect(getThread(harness.db, thread.id)?.status).toBe("error");
+          // A stale request for another turn is refused before anything changes.
+          const stale = await harness.app.request(
+            `/api/v1/threads/${thread.id}/retry`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                freshSession: true,
+                turnRequestId: "creq_2222222222",
+              }),
+            },
+          );
+          expect(stale.status).toBe(409);
+          expect(
+            threadEvents.getLastProviderThreadId(harness.deps, thread.id),
+          ).toBe("provider-send-dispatch-10");
+          // "Start fresh with the history".
+          const response = await harness.app.request(
+            `/api/v1/threads/${thread.id}/retry`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ freshSession: true }),
+            },
+          );
+          expect(response.status, await response.text()).toBe(200);
+        }
+
+        // Not a resume of the dead session: a new one, with the conversation so far, then the message.
+        const fresh = await freshStart();
+        if (fresh.command.type !== "thread.start") {
+          throw new Error("Expected a thread.start command");
+        }
+        const texts = fresh.command.input.flatMap((part) =>
+          part.type === "text" ? [part.text] : [],
+        );
+        expect(texts[0]).toContain(
+          "couldn't reopen this conversation's session",
+        );
+        expect(texts[0]).toContain("what is the code word?");
+        expect(texts.at(-1)).toBe("what is the code word?");
+      });
+    },
+  );
 });
 
 describe("idle cold-start activation", () => {

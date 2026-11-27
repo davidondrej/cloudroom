@@ -65,7 +65,8 @@ unless you pass `--auto-update` explicitly.
 The launcher (`bb-app`, including `bb-app host-daemon`) captures service stdout and stderr
 directly under the selected data directory in `logs/server-stdio.log` and
 `logs/host-daemon-stdio.log`. These files append across restarts and contain
-console output and startup errors; rotating application logs remain separate.
+console output and startup errors. Over 10 MiB, their last 10 MiB move to
+`*-stdio.log.1`. Rotating application logs remain separate.
 Use `tail -F` to follow them without coupling service logging to the terminal.
 
 room-cli machine list List persistent machines with ID,

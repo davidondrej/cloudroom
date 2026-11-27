@@ -236,16 +236,9 @@ function parseLimit(args: ParsedArgs, fallback: number): number {
   return limit;
 }
 
-/** Templates are for paid plans, like the Templates tab; unknown plans (signed out, billing off) stay open. */
-async function requireTemplatesPlan(room: Pick<BbPluginApi, "sdk">): Promise<void> {
-  const status = await room.sdk.cloudroom.status().catch(() => null);
-  if (status?.plan === "free") {
-    throw new Error("Loop templates need a paid plan. Upgrade at https://www.cloudroom.dev/billing");
-  }
-}
-
 /** `create --template ID`: the template fills every setting the flags leave out, like the Templates tab: a Cloud loop
- *  unless --local, and the template's agent when it is set up here, else the project's default agent. */
+ *  on paid plans (Local by default on Free so scheduled runs don't burn the 10/month Cloud cap), and the template's
+ *  agent when it is set up here, else the project's default agent. */
 async function applyTemplate(
   room: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
@@ -257,14 +250,18 @@ async function applyTemplate(
   if (!template) {
     throw new Error(`Unknown template '${id}'. Run room-cli loop templates.`);
   }
-  await requireTemplatesPlan(room);
   if (args.flags.has("cloud") && args.flags.has("local")) {
     throw new Error("Use --cloud or --local, not both.");
   }
   if (template.localOnly && args.flags.has("cloud")) {
     throw new Error(`${template.name} runs only on the Mac: Cloud threads can't see the project's threads. Use --local.`);
   }
-  const local = args.flags.has("local") || template.localOnly === true;
+  const explicitTarget = args.flags.has("cloud") || args.flags.has("local");
+  const freeDefaultLocal =
+    !explicitTarget &&
+    !template.localOnly &&
+    (await room.sdk.cloudroom.status().catch(() => null))?.plan === "free";
+  const local = args.flags.has("local") || template.localOnly === true || freeDefaultLocal;
   if (local) args.flags.set("local", true);
   else args.flags.set("cloud", true);
   const projectId = requireFlag(args, "project");
@@ -1203,8 +1200,8 @@ function helpText(): string {
 room-cli loop list --project <id>          Also lists the Cloud loops whose thread is in that project
 room-cli loop create --project <id> --name <name> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration> | --webhook) (--prompt <text> (--provider <id> --model <model> [--reasoning <level>] | --agent <provider,model[,level]>...) [--service-tier default|fast] [--permission-mode accept-edits|auto|full] | --script <inline> | --script-file <path> [--host <name-or-id>]) [--priority 1-4]
 room-cli wake <when> "<prompt>"            A timer or reminder: wakes this thread once, in 5m/2h/1d or at a time (same as loop wake)
-room-cli loop create --template <id> --project <id> [--local] [any flag above]   A Cloud loop unless --local; the template fills in the rest (paid plans)
-room-cli loop templates                    Ready-made loops, with their priority, schedule, and agent (paid plans)
+room-cli loop create --template <id> --project <id> [--cloud|--local] [any flag above]   Cloud on paid plans, Local by default on Free; the template fills in the rest
+room-cli loop templates                    Ready-made loops, with their priority, schedule, and agent
 room-cli loop show <loopId> --project <id>
 room-cli loop update <loopId> --project <id> [--name <name>] [--priority 1-4] [schedule flags] [--prompt <text>] [--provider <id>] [--model <model>] [--reasoning <level>] [--agent <provider,model[,level]>...] [--service-tier default|fast|none] [--permission-mode accept-edits|auto|full] [--target-thread <id> | --environment <id-or-path> | --new-environment worktree] [--script <inline> | --script-file <path>] [--interpreter <name>] [--timeout <ms>] [--env-json <json>] (omitted settings are kept; switching between agent and script replaces them)
 room-cli loop pause <loopId> --project <id>
@@ -1525,7 +1522,9 @@ async function runScanProgressCommand(
     const count = (value: unknown) => (typeof value === "number" ? value : null);
     trackScan(update.stage, { chats: count(next.chats), readers: count(next.readers), readers_done: count(next.readersDone), kind: scanKind(next) });
   }
-  return { exitCode: 0, stdout: optionalJson(args, { saved: true }) ?? "Scan progress saved\n" };
+  // `maxReaders`: the Free cap scans_start saved, which readers.py enforces (#2645); null when uncapped.
+  const saved = (current as { maxReaders?: unknown }).maxReaders, maxReaders = typeof saved === "number" ? saved : null;
+  return { exitCode: 0, stdout: optionalJson(args, { saved: true, maxReaders }) ?? "Scan progress saved\n" };
 }
 
 /** `room-cli loop report` (ADR 0298). Each `--action` counts, so the raw arguments are read for them. */
@@ -1697,7 +1696,6 @@ export function registerAutomationCli(args: {
           return { exitCode: 0, stdout: helpText() };
         }
         if (command === "templates") {
-          await requireTemplatesPlan(bb);
           return { exitCode: 0, stdout: optionalJson(parsed, LOOP_TEMPLATES) ?? printTemplates() };
         }
         if (command === "settings") return await runSettingsCommand(bb, parsed);

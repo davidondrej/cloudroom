@@ -2266,6 +2266,34 @@ describe("dispatchCommand", () => {
         message: "Claude Code update is no longer available on this host.",
       },
     ]);
+
+    // A stale Install on a CLI that is now working and current succeeds (#2623).
+    providerInstallationStatus.mockResolvedValueOnce(
+      claudeCodeStatus({ currentVersion: "2.1.69", latestVersion: "2.1.69" }),
+    );
+    const install = await dispatchOnlineRpcCommand(
+      {
+        type: "provider.installation.run",
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        providerId: "claude-code",
+        action: "install",
+      },
+      makeDispatchOptions({
+        dataDir,
+        providerInstallationStatus,
+        providerInstallationRun: async () => ({
+          available: false,
+          message: "Claude Code install is not available on this host.",
+        }),
+        runtimeManager: manager,
+        streamProviderInstallation,
+      }),
+    );
+    expect(streamProviderInstallation).not.toHaveBeenCalled();
+    expect(install.events.at(-1)).toMatchObject({
+      type: "completed",
+      success: true,
+    });
   });
 
   it("accepts a Claude update that advances when the release channel is unknown", async () => {

@@ -415,16 +415,51 @@ export const systemUsageAnalyticsResponseSchema = z.object({
   }).optional(),
   /**
    * Tokens by kind. The three daily lists start one range early (`days` × 2 entries), so this range can be
-   * compared with the one before. `models` and `top` cover this range only: models that used the most first with
-   * the rest as "Other", and each day's heaviest threads.
+   * compared with the one before. `models`, `top` and `threads` cover this range only: models that used the most
+   * first with the rest as "Other", each day's heaviest threads, and the threads that wrote the most (a parent with
+   * its children) with the rest in `otherThreads`.
    */
-  tokens: z.object({
-    written: dailySchema,
-    read: dailySchema,
-    cached: dailySchema,
-    models: z.array(z.object({ name: z.string(), written: dailySchema, read: dailySchema, cached: dailySchema })),
-    top: z.array(z.array(z.object({ name: z.string(), written: z.number(), read: z.number(), cached: z.number() }))),
-  }).optional(),
+  tokens: z
+    .object({
+      written: dailySchema,
+      read: dailySchema,
+      cached: dailySchema,
+      models: z.array(
+        z.object({
+          name: z.string(),
+          written: dailySchema,
+          read: dailySchema,
+          cached: dailySchema,
+        }),
+      ),
+      top: z.array(
+        z.array(
+          z.object({
+            name: z.string(),
+            written: z.number(),
+            read: z.number(),
+            cached: z.number(),
+          }),
+        ),
+      ),
+      threads: z
+        .array(
+          z.object({
+            id: z.string(),
+            projectId: z.string(),
+            name: z.string(),
+            agent: z.string(),
+            written: z.number(),
+            children: z.number(),
+          }),
+        )
+        .optional(),
+      otherThreads: z
+        .object({ count: z.number(), written: z.number() })
+        .nullable()
+        .optional(),
+    })
+    .optional(),
   /** Your prompts per day, and per hour of the week (Monday 12 AM first, 168 entries). */
   prompts: z.object({ daily: dailySchema, hours: dailySchema }).optional(),
 });

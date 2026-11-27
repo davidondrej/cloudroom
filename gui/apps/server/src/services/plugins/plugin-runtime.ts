@@ -85,6 +85,7 @@ import {
 import {
   createPluginApi,
   isNeedsConfigurationError,
+  PluginContextStaleError,
   type BbPluginApi,
   type PluginApiHandle,
   type PluginThreadEventName,
@@ -497,6 +498,8 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
   }
 
   const serviceContext = new AsyncLocalStorage<ServiceInstance>();
+  /** Plugins already logged for a stale detached callback; it repeats per tick. */
+  const staleCallbackPluginIds = new Set<string>();
 
   function runService(id: string, service: ServiceRuntime): void {
     const controller = new AbortController();
@@ -531,7 +534,18 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
 
   function handleUncaughtException(error: unknown): boolean {
     const instance = serviceContext.getStore();
-    if (instance === undefined) return false;
+    if (instance === undefined) {
+      // A factory timer or other detached callback outlived its reloaded or
+      // disabled plugin; the handle already refused the call.
+      if (!(error instanceof PluginContextStaleError)) return false;
+      if (!staleCallbackPluginIds.has(error.pluginId)) {
+        staleCallbackPluginIds.add(error.pluginId);
+        logger.warn(
+          `Contained a detached callback error, logged once per plugin: ${error.message}`,
+        );
+      }
+      return true;
+    }
     const { id, service, controller } = instance;
     const name = service.record.name;
     const message = error instanceof Error ? error.message : String(error);
@@ -859,29 +873,37 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
    * announce" — a `turn.failed` on a thread that never dispatched a turn, say.
    * The builder runs only when a handler is listening, so that second look
    * costs nothing on a stock install.
+   *
+   * The returned promise settles once every handler it reached has; callers that don't need that ignore it.
    */
   function emitThreadEvent<E extends PluginThreadEventName>(
     event: E,
     buildPayload: () => PluginThreadEventPayloads[E] | null,
-  ): void {
-    if (!hasThreadEventHandlers(event)) return;
-    setImmediate(() => {
-      let payload: PluginThreadEventPayloads[E] | null;
-      try {
-        payload = buildPayload();
-      } catch (error) {
-        logger.warn(
-          `failed to build ${event} plugin event payload: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        return;
-      }
-      if (payload === null) return;
-      const delivered = payload;
-      for (const [id, plugin] of loaded) {
-        for (const handler of [...plugin.handle.threadEventHandlers[event]]) {
-          void invokeWrapped(id, `${event} handler`, () => handler(delivered));
+  ): Promise<void> {
+    if (!hasThreadEventHandlers(event)) return Promise.resolve();
+    return new Promise((resolve) => {
+      setImmediate(() => {
+        let payload: PluginThreadEventPayloads[E] | null;
+        try {
+          payload = buildPayload();
+        } catch (error) {
+          logger.warn(
+            `failed to build ${event} plugin event payload: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return resolve();
         }
-      }
+        if (payload === null) return resolve();
+        const delivered = payload;
+        const handled: Promise<unknown>[] = [];
+        for (const [id, plugin] of loaded) {
+          for (const handler of [...plugin.handle.threadEventHandlers[event]]) {
+            handled.push(
+              invokeWrapped(id, `${event} handler`, () => handler(delivered)),
+            );
+          }
+        }
+        void Promise.all(handled).then(() => resolve());
+      });
     });
   }
 

@@ -43,6 +43,9 @@ export const hostContract = defineRpcContract({
         session: z.string().min(1).max(64),
         // Folder name only: each host saves screenshots under its own temp dir (#1411).
         shotsKey: z.string().regex(/^[A-Za-z0-9_-]+$/),
+        // Cloud threads can't read this computer's files: their screenshots stay inline (`*_b64`), and Core saves
+        // them in the sandbox. Sent only when true, so older hosts never see it.
+        inline: z.literal(true).optional(),
       })
       .strict(),
     output: z

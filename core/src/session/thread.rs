@@ -35,7 +35,7 @@ room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|dev
 room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
 room-cli thread wait --children
-room-cli thread output CHILD_ID [--all]
+room-cli thread output CHILD_ID [--all | --input TOOL_INPUT_ID [--offset N]]
 room-cli thread log CHILD_ID
 room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] TEXT|--message-file PATH
 room-cli thread stop CHILD_ID
@@ -1001,6 +1001,9 @@ fn mark_waited(answer: &mut Value, waited: &[String]) -> usize {
 struct OutputQuery {
     #[serde(default)]
     all: bool,
+    /// The rest of one tool input `--all` clipped, from `offset` (#2582).
+    input: Option<String>,
+    offset: Option<u64>,
 }
 
 async fn output(
@@ -1017,6 +1020,13 @@ async fn output(
                 json!({"id":id,"note":"This child runs in its own sandbox. Its replies arrive as messages when its turns end."}),
             ));
         };
+        // The rest of one clipped tool input: the website's answer as is, a 404 included (#2582).
+        if let Some(at) = &query.input {
+            let offset = query.offset.unwrap_or(0).to_string();
+            let ask = [("thread", id.as_str()), ("input", at), ("offset", &offset)];
+            return (api.get("chat", &ask).await.map(Json))
+                .map_err(|error| website_failure(error, "read the child's tool input"));
+        }
         let all = if query.all { "1" } else { "0" };
         let failed = start_error(&m, &parent, &id);
         return match api.get("chat", &[("thread", &id), ("all", all)]).await {
@@ -1417,7 +1427,11 @@ const FORK_VALUES: [&str; 8] = [
 fn missing_value<'a>(words: &[&'a str]) -> Option<&'a str> {
     let option = |word: &str| word.starts_with("--") && !word.contains(' ');
     let takes_value = |word: &str| {
-        SPAWN_VALUES.contains(&word) || matches!(word, "--message-file" | "--mode" | "--then")
+        SPAWN_VALUES.contains(&word)
+            || matches!(
+                word,
+                "--message-file" | "--mode" | "--then" | "--input" | "--offset"
+            )
     };
     (0..words.len())
         .find(|&i| takes_value(words[i]) && words.get(i + 1).is_none_or(|next| option(next)))
@@ -1853,12 +1867,27 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             Err(code) => return Ok(code),
         },
         // `log` is the child's whole chat: `output --all`.
-        "output" | "log" => match own(&[], &["--all", "--self"]) {
+        "output" | "log" => match own(&["--input", "--offset"], &["--all", "--self"]) {
             Ok(ids) if ids.len() == 1 && !rest.contains(&"--self") => {
-                let all = if *command == "log" || rest.contains(&"--all") {
-                    "?all=true"
-                } else {
-                    ""
+                let offset = flag(rest, "--offset").unwrap_or("0");
+                let all = match flag(rest, "--input") {
+                    // `withInputs` names the record with letters, digits, `_` and `-` only (#2582).
+                    Some(at)
+                        if offset.parse::<u64>().is_ok()
+                            && *command == "output"
+                            && !rest.contains(&"--all")
+                            && !at.is_empty()
+                            && at
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b)) =>
+                    {
+                        format!("?input={at}&offset={offset}")
+                    }
+                    Some(_) => return usage(),
+                    // `--offset` only reads on from a clipped input's `--input`.
+                    None if flag(rest, "--offset").is_some() => return usage(),
+                    None if *command == "log" || rest.contains(&"--all") => "?all=true".into(),
+                    None => String::new(),
                 };
                 call("GET", &format!("/children/{}{all}", ids[0]), None).await?
             }
@@ -2135,6 +2164,15 @@ mod tests {
         assert_eq!(
             missing_value(&["tell", "thr_a", "--message-file", "-"]),
             None
+        );
+        // An unset `--offset $next` or `--input --all` is refused, never read as offset 0 or plain output (#2582).
+        assert_eq!(
+            missing_value(&["output", "thr_a", "--input", "2_cr_a", "--offset"]),
+            Some("--offset")
+        );
+        assert_eq!(
+            missing_value(&["output", "thr_a", "--input", "--all"]),
+            Some("--input")
         );
         // Thread IDs as agents write them in chat.
         assert_eq!(mention("@thread:thr_ab-1"), "thr_ab-1");

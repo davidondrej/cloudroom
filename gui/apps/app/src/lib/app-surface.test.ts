@@ -31,7 +31,7 @@ describe("app surface request metadata", () => {
 
   it("marks Electron preload requests as desktop", () => {
     vi.stubGlobal("window", {
-      bbDesktop: createRoomDesktopApi(desktopInfo),
+      roomDesktop: createRoomDesktopApi(desktopInfo),
     });
 
     const init = appSurfaceRequestInit();

@@ -31,6 +31,7 @@ import {
   type AutomationRunRow,
   type Db,
 } from "./data.js";
+import { waitsForSignIn } from "../lib/paused.js";
 import { createAutomationId } from "./ids.js";
 import {
   providerRoutingForEnvironment,
@@ -1012,9 +1013,10 @@ export function createAutomationService(args: {
         enabled: false,
         nextRunAt: null,
         // Paused by hand, a loop its failures paused stays off: it no longer tries again on its own.
-        // An archive-paused one no longer resumes when its thread is unarchived.
+        // An archive-paused one no longer resumes when its thread is unarchived, nor one waiting for sign-in at a login.
         ...(current.lastError === THREAD_ARCHIVED_ERROR ||
-        current.lastError?.endsWith("consecutive failures)")
+        current.lastError?.endsWith("consecutive failures)") ||
+        waitsForSignIn(current.lastError)
           ? { lastError: null }
           : {}),
       });

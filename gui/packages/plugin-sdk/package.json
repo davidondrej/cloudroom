@@ -1,6 +1,6 @@
 {
   "name": "@get-bb/plugin-sdk",
-  "version": "0.6.53",
+  "version": "0.6.55",
   "homepage": "https://github.com/get-bb/bb#readme",
   "bugs": {
     "url": "https://github.com/get-bb/bb/issues"
@@ -167,7 +167,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
-    "better-sqlite3": "12.10.0",
+    "better-sqlite3": "13.0.3",
     "cron-parser": "^5.5.0",
     "esbuild": "^0.28.0",
     "hono": "4.13.16",

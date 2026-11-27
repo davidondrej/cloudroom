@@ -19,7 +19,7 @@
       "passThroughEnv": ["DISPLAY"]
     },
     // Mirrors "build" but also caches bundle-stats.json, which the
-    // bb:bundle-stats Vite plugin writes beside dist for the boot-payload
+    // room:bundle-stats Vite plugin writes beside dist for the boot-payload
     // budget check. Without it a cache hit would leave CI checking a stale
     // file, or none at all.
     // The docs' UI-anatomy manifest is the contract this test checks the real

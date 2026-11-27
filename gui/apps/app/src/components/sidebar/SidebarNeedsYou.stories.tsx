@@ -147,8 +147,8 @@ function StoryControls() {
   // The app shell sizes the sidebar from this variable (100dvh by default).
   const setShellHeight = (height: string | null) =>
     height === null
-      ? document.body.style.removeProperty("--bb-shell-height")
-      : document.body.style.setProperty("--bb-shell-height", height);
+      ? document.body.style.removeProperty("--room-shell-height")
+      : document.body.style.setProperty("--room-shell-height", height);
   const button =
     "rounded-md border border-border px-2 py-1 text-foreground hover:bg-state-hover";
   return (
@@ -234,7 +234,7 @@ export const InAppSidebar = () => {
         <TitleResources>
           <ThreadActionsProvider>
             <QuickCreateProjectProvider>
-              <SidebarProvider className="h-(--bb-shell-height) min-h-0">
+              <SidebarProvider className="h-(--room-shell-height) min-h-0">
                 <AppSidebar
                   onResizeMouseDown={() => {}}
                   isResizing={false}

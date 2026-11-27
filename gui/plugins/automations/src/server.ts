@@ -1,5 +1,5 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
-import { isReviewThread, migrations } from "./data.js";
+import { isReviewThread, migrations, releaseSignInHolds } from "./data.js";
 import { ingestLegacyImport } from "./legacy-import.js";
 import { pluginDataDirFromDb } from "./path.js";
 import { automationRpcContract, createRpcHandlers } from "./rpc.js";
@@ -66,13 +66,23 @@ export default async function plugin(room: BbPluginApi) {
       status: "idle",
     });
     reviewChanged(thread.id);
+    // A Local turn of this agent worked, so its login does: loops waiting for it go on (#609).
+    if (thread.executionTarget === "cloud") return;
+    const released = releaseSignInHolds(db, thread.providerId, Date.now());
+    for (const projectId of released)
+      publishAutomationChange(room, projectId, "automations-changed");
   });
   room.events.on("thread.failed", async ({ thread, error, errorInfo }) => {
+    // Same test as the server's sign-in hold (failureHold); a Cloud thread's login is the website's.
+    const signIn =
+      errorInfo?.category === "unauthorized" &&
+      thread.executionTarget !== "cloud";
     await closeAutomationRunForSettledThread(room, db, {
       threadId: thread.id,
       status: "failed",
       error,
       rateLimited: errorInfo?.category === "rate-limit",
+      ...(signIn ? { signIn: thread.providerId } : {}),
       refused: errorInfo?.category === "policy",
     });
     reviewChanged(thread.id);

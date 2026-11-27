@@ -1,7 +1,10 @@
 import { useId, useState } from "react";
+import { Link } from "react-router";
+import type { SystemUsageAnalyticsResponse } from "@cloudroom/server-contract";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { COLORS, REST, RangeToggle, UsageSection, dayText, dayTicks, short, sum } from "@/components/settings/UsageSection";
 import { useUsageAnalytics } from "@/hooks/queries/system-queries";
+import { getThreadRoutePath } from "@/lib/route-paths";
 
 // Settings → Analytics → Tokens: dots (David 2026-11-11). Each column is a day, each dot a batch of tokens.
 const RANGES = ["7", "30", "90"] as const;
@@ -59,6 +62,109 @@ function Change({ now, before, days }: { now: number; before: number; days: numb
     <span title={`Compared with the ${days} days before`} className={cn("rounded-full px-2.5 py-1 font-mono text-[11px] whitespace-nowrap tabular-nums", up ? "bg-primary/12 text-primary-text" : "bg-foreground/8 text-muted-foreground")}>
       {up ? "↑" : "↓"} {ratio >= 2 ? `${ratio.toFixed(1)}×` : `${Math.abs(Math.round((ratio - 1) * 100))}%`}
     </span>
+  );
+}
+
+// Threads: every thread ranked by tokens written in the range, a parent with its children, in the Models tab's look.
+type Tokens = NonNullable<SystemUsageAnalyticsResponse["tokens"]>;
+const THREAD_ROW =
+  "grid grid-cols-[minmax(0,1fr)_6.5rem_minmax(0,1fr)_4rem_2.75rem] items-center gap-3.5";
+/** Shares are estimates: never finer than "41%". */
+const share = (part: number, all: number) => {
+  const value = all > 0 ? (part / all) * 100 : 0;
+  return value > 0 && value < 0.5 ? "<1%" : `${Math.round(value)}%`;
+};
+function ThreadsList({
+  threads,
+  other,
+  wrote,
+}: {
+  threads: NonNullable<Tokens["threads"]>;
+  other: Tokens["otherThreads"];
+  wrote: number;
+}) {
+  const top = threads[0];
+  if (!top || top.written <= 0) return null;
+  const bar = (written: number) =>
+    `${Math.max(0.4, Math.min(100, (written / top.written) * 100))}%`;
+  return (
+    <div role="list" aria-label="Tokens written by thread">
+      <div className="mb-1 text-sm font-medium text-foreground">Threads</div>
+      <div className={cn(THREAD_ROW, "h-7 text-[11px] text-muted-foreground")}>
+        <span>Thread</span>
+        <span>Agent</span>
+        <span>Share of tokens written</span>
+        <span className="text-right">Written</span>
+        <span />
+      </div>
+      {threads.map((thread, index) => (
+        <Link
+          key={thread.id}
+          role="listitem"
+          to={getThreadRoutePath({
+            projectId: thread.projectId,
+            threadId: thread.id,
+          })}
+          title={`Open ${thread.name}`}
+          className={cn(
+            THREAD_ROW,
+            "h-8 border-t border-border font-mono text-xs no-underline hover:bg-state-hover",
+          )}
+        >
+          <span className="flex min-w-0 items-baseline gap-2">
+            <span className="truncate text-foreground">{thread.name}</span>
+            {thread.children ? (
+              <span className="shrink-0 text-muted-foreground">
+                +{thread.children}{" "}
+                {thread.children === 1 ? "child" : "children"}
+              </span>
+            ) : null}
+          </span>
+          <span className="truncate text-muted-foreground">{thread.agent}</span>
+          <span className="h-2.5 bg-surface-recessed">
+            <span
+              className={cn(
+                "block h-full",
+                index === 0 ? "bg-primary" : "bg-muted-foreground/60",
+              )}
+              style={{ width: bar(thread.written) }}
+            />
+          </span>
+          <span className="text-right text-foreground tabular-nums">
+            {short(thread.written)}
+          </span>
+          <span className="text-right text-muted-foreground tabular-nums">
+            {share(thread.written, wrote)}
+          </span>
+        </Link>
+      ))}
+      {other ? (
+        <div
+          role="listitem"
+          className={cn(
+            THREAD_ROW,
+            "h-8 border-t border-border font-mono text-xs",
+          )}
+        >
+          <span className="truncate text-muted-foreground">
+            Other · {other.count} {other.count === 1 ? "thread" : "threads"}
+          </span>
+          <span />
+          <span className="h-2.5 bg-surface-recessed">
+            <span
+              className="block h-full bg-muted-foreground/30"
+              style={{ width: bar(other.written) }}
+            />
+          </span>
+          <span className="text-right text-muted-foreground tabular-nums">
+            {short(other.written)}
+          </span>
+          <span className="text-right text-muted-foreground tabular-nums">
+            {share(other.written, wrote)}
+          </span>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -162,8 +268,20 @@ export function TokensSection() {
                   ))}
                 </div>
               </>
-            ) : <p className="py-10 text-center text-sm text-muted-foreground">No tokens counted in this range yet.</p>}
-            <p className="text-xs text-muted-foreground">Estimates from each thread's running totals. Cursor agents report no tokens.</p>
+            ) : (
+              <p className="py-10 text-center text-sm text-muted-foreground">
+                No tokens counted in this range yet.
+              </p>
+            )}
+            <ThreadsList
+              threads={usage.tokens!.threads ?? []}
+              other={usage.tokens!.otherThreads ?? null}
+              wrote={sum(usage.tokens!.written.slice(days))}
+            />
+            <p className="text-xs text-muted-foreground">
+              Estimates from each thread's running totals. Cursor agents report
+              no tokens.
+            </p>
           </div>
         );
       }}

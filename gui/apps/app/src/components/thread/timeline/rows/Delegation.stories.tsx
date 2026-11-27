@@ -970,7 +970,7 @@ const testQualityChild02: TimelineRow = {
   cwd: null,
   source: null,
   output:
-    "<persisted-output>\nOutput too large (35.1KB). Full output saved to: /Users/michael/.claude/projects/-Users-michael--bb-dev-worktrees-env-stt3jzymfp-bb/84f9bb6d-8a5e-4eba-af26-c530415265b1/tool-results/brm54bnvm.txt\n\nPreview (first 2KB):\ndiff --git a/apps/host-daemon/src/app.ts b/apps/host-daemon/src... [truncated]",
+    "<persisted-output>\nOutput too large (35.1KB). Full output saved to: /Users/michael/.claude/projects/-Users-michael--room-dev-worktrees-env-stt3jzymfp-bb/84f9bb6d-8a5e-4eba-af26-c530415265b1/tool-results/brm54bnvm.txt\n\nPreview (first 2KB):\ndiff --git a/apps/host-daemon/src/app.ts b/apps/host-daemon/src... [truncated]",
   exitCode: 0,
   completedAt: 1778174320120,
   approvalStatus: null,
@@ -989,7 +989,7 @@ const testQualityChild03: TimelineRow = {
   workKind: "file-read",
   status: "completed",
   callId: "toolu_017R2qfR7Ew5FtjAkHxindVG",
-  path: "/Users/michael/.claude/projects/-Users-michael--bb-dev-worktrees-env-stt3jzymfp-bb/84f9bb6d-8a5e-4eba-af26-c530415265b1/tool-results/brm54bnvm.txt",
+  path: "/Users/michael/.claude/projects/-Users-michael--room-dev-worktrees-env-stt3jzymfp-bb/84f9bb6d-8a5e-4eba-af26-c530415265b1/tool-results/brm54bnvm.txt",
   cmd: null,
   completedAt: 1778174320120,
 };

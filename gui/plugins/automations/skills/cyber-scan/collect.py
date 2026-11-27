@@ -227,6 +227,7 @@ def active_repos(days, limit, limit_github):
     cutoff = time.time() - days * 86400
     repos = {}
     paths, error = local_repos()
+    errors = [error] if error else []
     for path in paths:
         last = git(path, "for-each-ref", "--sort=-committerdate", "--count=1", "--format=%(committerdate:unix)", "refs/heads")
         if not last.isdigit() or int(last) < cutoff:
@@ -236,19 +237,27 @@ def active_repos(days, limit, limit_github):
             continue
         repos[name or path] = {"name": name or os.path.basename(path), "github": name, "path": path, "last": int(last)}
     if shutil.which("gh"):
-        try:
-            for r in json.loads(run(["gh", "api", "user/repos?sort=pushed&per_page=50&affiliation=owner,collaborator,organization_member"]) or "[]"):
+        try:  # a refused lookup (expired login, rate limit) is not an empty list (#2646)
+            p = subprocess.run(["gh", "api", "user/repos?sort=pushed&per_page=50&affiliation=owner,collaborator,organization_member"],
+                               capture_output=True, encoding="utf-8", errors="replace", timeout=30)
+            if p.returncode:  # gh's last error line, without colors or control characters, capped
+                line = ((p.stderr or "").strip() or f"exit code {p.returncode}").splitlines()[-1]
+                raise OSError(re.sub(r"\x1b\[[0-9;]*[A-Za-z]|[\x00-\x1f\x7f]", "", line).strip()[:200])
+            listed = json.loads(p.stdout or "[]")
+            if not isinstance(listed, list):
+                raise ValueError("not a list of repos")
+            for r in listed:
                 pushed = calendar.timegm(time.strptime(r["pushed_at"], "%Y-%m-%dT%H:%M:%SZ"))
                 if pushed >= cutoff and r["full_name"] not in repos and not r.get("archived"):
                     repos[r["full_name"]] = {"name": r["full_name"], "github": r["full_name"], "path": None, "last": int(pushed),
                                              "private": r.get("private")}
-        except (ValueError, KeyError, TypeError):
-            pass
+        except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError) as e:
+            errors.append(f"GitHub's repo list: failed to load ({e}), so repos only on GitHub were not checked")
     # Every local repo active in the window; GitHub-only repos are capped (most recently pushed first).
     local = sorted((r for r in repos.values() if r["path"]), key=lambda r: -r["last"])
     remote = sorted((r for r in repos.values() if not r["path"]), key=lambda r: -r["last"])
     kept = local[:limit] + remote[:limit_github]
-    return kept, len(repos) - len(kept), error
+    return kept, len(repos) - len(kept), errors
 
 
 def commit_days(repo):
@@ -565,7 +574,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     started = time.time()
     with concurrent.futures.ThreadPoolExecutor(4) as pool:
         computer_f, threats_f = pool.submit(mac), pool.submit(threats)
-        repos, skipped, projects_error = active_repos(days, max_repos, max_github)
+        repos, skipped, discovery_errors = active_repos(days, max_repos, max_github)
         for r in repos:
             r["packages"] = repo_packages(r["path"]) if r["path"] else []
             r["secrets"] = repo_secrets(r["path"]) if r["path"] else []
@@ -583,7 +592,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
               (osv_failed, "packages: the OSV lookup failed"),
               (sum(1 for d in results if d.get("failed")), "advisories: their details failed to load"),
               (max(0, len(all_ids) - MAX_ADVISORIES), f"advisories past the first {MAX_ADVISORIES}"))
-    unchecked = [f"{n} {text}" for n, text in counts if n] + ([projects_error] if projects_error else [])
+    unchecked = [f"{n} {text}" for n, text in counts if n] + discovery_errors
     remote = [r["name"] for r in repos if not r["path"]]  # no copy on this computer: no lockfiles to read (#2445)
     if remote:
         unchecked.append(f"{len(remote)} GitHub-only repos (no copy on this computer), so their packages were not checked: "
@@ -610,6 +619,9 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
         r["package_count"] = len(r.pop("packages")) if r["path"] else None  # None: not checked, unlike 0 packages
     computer["kev_matches"] = kev_matches(recent["kev"], computer.get("apps") or [])
     critical = sum(v["severity"] == "CRITICAL" for r in repos for v in r["vulns"])
+    unreviewed = [r["github"] for r in repos if r["github"]][max_readers:]  # past the readers' cap (Free: 0-3, #2645)
+    if unreviewed:
+        unchecked.append(f"{len(unreviewed)} GitHub repos got no code review (readers review the {max_readers} busiest): {', '.join(unreviewed)}")
     json.dump({"computer": computer, "repos": repos, "skipped_repos": skipped, "not_checked": unchecked, "threats": recent}, open(os.path.join(out, "findings.json"), "w"), indent=1)
 
     # Readers: one per GitHub repo, most active first.
@@ -619,7 +631,7 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     for n, r in enumerate([r for r in repos if r["github"]][:max_readers], 1):
         key = f"{n:02d}"
         known = [f"{v['cve'] or v['id']} {v['package']} {v['version']}" for v in r["vulns"][:15]] + r["secrets"]
-        open(os.path.join(out, "slices", f"slice-{key}.txt"), "w").write(
+        open(os.path.join(out, "slices", f"slice-{key}.txt"), "w", encoding="utf-8").write(
             f"Repo: {r['github']}\nLocal copy: {'yes' if r['path'] else 'no'}\n"
             f"Already found by the package and secret checks (don't repeat these):\n" + ("\n".join(known) or "nothing") + "\n")
         per_slice[key] = {str(i): c for i, c in enumerate(r["days"]) if c}
@@ -651,13 +663,14 @@ def main(out, days=30, max_repos=60, max_github=10, max_readers=8):
     lines += [f"- {v['cveID']} {v['vendorProject']} {v['product']} ({v['dateAdded']}): {v['vulnerabilityName']}" for v in recent["kev"]]
     lines += ["GitHub critical advisories:"]
     lines += [f"- {a['id']} ({a['published']}) {', '.join(a['packages'])}: {a['summary']}" for a in recent["github_critical"]]
-    open(os.path.join(out, "summary.md"), "w").write("\n".join(lines) + "\n")
+    open(os.path.join(out, "summary.md"), "w", encoding="utf-8").write("\n".join(lines) + "\n")
     print(f"{len(repos)} repos, {sum(r['package_count'] or 0 for r in repos)} packages, "
           f"{sum(len(r['vulns']) for r in repos)} advisories ({critical} critical), "
           f"{sum(len(r['secrets']) for r in repos)} secret findings, {len(per_slice)} reader slices"
           + (f", not fully checked: {'; '.join(unchecked)}" if unchecked else ""))
 
 if __name__ == "__main__":
-    a = sys.argv[1:]
+    sys.stdout.reconfigure(errors="backslashreplace")  # Windows code pages can't print every repo name or error (#2646)
+    a = [x for arg in sys.argv[1:] for x in (arg.split("=", 1) if arg.startswith("--") and "=" in arg else [arg])]  # --flag=value too
     opt = lambda name, default: int(a[a.index(name) + 1]) if name in a else default
     main(a[0], opt("--days", 30), opt("--max-repos", 60), opt("--max-github", 10), opt("--max-readers", 8))

@@ -3736,6 +3736,12 @@ export interface BbNavigate {
    * docs/api_to_audit.md.
    */
   openUrl(url: string): boolean;
+  /**
+   * Open bb's Add project flow, the same one as the sidebar's New project.
+   * Returns false when no machine can add a project. Experimental: see
+   * docs/api_to_audit.md.
+   */
+  experimental_openAddProject(): boolean;
   /** Open a live file in this surface's shared BB preview panel. */
   experimental_openFilePreview(options: ExperimentalFileOpenOptions): boolean;
   /** Open a live file in this client's preferred external file target. */
@@ -3857,6 +3863,12 @@ export interface PluginSdkApp {
     /** Defaults to active threads only. An empty selection also means active. */
     experimental_lifecycles: readonly ("active" | "archived")[];
   }): PluginSidebarThreadsState;
+  /**
+   * IDs of the active threads the sidebar shows, read only from the host's
+   * cache: unlike `experimental_useSidebarThreads`, it never requests
+   * anything, hosts included. Experimental: see docs/api_to_audit.md.
+   */
+  experimental_useSidebarThreadIds(): readonly string[];
   /**
    * Thread actions bound to the host's mutations (see
    * {@link PluginSidebarThreadActions}). Experimental: see

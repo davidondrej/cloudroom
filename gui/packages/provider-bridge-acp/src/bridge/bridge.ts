@@ -207,8 +207,8 @@ interface AcpThreadSession {
   /** The live agent lost this session (#889); rebuild it before the next turn. */
   sessionLost: boolean;
   loading: boolean;
-  /** A thread/resume the daemon retries, as no message is sent yet: Stop may end it, and an outage fails it. */
-  retryableResume: boolean;
+  /** A thread/resume before a message is sent: Stop may end it, and an outage the dialect names fails it. */
+  beforeTurnResume: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
   stopping: boolean;
@@ -1964,10 +1964,7 @@ async function startAgentSession(
     providerStreamClosed: false,
     sessionLost: false,
     loading: false,
-    retryableResume:
-      request.kind === "resume" &&
-      request.beforeTurn === true &&
-      dialect.unreachableError !== undefined,
+    beforeTurnResume: request.kind === "resume" && request.beforeTurn === true,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
     stopping: false,
@@ -2117,9 +2114,10 @@ async function startAgentSession(
         sessionId = request.resumeProviderThreadId;
       } catch (error) {
         if (
-          session.retryableResume &&
+          session.beforeTurnResume &&
+          dialect.unreachableError !== undefined &&
           error instanceof AcpAgentResponseError &&
-          error.message.includes(dialect.unreachableError!)
+          error.message.includes(dialect.unreachableError)
         ) {
           throw Object.assign(
             new Error(`The agent couldn't reach its servers: ${error.message}`, { cause: error }),
@@ -3362,8 +3360,8 @@ function handleParsedMessage(parsed: unknown): void {
     const { threadId } = stopRequested.data.params;
     sessionRecoveries.get(threadId)?.abort();
     const opening = sessionsByRoomThreadId.get(threadId);
-    // Cut off from its servers, Cursor never answers session/load, so Stop ends it.
-    if (opening?.retryableResume && opening.loading) void opening.connection.kill();
+    // Cut off from their servers, agents like Cursor and Antigravity never answer session/load, so Stop ends it.
+    if (opening?.beforeTurnResume && opening.loading) void opening.connection.kill();
     return;
   }
   const response = decodeBridgeJsonRpcResponse(parsed);

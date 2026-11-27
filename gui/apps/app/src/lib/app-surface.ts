@@ -9,7 +9,10 @@ import { COMPACT_VIEWPORT_QUERY } from "@cloudroom/shared-ui/hooks/use-compact-v
 import { POINTER_COARSE_QUERY } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 
 export function getAppSurface(): RequestAppSurface {
-  if (typeof window !== "undefined" && window.bbDesktop !== undefined) {
+  if (
+    typeof window !== "undefined" &&
+    (window.roomDesktop !== undefined || window.bbDesktop !== undefined)
+  ) {
     return APP_SURFACE_DESKTOP;
   }
   // A phone is a touch screen that is narrow. Tablets and browsers on a computer stay "web".

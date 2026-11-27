@@ -294,8 +294,7 @@ describe("AutomationOverviewView", () => {
             { id: "proj_2", name: "notes", path: null, github: null },
           ],
           onAdd: async () => {},
-          locked: false,
-          onUpgrade: () => {},
+          onAddProject: () => {},
         }}
       />,
     );
@@ -621,8 +620,7 @@ describe("AutomationOverviewView", () => {
             { id: "proj_1", name: "Repo one", path: "/repo-one", github: null },
           ],
           onAdd,
-          locked: false,
-          onUpgrade: () => {},
+          onAddProject: () => {},
         }}
       />,
     );
@@ -638,6 +636,95 @@ describe("AutomationOverviewView", () => {
         "cloud",
       ),
     );
+  });
+
+  it("defaults templates to Local on Free and warns before switching to Cloud", async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    render(
+      <AutomationOverviewView
+        entries={[]}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={() => {}}
+        onEnabledChange={async () => {}}
+        onPriorityChange={async () => {}}
+        onCreateViaChat={() => {}}
+        activeMode="templates"
+        onModeChange={() => {}}
+        templates={{
+          projects: [
+            { id: "proj_1", name: "Repo one", path: "/repo-one", github: null },
+          ],
+          freePlan: true,
+          onAdd,
+          onAddProject: () => {},
+        }}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    expect(
+      screen.queryByText(/10 free Cloud threads\/month/),
+    ).toBeNull();
+    fireEvent.click(await screen.findByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to 1 repo" }));
+    await waitFor(() =>
+      expect(onAdd).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "Security sweep" }),
+        ["proj_1"],
+        "local",
+      ),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Cloud" }));
+    expect(
+      screen.getByText(/10 free Cloud threads\/month/),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("checkbox"));
+    fireEvent.click(screen.getByRole("button", { name: "Add to 1 repo" }));
+    await waitFor(() =>
+      expect(onAdd).toHaveBeenLastCalledWith(
+        expect.objectContaining({ name: "Security sweep" }),
+        ["proj_1"],
+        "cloud",
+      ),
+    );
+  });
+
+  it("offers Add project instead of an empty search when there are no projects (#997)", async () => {
+    const onAddProject = vi.fn();
+    render(
+      <AutomationOverviewView
+        entries={[]}
+        error={null}
+        onRetry={() => {}}
+        onOpenDetail={() => {}}
+        onEnabledChange={async () => {}}
+        onPriorityChange={async () => {}}
+        onCreateViaChat={() => {}}
+        activeMode="templates"
+        onModeChange={() => {}}
+        templates={{
+          projects: [],
+          onAdd: async () => {},
+          onAddProject,
+        }}
+      />,
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Add Security sweep to repos" }),
+    );
+    const addProject = await screen.findByRole("button", {
+      name: "Add project",
+    });
+    expect(screen.queryByLabelText("Search repos")).toBeNull();
+    expect(screen.queryByText("No repos match.")).toBeNull();
+    fireEvent.click(addProject);
+    expect(onAddProject).toHaveBeenCalledOnce();
   });
 
   it("tags loops whose last run failed", () => {

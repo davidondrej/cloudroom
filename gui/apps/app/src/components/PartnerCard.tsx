@@ -1,51 +1,70 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { useCorner } from "@cloudroom/shared-ui/lib/corner";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useCloudroomAccount } from "@/hooks/queries/cloudroom-queries";
+import { fetchWithAppSurface } from "@/lib/app-surface";
 import { getLocalStorage } from "@/lib/browser-storage";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 
-// The Partner card at the top right (docs/scopes/affiliate.md): once a month it tells accounts that pay about the
-// affiliate program. Same size and place as the Wrapped card. The corner module decides when it may show
-// (docs/scopes/corner-cards.md). A click opens the page where people apply, and ends the card for good: only people
-// who close it see it again next month. Settings → Account always shows the program.
-/** Where people apply to the affiliate program. */
+// The Partner card at the top right (docs/scopes/affiliate.md, ADR 20261126-170245): shown to paying users (paid
+// plan or bought Cloud Credits) and active Free users (10+ lifetime started threads). Same size and place as the
+// Wrapped card. Repeats every 14 days when closed; after a click, comes back once more 30 days later in case they
+// bounced, then stops. Settings → Account and /billing always show the program.
+/** Where people get their affiliate link. */
 export const PARTNER_URL = "https://partners.dub.co/cloudroom";
-/** The card asks after Wrapped (20 s) and Scan (30 s), so it never shows first and then gives way to them. */
-const WAIT_MS = 45_000;
-/** Set once the card was clicked on this computer. The account remembers the click too, but only its last 12 corner cards. */
-const OPENED_KEY = "cloudroom.partner.opened";
-/** This month in local time, `2026-11`: the card's key, so it shows once per month. */
-function thisMonth(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
-}
+/** Asks after Wrapped (20 s) and before Scan (30 s), matching its priority in CORNER_CARDS. */
+const WAIT_MS = 25_000;
+/** Minimum lifetime user-started threads for a Free user to count as active enough to see the card. */
+const FREE_MIN_THREADS = 10;
+/** Per-account flags so one account on a shared computer never suppresses another. */
+const openedKey = (id: string) => `cloudroom.partner.opened.${id}`;
+const doneKey = (id: string) => `cloudroom.partner.done.${id}`;
 
 export function PartnerCard() {
-  const plan = useCloudroomAccount().data?.plan;
-  const [month, setMonth] = useState(thisMonth);
+  const status = useCloudroomAccount().data;
+  const accountId = status?.account?.id ?? null;
+  const plan = status?.plan;
+  const boughtCredits = (status?.planUsage?.extraCreditsTotal ?? 0) > 0;
   const [waited, setWaited] = useState(false);
-  /** The month answered in this app run, so the card stops asking for the corner. */
-  const [answered, setAnswered] = useState("");
-  const [opened, setOpened] = useState(() => getLocalStorage()?.getItem(OPENED_KEY) === "true");
+  const [doneAccount, setDoneAccount] = useState<string | null>(null);
+  const handled = useRef(false);
   useEffect(() => {
     const timer = setTimeout(() => setWaited(true), WAIT_MS);
-    // An app left open over the 1st notices the new month when its window is shown again.
-    const check = () => { if (document.visibilityState === "visible") setMonth(thisMonth()); };
-    document.addEventListener("visibilitychange", check);
-    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", check); };
+    return () => clearTimeout(timer);
   }, []);
-  // Accounts that pay themselves: not Free, and not a Business seat their company pays for.
-  const paying = Boolean(plan) && plan !== "free" && plan !== "business";
-  const corner = useCorner("partner", waited && paying && !opened && answered !== month ? month : null);
+  // Shares the ["cloudroom-activation"] query with ActivationChecklist: lifetime user-started threads (archived included).
+  const { data: activation } = useQuery({
+    queryKey: ["cloudroom-activation"],
+    enabled: waited && Boolean(accountId) && plan === "free" && !boughtCredits,
+    staleTime: 30_000,
+    retry: false,
+    queryFn: async ({ signal }) => {
+      const response = await fetchWithAppSurface("/api/v1/cloudroom/activation", { signal });
+      if (!response.ok) throw new Error("Activation is unavailable.");
+      return await response.json() as { started?: number };
+    },
+  });
+  const activeFree = (activation?.started ?? 0) >= FREE_MIN_THREADS;
+  const doneLocally = Boolean(accountId) && (doneAccount === accountId || getLocalStorage()?.getItem(doneKey(accountId!)) === "true");
+  // Paying users (paid plan or bought credits, excluding company-paid Business seats) plus active Free users (10+ started threads).
+  const eligible = Boolean(accountId) && Boolean(plan) && plan !== "business" && (plan !== "free" || boughtCredits || activeFree);
+  const corner = useCorner("partner", waited && eligible && !doneLocally ? "" : null);
+  useEffect(() => { if (!corner) handled.current = false; }, [corner]);
   if (!corner) return null;
   const done = (answer: "opened" | "closed") => {
+    if (handled.current) return;
+    handled.current = true;
     corner.answer(answer);
-    setAnswered(month);
-    if (answer !== "opened") return;
-    getLocalStorage()?.setItem(OPENED_KEY, "true");
-    setOpened(true);
+    if (!accountId) return;
+    const storage = getLocalStorage();
+    if (storage?.getItem(openedKey(accountId)) === "true") {
+      storage.setItem(doneKey(accountId), "true");
+      setDoneAccount(accountId);
+    } else if (answer === "opened") {
+      storage?.setItem(openedKey(accountId), "true");
+    }
   };
   return (
     <div data-testid="partner-card" style={corner.style}

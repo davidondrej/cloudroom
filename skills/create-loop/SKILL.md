@@ -81,7 +81,7 @@ Finish:
 
 For jobs that pay per item (scrapes, search, paid APIs):
 
-- **Fetch only what's new.** Save the last run time in a file and fetch only items after it.
+- **Fetch only what's new.** Save the last run time in a file and fetch only items after it. A Cloud script keeps its files in `$ROOM_LOOP_STATE` (exit 2 if it is unset), never `~/.cache` or `/tmp`: a rebuilt sandbox loses them.
 - **Keep a pool.** Save good candidates for later runs instead of re-fetching the whole window.
 - **Skip hours nobody reads,** e.g. `0 8-22/3 * * *`.
 

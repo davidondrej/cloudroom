@@ -22,6 +22,7 @@ import {
   resolveRegistrySkillById,
 } from "../services/skills/registry-proxy.js";
 import { installServerRegistrySkill } from "../services/skills/registry-skill-install.js";
+import { noteSkillDone } from "../services/cloudroom/activation.js";
 import type { AppDeps } from "../types.js";
 
 export function registerSkillsRegistryRoutes(app: Hono, deps: AppDeps): void {
@@ -163,6 +164,7 @@ export function registerSkillsRegistryRoutes(app: Hono, deps: AppDeps): void {
       registrySkillId: registrySkill.id,
       skillId: registrySkill.skillId,
     });
+    void noteSkillDone(deps).catch(() => {});
     return context.json({ ok: true, ...result });
   });
 }

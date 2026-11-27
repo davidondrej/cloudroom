@@ -261,7 +261,7 @@ export class CloudStatusPreviews {
           model: capabilities?.harnesses.find((h) => h.id === "codex")?.model ?? null,
           steer: capabilities?.steer ?? false, rewind: capabilities?.rewind ?? false, attachments: capabilities?.attachments ?? false,
           compact: capabilities?.compact ?? false, queue_edit: capabilities?.queue_edit ?? false, queue_cancel: capabilities?.queue_cancel ?? false,
-          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.rt.sandboxes.cloudQueue(), cloudCapacity: this.rt.sandboxes.cloudCapacity(), cloudPaused: this.rt.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
+          queue_reorder: capabilities?.queue_reorder ?? false, error: null, cloudQueue: this.rt.sandboxes.cloudQueue(), cloudCapacity: this.rt.sandboxes.cloudCapacity(), cloudLimit: this.rt.sandboxes.cloudLimit(), cloudPaused: this.rt.sandboxes.cloudPaused(), usedCloud: lastCloudAt !== null, lastCloudAt, recentThreads,
           plan: this.rt.sandboxes.currentPlan(), planUsage: this.rt.sandboxes.planUsage(), burning: this.rt.sandboxes.creditBurn(), deepapi: this.rt.sandboxes.deepapiState(),
         };
       }

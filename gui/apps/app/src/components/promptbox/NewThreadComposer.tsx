@@ -1,6 +1,6 @@
 import { gitlabRepository } from "@cloudroom/domain";
 import { AntigravityCloudLogin } from "@/components/AntigravityCloudLogin";
-import { useAntigravityCloud } from "@/lib/antigravity-cloud";
+import { antigravityCloudState, useAntigravityCloud } from "@/lib/antigravity-cloud";
 import { CONNECT_AGENT_IDS, ConnectAgentsButton } from "@/components/ConnectAgentsButton";
 import { PromptDraftContextsContext } from "@/components/promptbox/editor/prompt-context-chip";
 import {
@@ -23,7 +23,7 @@ import { fetchWithAppSurface } from "@/lib/app-surface";
 import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { ProviderRequirementBanner } from "./banner/ProviderRequirementBanner";
 import { CloudClaudeStrip, useCloudClaudeMissing } from "./banner/CloudClaudeStrip";
-import { CloudCapacityCard, CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
+import { CloudCapacityCard, CloudLimitCard, CloudQueueCard, FreePlanTip } from "@/components/CloudQueue";
 import { OneClickScans } from "@/components/ActivationChecklist";
 import { TryCloudHint } from "@/components/promptbox/TryCloudHint";
 import { CloudBranchPicker } from "./CloudBranchPicker";
@@ -114,6 +114,8 @@ import { useCloudVps, vpsSummary } from "@/components/settings/VpsSettings";
 
 const CLOUD_TARGET_KEY = "cloudroom.cloudTarget";
 import { useThreadCreationOptions } from "@/hooks/useThreadCreationOptions";
+import type { ExecutionPermissionConfig } from "@/components/promptbox/ExecutionControls";
+import { PERMISSION_MODE_OPTIONS } from "@/lib/permission-mode-options";
 import { useComposerTextEffects } from "@/lib/composer-text-effects";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 import { promptHistoryEntriesToDrafts } from "@/lib/prompt-history";
@@ -282,6 +284,7 @@ export interface ResolveNewThreadSubmitDisabledReasonArgs {
   modelLoadError: SystemExecutionOptionsModelLoadError | null;
   projectDefaultsStatus: ProjectDefaultsState["status"];
   projectDefaultsUnavailable: boolean;
+  permissionChoiceRequired?: boolean;
   promptInputEmpty: boolean;
   providerDisplayName: string;
   selectedProviderId: string;
@@ -299,6 +302,7 @@ export function resolveNewThreadSubmitDisabledReason({
   modelLoadError,
   projectDefaultsStatus,
   projectDefaultsUnavailable,
+  permissionChoiceRequired = false,
   promptInputEmpty,
   providerDisplayName,
   selectedProviderId,
@@ -334,8 +338,118 @@ export function resolveNewThreadSubmitDisabledReason({
   if (environmentSetupRequiredReason) return environmentSetupRequiredReason;
   if (environmentProviderInputsBlocker) return environmentProviderInputsBlocker;
   if (submissionEnvironmentUnavailable) return "Select an environment.";
+  if (permissionChoiceRequired) return "Choose access first.";
   if (promptInputEmpty) return "Enter a prompt or attach a file.";
   return null;
+}
+
+const PERMISSION_CHOICE_DISPLAY = {
+  label: "Choose access",
+  compactLabel: "Choose",
+  title: "This agent no longer offers the project's saved mode. Choose one to send.",
+};
+const UNOFFERED_PERMISSION_MODE_REASON =
+  "This agent no longer offers it: a repo can skip its approvals.";
+
+/**
+ * The project's saved mode when this start would use it but its agent no longer offers it (Manual for OpenCode).
+ * The server refuses that start, and moving to Full unseen would drop the user's Manual, so the composer asks
+ * for a mode instead (#2166). Null when the start sends its own mode or the agent offers the saved one.
+ */
+export function resolveUnofferedProjectPermissionMode({
+  offeredModes,
+  projectDefaults,
+  providerId,
+  sendsPermissionMode,
+}: {
+  offeredModes: readonly PermissionMode[];
+  projectDefaults: ProjectExecutionDefaults | null | undefined;
+  providerId: string;
+  sendsPermissionMode: boolean;
+}): PermissionMode | null {
+  if (
+    sendsPermissionMode ||
+    !projectDefaults ||
+    projectDefaults.providerId !== providerId ||
+    offeredModes.includes(projectDefaults.permissionMode)
+  ) {
+    return null;
+  }
+  return projectDefaults.permissionMode;
+}
+
+type NewThreadPermissionOptions = Pick<
+  ReturnType<typeof useThreadCreationOptions>,
+  | "executionInputSources"
+  | "permissionMode"
+  | "permissionModeIsVerified"
+  | "permissionModeOptions"
+  | "permissionModePicked"
+  | "selectedProviderId"
+  | "setPermissionMode"
+  | "supportsPermissionModeSelection"
+>;
+
+/**
+ * The new-thread access picker. While the project's saved mode is one the agent no longer offers, it shows that
+ * mode disabled under "Choose access", and a pick counts even when it is the mode already shown (#2166).
+ * Only live options decide that: a cached provider list can be out of date, so while it shows, this acts as main.
+ */
+export function useNewThreadPermissionControl({
+  executionTarget,
+  options,
+  projectDefaults,
+  seedPermissionMode,
+  snapshot,
+}: {
+  executionTarget: "local" | "cloud";
+  options: NewThreadPermissionOptions;
+  projectDefaults: ProjectExecutionDefaults | null | undefined;
+  seedPermissionMode: PermissionMode | undefined;
+  snapshot: () => void;
+}): { permission: ExecutionPermissionConfig; permissionChoiceRequired: boolean } {
+  const unofferedMode =
+    executionTarget === "local" && options.permissionModeIsVerified
+      ? resolveUnofferedProjectPermissionMode({
+          offeredModes: options.permissionModeOptions.map((option) => option.value),
+          projectDefaults,
+          providerId: options.selectedProviderId,
+          // A plugin composer forces every source explicit once any field changes; only a real pick counts.
+          sendsPermissionMode:
+            (options.executionInputSources.permissionMode === "explicit"
+              ? options.permissionModePicked
+              : options.executionInputSources.permissionMode !== undefined) ||
+            seedPermissionMode !== undefined,
+        })
+      : null;
+  const onChange = useDraftPreservingOptionChange(
+    options.permissionMode,
+    options.setPermissionMode,
+    snapshot,
+    unofferedMode !== null,
+  );
+  const { permissionMode, permissionModeOptions, supportsPermissionModeSelection } = options;
+  const permission = useMemo((): ExecutionPermissionConfig => {
+    const unoffered = PERMISSION_MODE_OPTIONS.find((option) => option.value === unofferedMode);
+    return unoffered
+      ? {
+          value: unoffered.value,
+          options: [
+            { ...unoffered, disabled: true, disabledReason: UNOFFERED_PERMISSION_MODE_REASON },
+            ...permissionModeOptions,
+          ],
+          onChange,
+          supported: true,
+          displayOverride: PERMISSION_CHOICE_DISPLAY,
+        }
+      : {
+          value: executionTarget === "cloud" ? "full" : permissionMode,
+          options: permissionModeOptions,
+          onChange,
+          supported: executionTarget === "local" && supportsPermissionModeSelection,
+        };
+  }, [executionTarget, onChange, permissionMode, permissionModeOptions, supportsPermissionModeSelection, unofferedMode]);
+  return { permission, permissionChoiceRequired: unofferedMode !== null };
 }
 
 export function resolveNewThreadProjectDefaultsState({
@@ -940,7 +1054,6 @@ export function NewThreadComposer({
     modelOptions,
     moreModelOptions,
     permissionMode,
-    permissionModeOptions,
     providerOptions,
     reasoningLevel,
     reasoningOptions,
@@ -958,7 +1071,6 @@ export function NewThreadComposer({
     setSelectedModel,
     setSelectedProviderId,
     setServiceTier,
-    supportsPermissionModeSelection,
     supportsServiceTier,
     supportsUltraFast,
     clearReuseEnvironment,
@@ -986,9 +1098,12 @@ export function NewThreadComposer({
   const cloudQueue = executionTarget === "cloud" && !landsOnVps ? cloudConnection.data?.cloudQueue ?? null : null;
   // Metal low-capacity reserve (ADR 20261124-103714): show the banner clearly when this tier's new starts wait.
   const cloudCapacity = executionTarget === "cloud" && !landsOnVps && !cloudQueue ? cloudConnection.data?.cloudCapacity ?? null : null;
+  // Free's Cloud used up (David, 2026-11-26): warn before the send, with Local one click away.
+  const cloudLimit = executionTarget === "cloud" && !landsOnVps && !cloudQueue && !cloudCapacity ? cloudConnection.data?.cloudLimit ?? null : null;
   const agyCloud = executionTarget === "cloud" && selectedProviderId === "acp-antigravity";
   const agyLogin = useAntigravityCloud(agyCloud && !cloudConnection.data?.selfHosted);
-  const agyNeedsLogin = agyCloud && !cloudConnection.data?.selfHosted && !agyLogin.data?.connected;
+  const agyState = agyCloud ? antigravityCloudState(cloudConnection, agyLogin) : "ready";
+  const agyNeedsLogin = agyState !== "ready";
   const cloudAgentMissing = cloudKnown && !cloudHarness(cloudConnection.data, selectedProviderId);
   // Most first Cloud prompts that failed were Claude Code with no Claude login anywhere: the strip in the composer says so first.
   const claudeMissing = useCloudClaudeMissing(executionTarget === "cloud" && !vps.isLoading && !vps.isError && !landsOnVps && !cloudQueue && !cloudAgentMissing && selectedProviderId === "claude-code");
@@ -1743,6 +1858,14 @@ export function NewThreadComposer({
       seed?.environment,
     ],
   );
+  const { permission: permissionConfig, permissionChoiceRequired } =
+    useNewThreadPermissionControl({
+      executionTarget,
+      options: creationOptions,
+      projectDefaults,
+      seedPermissionMode: seed?.permissionMode,
+      snapshot: snapshotDraftBeforeOptionChange,
+    });
   const localSubmitDisabledReason = resolveNewThreadSubmitDisabledReason({
     environmentProviderInputsBlocker:
       machineProviderInputs.blockedReason ?? environmentProviderInputsBlocker,
@@ -1755,6 +1878,7 @@ export function NewThreadComposer({
     modelLoadError,
     projectDefaultsStatus: projectDefaultsState.status,
     projectDefaultsUnavailable,
+    permissionChoiceRequired,
     promptInputEmpty: promptInput.length === 0,
     providerDisplayName: selectedProviderDisplayName,
     selectedProviderId,
@@ -1769,7 +1893,9 @@ export function NewThreadComposer({
       : `${selectedProviderDisplayName ?? "This agent"} isn't available in Cloud. Available: ${cloudHarnessNames(cloudConnection.data)}.`;
   const submitDisabledReason = executionTarget === "cloud"
     ? (cloudBlockedReason
-        ?? (agyNeedsLogin ? "Connect Antigravity to send in Cloud"
+        ?? (agyState === "signed_out" ? "Connect Antigravity to send in Cloud"
+        : agyState === "checking" ? "Checking Antigravity…"
+        : agyState === "unavailable" ? "Couldn't check Antigravity"
         : claudeMissing ? "Connect Claude Code to send in Cloud"
         : cloudQueue ? (cloudQueue.regionBlocked ? "Cloud isn't available in your region yet" : "You're in the cloud queue")
         // Until the project list loads, the pick may be a removed project, even one the saved copy of the list
@@ -1968,11 +2094,6 @@ export function NewThreadComposer({
     },
     [setProviderModelReasoning, snapshotDraftBeforeOptionChange],
   );
-  const handlePermissionChange = useDraftPreservingOptionChange(
-    permissionMode,
-    setPermissionMode,
-    snapshotDraftBeforeOptionChange,
-  );
   const handleServiceTierChange = useDraftPreservingOptionChange(
     serviceTier,
     setServiceTier,
@@ -2005,6 +2126,7 @@ export function NewThreadComposer({
             promptDraft.setTextAndMentions(text, mentions);
           }}
           onSubmit={() => void handleSubmit(options.blockedReason ?? null)}
+          voiceDraftScope={draftStorage}
           isSubmitting={isSubmitting}
           disabled={disabledReason !== null}
           disabledReason={disabledReason ?? undefined}
@@ -2103,13 +2225,7 @@ export function NewThreadComposer({
               onChange: handleWorktreeChange,
               disabled: environmentLocked,
             },
-            permission: {
-              value: executionTarget === "cloud" ? "full" : permissionMode,
-              options: permissionModeOptions,
-              onChange: handlePermissionChange,
-              supported:
-                executionTarget === "local" && supportsPermissionModeSelection,
-            },
+            permission: permissionConfig,
             environmentProviderInputsSlot,
             machineProviderInputsSlot: machineProviderInputs.control,
             cloudInputsSlot:
@@ -2148,12 +2264,21 @@ export function NewThreadComposer({
                   setUserPickedEnvironment({ target: "local" });
                 }}
               />
+            ) : cloudLimit ? (
+              <CloudLimitCard
+                limit={cloudLimit}
+                onUseLocal={() => {
+                  setExecutionTarget("local");
+                  setCloudPicked(false);
+                  setUserPickedEnvironment({ target: "local" });
+                }}
+              />
             ) : <>{executionTarget === "cloud" && wantedCloudTarget === "vps" && !landsOnVps && vps.data ? (
               <p className="flex items-center gap-1.5 px-3.5 pt-1.5 text-xs text-muted-foreground">
                 <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
                 {vps.data.health ? `Your VPS is busy (${vps.data.busy}), so this thread starts in Cloud.` : "Your VPS is offline, so this thread starts in Cloud."}
               </p>
-            ) : null}{agyNeedsLogin && cloudBlockedReason === null ? <AntigravityCloudLogin composer /> : <OneClickScans fallback={<FreePlanTip />} />}</>,
+            ) : null}{agyState !== "ready" && cloudBlockedReason === null ? <AntigravityCloudLogin state={agyState} /> : <OneClickScans fallback={<FreePlanTip />} />}</>,
             banner:
               executionTarget === "cloud" ? (
                 cloudBlockedReason !== null ? (
@@ -2284,6 +2409,7 @@ export function NewThreadComposer({
       composerError,
       commandSuggestions,
       currentDraft,
+      draftStorage,
       defaultMentionLinkResolver,
       effectiveEnvironmentValue,
       environmentProviders,
@@ -2292,7 +2418,6 @@ export function NewThreadComposer({
       handleAttachFiles,
       handleEditorFocus,
       handleModelChange,
-      handlePermissionChange,
       handleProjectChange,
       handleProviderChange,
       handleReasoningChange,
@@ -2313,8 +2438,7 @@ export function NewThreadComposer({
       effectiveModelOptions,
       effectiveMoreModelOptions,
       cloudOpenCodeIssue,
-      permissionMode,
-      permissionModeOptions,
+      permissionConfig,
       projectId,
       projectOptions,
       projectSources,
@@ -2335,16 +2459,16 @@ export function NewThreadComposer({
       ultraFast,
       serviceTierSupportByProvider,
       sidebarNavigationSettled,
-      supportsPermissionModeSelection,
       supportsServiceTier,
       cloudFastSupported,
       submitDisabledReason,
-      cloudBlockedReason, agyNeedsLogin,
+      cloudBlockedReason, agyNeedsLogin, agyState,
       claudeMissing,
       codexOffered,
       switchToCodex,
       cloudQueue,
       cloudCapacity,
+      cloudLimit,
       machineServerAccessReason,
       setupRequiredProvider,
       environmentSetupRequiredReason,

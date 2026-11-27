@@ -140,7 +140,8 @@ function guardMainFrameNavigation(
 }
 
 const ROOM_BROWSER_PARTITION = "persist:bb-browser";
-const AUTOMATION_PARTITION_PREFIX = "bb-browser-automation-";
+const AUTOMATION_PARTITION_PREFIX = "room-browser-auto-";
+const LEGACY_AUTOMATION_PARTITION_PREFIX = "bb-browser-automation-";
 
 const ERR_ABORTED = -3;
 
@@ -469,8 +470,10 @@ export function createDesktopBrowserViewManager(
     const root = join(args.sessionDataPath, "Partitions");
     let stale: string[] = [];
     try {
-      stale = readdirSync(root).filter((name) =>
-        name.startsWith(AUTOMATION_PARTITION_PREFIX),
+      stale = readdirSync(root).filter(
+        (name) =>
+          name.startsWith(AUTOMATION_PARTITION_PREFIX) ||
+          name.startsWith(LEGACY_AUTOMATION_PARTITION_PREFIX),
       );
     } catch {}
     void (async () => {

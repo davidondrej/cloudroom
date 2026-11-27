@@ -7,9 +7,18 @@ import {
   type RuntimePermissionScope,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { spawnSync } from "node:child_process";
-import { accessSync, constants, readFileSync, realpathSync } from "node:fs";
+import {
+  accessSync,
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudePermissionMode } from "../interactive-contract.js";
 import type {
@@ -20,6 +29,8 @@ import type {
 
 export interface BuildSessionOptionsArgs {
   additionalWorkspaceWriteRoots?: readonly string[];
+  /** The mode the user chose; `permissionMode` is "plan" while Plan mode is on. */
+  approvedPlanPermissionMode?: ClaudePermissionMode;
   baseInstructions?: string;
   cwd: string;
   disallowedTools?: readonly string[];
@@ -126,7 +137,11 @@ export function buildWorkspaceWriteDenialMessage(): string {
 
 type PermissionSessionOptionsArgs = Pick<
   BuildSessionOptionsArgs,
-  "additionalWorkspaceWriteRoots" | "cwd" | "permissionMode" | "permissionScope"
+  | "additionalWorkspaceWriteRoots"
+  | "approvedPlanPermissionMode"
+  | "cwd"
+  | "permissionMode"
+  | "permissionScope"
 >;
 
 function usesWorkspaceSandbox(params: PermissionSessionOptionsArgs): boolean {
@@ -180,55 +195,187 @@ export function macUserTempDirs(
   }
 }
 
-// Claude reads project settings from cwd and the local file from the repo root
-// (the main checkout's root in a worktree), so check all three. null = unsure.
-function claudeProjectDirs(cwd: string): string[] | null {
-  const git = spawnSync(
-    "git",
-    [
-      "rev-parse",
-      "--path-format=absolute",
-      "--show-toplevel",
-      "--git-common-dir",
-    ],
-    { cwd, encoding: "utf8", timeout: 5_000 },
-  );
-  const [toplevel, commonDir] =
-    git.status === 0 ? git.stdout.trim().split("\n") : [];
-  if (!toplevel || !commonDir || basename(commonDir) !== ".git") return null;
-  return [cwd, toplevel, dirname(commonDir)];
+// Our --settings outrank the user's own Claude settings. Add the trustd flag
+// only when the user's settings file is absent or valid JSON and doesn't set
+// sandbox.enableWeakerNetworkIsolation: false. Any doubt leaves it off. The
+// sandbox runs only outside Full access, where Claude skips the folder's own
+// settings, so only the user's file counts.
+export function claudeSettingsAllowTrustd(env: NodeJS.ProcessEnv): boolean {
+  let text: string;
+  try {
+    text = readFileSync(join(claudeConfigDir(env), "settings.json"), "utf8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  try {
+    return JSON.parse(text)?.sandbox?.enableWeakerNetworkIsolation !== false;
+  } catch {
+    return false;
+  }
 }
 
-// Our --settings outrank the user's own Claude settings. Add the trustd flag
-// only when every settings file Claude may read is absent or valid JSON and
-// none sets sandbox.enableWeakerNetworkIsolation: false. Any doubt leaves it off.
-export function claudeSettingsAllowTrustd(
+const claudeConfigDir = (env: NodeJS.ProcessEnv): string =>
+  env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
+
+const INSTRUCTION_FILE_MAX_BYTES = 200_000;
+
+function safeRealpath(target: string): string | null {
+  try {
+    return realpathSync.native(target);
+  } catch {
+    return null;
+  }
+}
+
+function isPathWithin(parentDir: string, childPath: string): boolean {
+  const rel = relative(parentDir, childPath);
+  return (
+    rel.length > 0 &&
+    rel !== ".." &&
+    !rel.startsWith(`..${sep}`) &&
+    !isAbsolute(rel)
+  );
+}
+
+function readBoundedRegularFile(realPath: string): string | null {
+  const flags =
+    constants.O_RDONLY |
+    (constants.O_NOFOLLOW ?? 0) |
+    (constants.O_NONBLOCK ?? 0);
+  let fd: number;
+  try {
+    fd = openSync(realPath, flags);
+  } catch {
+    return null;
+  }
+  try {
+    const info = fstatSync(fd, { bigint: true });
+    if (!info.isFile() || info.size > BigInt(INSTRUCTION_FILE_MAX_BYTES)) {
+      return null;
+    }
+    // A hard link can point anywhere, including Cloudroom private data files
+    // that a path check cannot see, so instruction files must have one link.
+    if (info.nlink !== 1n) return null;
+    const buffer = Buffer.alloc(INSTRUCTION_FILE_MAX_BYTES + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        total,
+        buffer.length - total,
+        null,
+      );
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    if (total > INSTRUCTION_FILE_MAX_BYTES) return null;
+    return buffer.subarray(0, total).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Outside Full access Claude skips the folder's own settings, which also
+ * skips its CLAUDE.md. This hands Claude those instructions as plain text,
+ * found the way Claude finds them: CLAUDE.md, .claude/CLAUDE.md and
+ * CLAUDE.local.md in the folder and each parent, and AGENTS.md where a folder
+ * has no CLAUDE.md. Imports (`@file`) and .claude/rules are not followed.
+ * Each file must resolve to a regular file inside its own directory and never
+ * to a Cloudroom private data path (#2191).
+ */
+export function readProjectInstructions(
   cwd: string,
   env: NodeJS.ProcessEnv,
-): boolean {
-  const projectDirs = claudeProjectDirs(cwd);
-  if (!projectDirs) return false;
-  const userDir =
-    env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
-  return [
-    join(userDir, "settings.json"),
-    ...projectDirs.flatMap((dir) => [
-      join(dir, ".claude", "settings.json"),
-      join(dir, ".claude", "settings.local.json"),
-    ]),
-  ].every((path) => {
-    let text: string;
-    try {
-      text = readFileSync(path, "utf8");
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ENOENT";
+): string {
+  const userFiles = new Set<string>();
+  for (const candidate of [
+    join(claudeConfigDir(env), "CLAUDE.md"),
+    join(env.HOME || homedir(), ".claude", "CLAUDE.md"),
+  ]) {
+    const resolved = resolve(candidate);
+    userFiles.add(resolved);
+    const real = safeRealpath(resolved);
+    if (real !== null) userFiles.add(real);
+  }
+  const deniedPaths = new Set<string>();
+  for (const rawPath of privateDataPaths(env.ROOM_DATA_DIR)) {
+    const resolved = resolve(rawPath);
+    deniedPaths.add(resolved);
+    const real = safeRealpath(resolved);
+    if (real !== null) deniedPaths.add(real);
+  }
+  const isDeniedPath = (realPath: string): boolean => {
+    if (deniedPaths.has(realPath)) return true;
+    for (const denied of deniedPaths) {
+      if (isPathWithin(denied, realPath)) return true;
     }
-    try {
-      return JSON.parse(text)?.sandbox?.enableWeakerNetworkIsolation !== false;
-    } catch {
-      return false;
+    return false;
+  };
+  const dirs: string[] = [];
+  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
+    dirs.unshift(dir);
+    if (dirname(dir) === dir) break;
+  }
+  const found: string[] = [];
+  const shared = "project instructions, checked into the codebase";
+  for (const dir of dirs) {
+    const realDir = safeRealpath(dir);
+    if (realDir === null) continue;
+    const read = (name: string, label: string): string | null => {
+      const path = join(dir, name);
+      if (userFiles.has(path)) return null;
+      const realPath = safeRealpath(path);
+      if (
+        realPath === null ||
+        userFiles.has(realPath) ||
+        !isPathWithin(realDir, realPath) ||
+        isDeniedPath(realPath)
+      ) {
+        return null;
+      }
+      const raw = readBoundedRegularFile(realPath);
+      if (raw === null) return null;
+      const text = raw.trim();
+      return text ? `Contents of ${path} (${label}):\n\n${text}` : null;
+    };
+    const claudeMd = [
+      read("CLAUDE.md", shared),
+      read(join(".claude", "CLAUDE.md"), shared),
+    ];
+    for (const text of [
+      ...(claudeMd.some(Boolean) ? claudeMd : [read("AGENTS.md", shared)]),
+      read("CLAUDE.local.md", "user's private project instructions, not checked in"),
+    ]) {
+      if (text) found.push(text);
     }
-  });
+  }
+  return found.length === 0
+    ? ""
+    : [
+        "Codebase instructions are shown below. Be sure to adhere to these instructions. IMPORTANT: These instructions OVERRIDE any default behavior and you MUST follow them exactly as written.",
+        ...found,
+      ].join("\n\n");
+}
+
+export function withProjectInstructions(
+  systemPrompt: SdkSessionOptions["systemPrompt"],
+  instructions: string,
+): SdkSessionOptions["systemPrompt"] {
+  if (!instructions) return systemPrompt;
+  if (typeof systemPrompt === "string") {
+    return `${systemPrompt}\n\n${instructions}`;
+  }
+  if (Array.isArray(systemPrompt)) return [...systemPrompt, instructions];
+  return {
+    ...systemPrompt,
+    append: systemPrompt.append
+      ? `${systemPrompt.append}\n\n${instructions}`
+      : instructions,
+  };
 }
 
 function buildWorkspaceWriteSandbox(
@@ -250,7 +397,7 @@ function buildWorkspaceWriteSandbox(
     allowUnsandboxedCommands: true,
     // macOS only: lets curl, gh, and Go tools reach the system trust service
     // (com.apple.trustd.agent) to verify TLS certificates (#1117).
-    ...(claudeSettingsAllowTrustd(params.cwd, env)
+    ...(claudeSettingsAllowTrustd(env)
       ? { enableWeakerNetworkIsolation: true }
       : {}),
     network: { allowLocalBinding: true },
@@ -263,7 +410,11 @@ export function buildPermissionSessionOptions(
   env: NodeJS.ProcessEnv,
 ): Pick<
   SdkSessionOptions,
-  "additionalDirectories" | "permissionMode" | "sandbox"
+  | "additionalDirectories"
+  | "approvedPlanPermissionMode"
+  | "permissionMode"
+  | "projectSettings"
+  | "sandbox"
 > {
   const sandbox = buildWorkspaceWriteSandbox(params, env);
   const additionalDirectories = usesWorkspaceSandbox(params)
@@ -271,6 +422,14 @@ export function buildPermissionSessionOptions(
     : [];
   return {
     permissionMode: params.permissionMode,
+    approvedPlanPermissionMode:
+      params.approvedPlanPermissionMode ?? params.permissionMode,
+    // A folder's .claude settings can run hooks, helper commands and MCP
+    // servers as the user, outside the sandbox and before any approval. Only
+    // Full access, where the agent may run anything anyway, loads them.
+    projectSettings:
+      (params.approvedPlanPermissionMode ?? params.permissionMode) ===
+      "bypassPermissions",
     ...(sandbox ? { sandbox } : {}),
     ...(additionalDirectories.length > 0
       ? { additionalDirectories: [...additionalDirectories] }

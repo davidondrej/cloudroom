@@ -732,7 +732,7 @@ describe("ModelReasoningPicker", () => {
     fireEvent.click(screen.getByRole("button", { name: "Provider and model" }));
 
     expect(
-      screen.getByRole("dialog").getAttribute("data-bb-portaled-overlay"),
+      screen.getByRole("dialog").getAttribute("data-room-portaled-overlay"),
     ).toBe("");
   });
 

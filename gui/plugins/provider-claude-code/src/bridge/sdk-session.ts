@@ -24,6 +24,10 @@ import {
   claudeCliGuidance,
   translateMissingClaudeCliError,
 } from "./missing-cli-error.js";
+import {
+  readProjectInstructions,
+  withProjectInstructions,
+} from "./session-options.js";
 
 export interface SdkSessionOptions {
   cwd: string;
@@ -33,6 +37,10 @@ export interface SdkSessionOptions {
   effort?: Options["effort"];
   sessionId?: string;
   permissionMode?: ClaudePermissionMode;
+  /** The mode Plan mode returns to; Full access needs bypass allowed at launch. */
+  approvedPlanPermissionMode?: ClaudePermissionMode;
+  /** Load the folder's own Claude settings (.claude/settings*.json, its hooks and MCP servers). Off: the user's only. */
+  projectSettings?: boolean;
   sandbox?: Options["sandbox"];
   hooks?: Options["hooks"];
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>;
@@ -79,6 +87,7 @@ interface SdkPermissionOptions {
 
 interface BuildSdkPermissionOptionsArgs {
   permissionMode: ClaudePermissionMode | undefined;
+  approvedPlanPermissionMode: ClaudePermissionMode | undefined;
 }
 
 interface AppendBoundedTextArgs {
@@ -282,16 +291,24 @@ export function claudeSpawnOptions(args: {
   };
 }
 
-function buildSdkPermissionOptions(
+export function buildSdkPermissionOptions(
   args: BuildSdkPermissionOptionsArgs,
 ): SdkPermissionOptions {
   const permissionMode = args.permissionMode ?? "default";
-  if (permissionMode !== "bypassPermissions") {
+  // Claude refuses a later switch to bypass unless the session launched with
+  // it allowed, so Plan mode in Full access allows it from the start.
+  if (
+    permissionMode !== "bypassPermissions" &&
+    args.approvedPlanPermissionMode !== "bypassPermissions"
+  ) {
     return { permissionMode };
   }
 
   if (isCurrentProcessRoot()) {
-    return { permissionMode: "default" };
+    return {
+      permissionMode:
+        permissionMode === "bypassPermissions" ? "default" : permissionMode,
+    };
   }
 
   return {
@@ -428,6 +445,7 @@ export class SdkSession {
     this.stderrTail = "";
     const permissionOptions = buildSdkPermissionOptions({
       permissionMode: this.options.permissionMode,
+      approvedPlanPermissionMode: this.options.approvedPlanPermissionMode,
     });
     const onStderr = (data: string): void => {
       this.stderrTail = appendBoundedText({
@@ -436,10 +454,18 @@ export class SdkSession {
       });
     };
     const recordThreadId = this.options.recordThreadId;
+    const env = this.options.env ?? process.env;
+    const projectSettings = this.options.projectSettings === true;
     const sdkOptions: Options = {
       abortController: this.abortController,
       cwd: this.options.cwd,
-      systemPrompt: this.options.systemPrompt,
+      // Without the folder's settings Claude skips its CLAUDE.md too, so it gets them as text.
+      systemPrompt: projectSettings
+        ? this.options.systemPrompt
+        : withProjectInstructions(
+            this.options.systemPrompt,
+            readProjectInstructions(this.options.cwd, env),
+          ),
       ...permissionOptions,
       ...claudeSpawnOptions({
         onSpawn: (child) => {
@@ -451,9 +477,9 @@ export class SdkSession {
         threadId: () => recordThreadId?.() ?? null,
       }),
       includePartialMessages: true,
-      settingSources: ["user", "project", "local"],
+      settingSources: projectSettings ? ["user", "project", "local"] : ["user"],
       persistSession: true,
-      env: this.options.env ?? process.env,
+      env,
       stderr: onStderr,
       ...(this.options.mcpServers
         ? { mcpServers: this.options.mcpServers }

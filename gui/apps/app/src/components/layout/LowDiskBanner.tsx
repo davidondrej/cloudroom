@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { publishBannerHeight } from "./DesktopUpdateBanner";
+import { BANNER_CLASS, publishBannerHeight } from "./DesktopUpdateBanner";
 import { useWorktreeStorage } from "@/hooks/queries/system-queries";
 
 const gb = (bytes: number) =>
@@ -30,7 +30,7 @@ export function LowDiskBanner() {
     <div
       ref={publishBannerHeight}
       role="alert"
-      className="flex shrink-0 items-center gap-3 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm"
+      className={`flex shrink-0 items-center gap-3 px-4 py-2 text-sm ${BANNER_CLASS} [--banner-color:var(--destructive)]`}
     >
       <Icon name="AlertTriangle" className="size-4 shrink-0 text-destructive" />
       <span className="min-w-0 flex-1 truncate">

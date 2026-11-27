@@ -69,7 +69,7 @@ describe("TimelineSelectionMenu", () => {
     expect(
       screen
         .getByRole("button", { name: "Reply" })
-        .closest("[data-bb-portaled-overlay]"),
+        .closest("[data-room-portaled-overlay]"),
     ).not.toBeNull();
   });
 

@@ -37,6 +37,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `useComposer`
 - `useComposerView`
 - `experimental_useSidebarThreads`
+- `experimental_useSidebarThreadIds`
 - `experimental_useSidebarThreadActions`
 - `experimental_useSidebarThreadPullRequest`
 - `experimental_useSidebarThreadSplit`

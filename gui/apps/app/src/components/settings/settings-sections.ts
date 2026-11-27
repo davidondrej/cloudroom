@@ -9,6 +9,7 @@ import type { PluginSettingsEntry } from "./plugin-settings-entries";
 export const SETTINGS_NAV_SECTIONS = [
   { icon: "UserRound", id: "account", label: "Account" },
   { icon: "ChartColumn", id: "analytics", label: "Analytics" },
+  { icon: "Link", id: "referrals", label: "Referrals" },
   { icon: "Settings", id: "general", label: "General" },
   { icon: "Star", id: "defaults", label: "Defaults" },
   { icon: "Cloud", id: "cloud-environment", label: "Cloud environment" },
@@ -88,7 +89,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     icon: "UserRound",
     id: "account",
     label: "Account",
-    members: [section("account"), section("analytics")],
+    members: [section("account"), section("analytics"), section("referrals")],
   },
   {
     icon: "Settings",

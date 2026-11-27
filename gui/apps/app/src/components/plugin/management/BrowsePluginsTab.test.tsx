@@ -146,13 +146,13 @@ afterEach(() => {
 });
 
 describe("BrowsePluginsTab", () => {
-  it("groups plugins by category with Install or an on/off switch", async () => {
+  it("ranks plugins by installs, narrowed by a category pill", async () => {
     renderBrowse({
       data: {
         entries: [
-          MEMORY_ENTRY,
-          { ...SECURITY_ENTRY, installed: true },
           TASKS_ENTRY,
+          { ...SECURITY_ENTRY, installed: true },
+          MEMORY_ENTRY,
         ],
         collections: [],
       },
@@ -162,15 +162,22 @@ describe("BrowsePluginsTab", () => {
     expect(
       await screen.findByRole("switch", { name: "Disable Security" }),
     ).toBeTruthy();
-    expect(groupLabels()).toEqual([
-      "Memory & Context",
-      "Security",
-      "Tasks & Workflows",
-    ]);
+    expect(groupLabels()).toEqual(["Most popular"]);
+    const titles = () =>
+      screen
+        .getAllByRole("button", { name: /^Open .* details$/u })
+        .map((button) => button.textContent);
+    expect(titles()).toEqual(["Memory", "Security", "Tasks"]);
     expect(screen.getByRole("button", { name: "Install Memory" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Install Security" }),
     ).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Security, 1 plugin" }));
+    expect(screen.getByTestId("location-search").textContent).toBe(
+      "?category=security",
+    );
+    expect(titles()).toEqual(["Security"]);
   });
 
   it("filters by search, Installed, and Updates through the URL", async () => {
