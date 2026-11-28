@@ -62,6 +62,7 @@ import {
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
 import { SidebarNavigationRegion } from "./SidebarNavigationRegion";
+import { SidebarNeedsYou } from "./SidebarNeedsYou";
 import {
   sidebarProjectRevealRequestAtom,
   sidebarProjectRevealStateAtom,
@@ -482,6 +483,9 @@ export function AppSidebar({
         )}
         data-testid="app-sidebar-navigation-divider"
       />
+      {isCompactCustomizeModeActive ? null : (
+        <SidebarNeedsYou onNavigate={closeOnMobile} />
+      )}
       <SidebarContent
         className={cn(isCompactCustomizeModeActive && "hidden")}
         aria-hidden={isCompactCustomizeModeActive ? true : undefined}
