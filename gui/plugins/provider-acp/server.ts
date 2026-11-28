@@ -7,7 +7,10 @@ import type { AcpAgentProbe } from "@get-bb/plugin-sdk/provider-bridge/acp";
 import { z } from "zod";
 import { type AcpAgentDefinition } from "./src/agents.js";
 import { resolveConfiguredAcpAgents } from "./src/configured-agents.js";
-import { acpHostContract } from "./src/contract.js";
+import {
+  acpHostContract,
+  antigravityLoginRpcContract,
+} from "./src/contract.js";
 import { acpProviderDeclaration } from "./src/declaration.js";
 import { applyAcpAgentProbe } from "./src/probe-capabilities.js";
 import {
@@ -48,6 +51,17 @@ export default async function acpProvidersPlugin(
   // The ACP skill is only useful in ACP threads: every provider but the three with their own plugin.
   room.agents.configure(({ provider }) => ({ tools: [], skills: ["claude-code", "codex", "pi"].includes(provider.id) ? [] : ["acp-provider"] }));
   const host = room.hosts.experimental_client({ contract: acpHostContract });
+  // Settings → Agents → Accounts' Sign in with Google for Antigravity, on the machine it runs on.
+  room.rpc.register(antigravityLoginRpcContract, {
+    async antigravityAccount({ hostId, ...input }) {
+      const target = hostId ?? (await room.sdk.system.config()).primaryHostId;
+      if (!target) throw new Error("No local machine is connected.");
+      return {
+        ...(await host.call("antigravityLogin", input, { hostId: target })),
+        host_id: target,
+      };
+    },
+  });
   const settings = room.settings.define({
     customAgents: {
       type: "string",

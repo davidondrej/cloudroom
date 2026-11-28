@@ -135,6 +135,7 @@ function AccountRow({
   onRemove,
   onSignInAgain,
   signingIn,
+  onSignOut,
 }: {
   account: AccountView;
   // The limits every row of this agent shows, in order, each as it looks when the account doesn't report it.
@@ -150,6 +151,8 @@ function AccountRow({
   onSignInAgain?: () => void;
   // A sign-in is already running in this list: Sign in again waits for it.
   signingIn: boolean;
+  // Antigravity's one Google login on this computer.
+  onSignOut?: (() => void) | undefined;
 }) {
   // The page can stay open past a reset, so a limit or a bar whose reset has passed clears here.
   const now = Date.now();
@@ -367,7 +370,7 @@ function AccountRow({
       </div>
       {/* "This Mac" signed out has nothing to do: no login to name, and the computer's own login is never removed here. */}
       <DropdownMenu modal={false}>
-        <DropdownMenuTrigger asChild disabled={!renamable}>
+        <DropdownMenuTrigger asChild disabled={!renamable && !onSignOut}>
           <Button
             variant="ghost"
             size="icon"
@@ -382,9 +385,16 @@ function AccountRow({
           // Keep focus on the rename field instead of the menu button.
           onCloseAutoFocus={(event) => event.preventDefault()}
         >
-          <DropdownMenuItem onSelect={() => setEditing(true)}>
-            <Icon name="Edit" /> Rename
-          </DropdownMenuItem>
+          {renamable ? (
+            <DropdownMenuItem onSelect={() => setEditing(true)}>
+              <Icon name="Edit" /> Rename
+            </DropdownMenuItem>
+          ) : null}
+          {onSignOut ? (
+            <DropdownMenuItem onSelect={onSignOut}>
+              <Icon name="LogOut" /> Sign out
+            </DropdownMenuItem>
+          ) : null}
           {onSignInAgain ? (
             <DropdownMenuItem disabled={signingIn} onSelect={onSignInAgain}>
               <Icon name="RotateCcw" /> Sign in again
@@ -735,6 +745,162 @@ function CodeRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
   );
 }
 
+type GoogleLogin = {
+  state: "missing" | "waiting" | "connected" | "unavailable" | "error" | "expired";
+  message: string | null;
+  login_id: string | null;
+  verification_url: string | null;
+};
+type GoogleLoginInput = {
+  action: "status" | "login" | "complete" | "cancel" | "logout";
+  requestId?: string;
+  code?: string;
+};
+
+/** The ACP plugin runs Antigravity's Google sign-in (`agy acp --login`) on this computer. */
+async function antigravityAccount(input: GoogleLoginInput): Promise<GoogleLogin> {
+  const response = await fetch("/api/v1/plugins/provider-acp/rpc/antigravityAccount", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const body = (await response.json().catch(() => null)) as {
+    ok?: boolean;
+    result?: GoogleLogin;
+  } | null;
+  if (!response.ok || body?.ok !== true || !body.result)
+    throw new Error("Antigravity could not be reached.");
+  return body.result;
+}
+
+/** Antigravity's Google login on this computer: null while it's checked, or when the ACP plugin is off. */
+function useGoogleLogin(enabled: boolean) {
+  const [login, setLogin] = useState<GoogleLogin | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    antigravityAccount({ action: "status" }).then(
+      (next) => {
+        if (!cancelled) setLogin(next);
+      },
+      () => undefined,
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [enabled]);
+  const run = useCallback(async (input: GoogleLoginInput) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await antigravityAccount(input);
+      setLogin(next);
+      if (next.message && next.state !== "unavailable") setError(next.message);
+      return next;
+    } catch (cause) {
+      setError(errorText(cause));
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+  return { login, busy, error, run };
+}
+type Google = ReturnType<typeof useGoogleLogin>;
+
+/** Signs Antigravity in with Google here: Google's page opens, then its code goes in the box. */
+function GoogleSignIn({ google }: { google: Google }) {
+  const navigate = useBbNavigate();
+  const [code, setCode] = useState("");
+  const [copied, setCopied] = useState(false);
+  const { login, busy, run } = google;
+  if (!login) return null;
+  const waiting = login.state === "waiting" && login.login_id ? login : null;
+  if (!waiting)
+    return (
+      <div className="flex items-center gap-3 rounded-lg border border-dashed border-border py-2 pl-3.5 pr-2 text-sm">
+        <span className="min-w-0 flex-1 text-muted-foreground">
+          {login.state === "connected"
+            ? "Signed in. Reading your plan…"
+            : "Signed out on this computer."}
+        </span>
+        {login.state === "connected" ? null : (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={() =>
+              void run({ action: "login", requestId: crypto.randomUUID() }).then((next) => {
+                if (next?.state === "waiting" && next.verification_url)
+                  navigate.openUrl(next.verification_url);
+              })
+            }
+          >
+            {busy ? "Opening Google…" : "Sign in with Google"}
+          </Button>
+        )}
+      </div>
+    );
+  return (
+    <form
+      className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed border-border py-2 pl-3.5 pr-2 text-sm text-muted-foreground"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const entered = code.trim();
+        setCode("");
+        if (entered)
+          void run({ action: "complete", requestId: waiting.login_id!, code: entered });
+      }}
+    >
+      <span className="min-w-0 flex-1">
+        Paste the code Google shows
+        {waiting.verification_url ? (
+          <>
+            {" · "}
+            <button
+              type="button"
+              className="text-primary-text hover:underline"
+              onClick={() => {
+                void navigator.clipboard.writeText(waiting.verification_url!);
+                setCopied(true);
+              }}
+            >
+              {copied ? "Copied" : "Copy link"}
+            </button>
+          </>
+        ) : null}
+      </span>
+      <input
+        type="password"
+        maxLength={4096}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="Code from Google"
+        aria-label="Google sign-in code"
+        value={code}
+        onChange={(event) => setCode(event.target.value)}
+        className="h-7 w-44 rounded border border-border bg-transparent px-1.5 text-sm text-foreground outline-none focus:border-foreground/50"
+      />
+      <Button type="submit" size="sm" disabled={busy || !code.trim()}>
+        {busy ? "Connecting…" : "Connect"}
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon"
+        className="size-7 text-muted-foreground"
+        aria-label="Cancel sign-in"
+        disabled={busy}
+        onClick={() => void run({ action: "cancel", requestId: waiting.login_id! })}
+      >
+        <Icon name="X" />
+      </Button>
+    </form>
+  );
+}
+
 function AccountsSection({
   provider,
   name,
@@ -751,6 +917,8 @@ function AccountsSection({
   const rpc = useRpc<typeof accountsRpcContract>();
   const { providers } = useProviders();
   const [accounts, setAccounts] = useState<AccountView[] | null>(null);
+  const antigravity = provider === "acp-antigravity";
+  const google = useGoogleLogin(antigravity);
   const [adding, setAdding] = useState<{
     mac: boolean;
     id: string | null;
@@ -763,17 +931,8 @@ function AccountsSection({
   const load = useCallback(() => {
     rpc
       .call("accounts.list", { provider })
-      .then(
-        (list) => {
-          setAccounts(list);
-          onPresence?.(list.length > 0);
-        },
-        (cause: unknown) => {
-          setError(errorText(cause));
-          onPresence?.(false);
-        },
-      );
-  }, [provider, rpc, onPresence]);
+      .then(setAccounts, (cause: unknown) => setError(errorText(cause)));
+  }, [provider, rpc]);
   useEffect(load, [load]);
   useRealtime(ACCOUNTS_CHANGED, load);
   useEffect(() => {
@@ -844,8 +1003,32 @@ function AccountsSection({
   }, [loaded, provider]);
 
   const count = accounts?.filter((account) => account.id !== LOCAL).length ?? 0;
-  // Optional subscriptions (Antigravity) stay hidden unless connected on this computer.
-  if (hideWhenEmpty && (accounts === null || accounts.length === 0)) return null;
+  const listed = (accounts?.length ?? 0) > 0;
+  // This computer's own agy login shows as the Local row; added accounts are separate logins.
+  const signedInHere = accounts?.some((account) => account.id === LOCAL) ?? false;
+  // agy's usage reader keeps its answer a minute, so after a sign-in or out the row catches up within one.
+  const loginState = google.login?.state;
+  useEffect(() => {
+    if (!antigravity || (loginState !== "connected" && loginState !== "missing")) return;
+    if ((loginState === "connected") === signedInHere) return;
+    let tries = 0;
+    const check = () =>
+      void rpc.call("accounts.list", { provider, refresh: true }).then(setAccounts, () => undefined);
+    check();
+    const timer = window.setInterval(() => {
+      tries += 1;
+      if (tries > 6) window.clearInterval(timer);
+      else check();
+    }, 15_000);
+    return () => window.clearInterval(timer);
+  }, [antigravity, loginState, signedInHere, provider, rpc]);
+  // Optional subscriptions (Antigravity) stay hidden unless connected, or installed and ready to sign in, here.
+  const visible =
+    !hideWhenEmpty ||
+    listed ||
+    (antigravity && loginState !== undefined && loginState !== "unavailable");
+  useEffect(() => onPresence?.(visible), [visible, onPresence]);
+  if (!visible) return null;
   // Every account shows the same limits, so the lines match from row to row.
   // Claude leaves out 5h and 7d while they have no use, so those show 0%. Any other limit an account leaves out
   // was not read (the reply check can't read a model's limit): it shows as unknown.
@@ -955,6 +1138,16 @@ function AccountsSection({
                     : undefined
                 }
                 signingIn={adding !== null}
+                onSignOut={
+                  antigravity && account.id === LOCAL && google.login !== null
+                    ? () =>
+                        void google.run({ action: "logout" }).then((next) => {
+                          // The usage reader still remembers the login for up to a minute.
+                          if (next?.state === "missing")
+                            setAccounts((list) => list?.filter((row) => row.id !== LOCAL) ?? list);
+                        })
+                    : undefined
+                }
               />
             ))}
           </div>
@@ -992,10 +1185,12 @@ function AccountsSection({
           )}
         </div>
       ) : null}
+      {antigravity && !signedInHere ? <GoogleSignIn google={google} /> : null}
       {note ? (
         <p className="text-xs text-subtle-foreground">{note}</p>
       ) : null}
       {error ? <p className="text-xs text-destructive-text">{error}</p> : null}
+      {google.error ? <p className="text-xs text-destructive-text">{google.error}</p> : null}
     </section>
   );
 }
