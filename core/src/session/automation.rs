@@ -417,13 +417,14 @@ fn runs(words: &[&str]) -> Result<Value, &'static str> {
 
 /// `--in 30m` as `30 minutes`.
 fn delay(value: &str) -> Option<String> {
+    let value = value.trim();
     let split = value.find(|c: char| !c.is_ascii_digit())?;
     let (count, unit) = value.split_at(split);
-    let unit = match unit {
-        "s" => "seconds",
-        "m" => "minutes",
-        "h" => "hours",
-        "d" => "days",
+    let unit = match unit.trim_start().to_ascii_lowercase().as_str() {
+        "s" | "sec" | "secs" | "second" | "seconds" => "seconds",
+        "m" | "min" | "mins" | "minute" | "minutes" => "minutes",
+        "h" | "hr" | "hrs" | "hour" | "hours" => "hours",
+        "d" | "day" | "days" => "days",
         _ => return None,
     };
     (count.parse::<u32>().ok()? > 0).then(|| format!("{count} {unit}"))
@@ -721,5 +722,38 @@ mod tests {
             &create(&["--prompt", "--project=b is the flag to check"]),
             "a"
         ));
+    }
+
+    #[test]
+    fn wake_and_delay_accept_desktop_units() {
+        use super::{delay, wake};
+        for (input, expected) in [
+            ("30s", "30 seconds"),
+            ("30sec", "30 seconds"),
+            ("30secs", "30 seconds"),
+            ("1second", "1 seconds"),
+            ("10seconds", "10 seconds"),
+            ("30min", "30 minutes"),
+            ("5mins", "5 minutes"),
+            ("1minute", "1 minutes"),
+            ("10minutes", "10 minutes"),
+            ("5M", "5 minutes"),
+            ("1hr", "1 hours"),
+            ("2hrs", "2 hours"),
+            ("1hour", "1 hours"),
+            ("2hours", "2 hours"),
+            ("1day", "1 days"),
+            ("3days", "3 days"),
+        ] {
+            assert_eq!(delay(input).as_deref(), Some(expected), "delay({input})");
+            let args = wake(&[input.to_owned(), "check CI".to_owned()]).unwrap();
+            assert_eq!(args[3], "--in", "wake({input})");
+            assert_eq!(args[4], input, "wake({input})");
+        }
+        for bad in ["0m", "m", "5x", "2026-12-01T09:00"] {
+            assert_eq!(delay(bad), None, "delay({bad})");
+            let args = wake(&[bad.to_owned(), "check CI".to_owned()]).unwrap();
+            assert_eq!(args[3], "--at", "wake({bad})");
+        }
     }
 }
