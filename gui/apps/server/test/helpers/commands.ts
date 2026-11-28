@@ -13,7 +13,7 @@ import {
   hostDaemonServerWsMessageSchema,
   parseHostDaemonRpcResultForCommand,
 } from "@cloudroom/host-daemon-contract";
-import { type ThreadEvent } from "@cloudroom/domain";
+import { isWindowsHostPath, type ThreadEvent } from "@cloudroom/domain";
 import type {
   HostDaemonCommand,
   HostDaemonEventEnvelope,
@@ -117,13 +117,18 @@ export interface TestHostRpcSocket {
 }
 
 function isRuntimeWorkspaceFileCommand(command: HostDaemonRpcCommand): boolean {
-  if (command.type === "host.list_files") {
-    return command.path.endsWith(path.join(".bb", "skills"));
+  if (command.type !== "host.list_files" && command.type !== "host.read_file") {
+    return false;
   }
-  if (command.type !== "host.read_file") return false;
+  const hostPath = isWindowsHostPath(command.path) ? path.win32 : path.posix;
+  if (command.type === "host.list_files") {
+    return command.path.endsWith(hostPath.join(".bb", "skills"));
+  }
   return (
-    command.path.endsWith(path.join(".bb", "AGENTS.md")) ||
-    command.path.includes(`${path.sep}.bb${path.sep}skills${path.sep}`)
+    command.path.endsWith(hostPath.join(".bb", "AGENTS.md")) ||
+    command.path.includes(
+      `${hostPath.sep}.bb${hostPath.sep}skills${hostPath.sep}`,
+    )
   );
 }
 
