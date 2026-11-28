@@ -14,11 +14,9 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   AppBrowserRouter,
-  PluginDetailRouteNavigationProvider,
   RouteAnchor,
   RouteNavigationProvider,
   useIsRouteNavigationPending,
-  useRouteAnchorDelegate,
 } from "./app-route-anchor";
 
 const openPaneContentInSplit = vi.hoisted(() => vi.fn());
@@ -44,19 +42,6 @@ function NavigationSampler() {
   const { pathname } = useLocation();
   samples.push({ isPending, pathname });
   return null;
-}
-
-function PluginDetailLinkDelegate() {
-  const onRouteAnchorClick = useRouteAnchorDelegate();
-  return (
-    <div onClick={onRouteAnchorClick}>
-      <a href="/plugins/secrets">Open Secrets plugin</a>
-    </div>
-  );
-}
-
-function CurrentPath() {
-  return <output data-testid="current-path">{useLocation().pathname}</output>;
 }
 
 describe("RouteAnchor transition navigation", () => {
@@ -150,60 +135,4 @@ describe("AppBrowserRouter", () => {
       expect(committedAt - startedAt).toBeLessThan(2_000);
     },
   );
-});
-
-describe("useRouteAnchorDelegate plugin-detail links", () => {
-  it("opens plugin-detail links in a split when no plugin-detail navigation is provided", () => {
-    render(
-      <MemoryRouter initialEntries={["/threads/thr-current"]}>
-        <RouteNavigationProvider>
-          <CurrentPath />
-          <PluginDetailLinkDelegate />
-        </RouteNavigationProvider>
-      </MemoryRouter>,
-    );
-
-    const notPrevented = fireEvent.click(
-      screen.getByRole("link", { name: "Open Secrets plugin" }),
-    );
-
-    expect(notPrevented).toBe(false);
-    expect(openPaneContentInSplit).toHaveBeenCalledTimes(1);
-    expect(openPaneContentInSplit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        content: { kind: "plugin-detail", pluginId: "secrets" },
-        route: "/plugins/secrets",
-      }),
-    );
-    expect(screen.getByTestId("current-path").textContent).toBe(
-      "/threads/thr-current",
-    );
-  });
-
-  it("lets a plugin-detail navigation provider handle the link without opening a split", () => {
-    const onOpenPluginDetail = vi.fn(() => true);
-    render(
-      <MemoryRouter initialEntries={["/threads/thr-current"]}>
-        <RouteNavigationProvider>
-          <CurrentPath />
-          <PluginDetailRouteNavigationProvider
-            onOpenPluginDetail={onOpenPluginDetail}
-          >
-            <PluginDetailLinkDelegate />
-          </PluginDetailRouteNavigationProvider>
-        </RouteNavigationProvider>
-      </MemoryRouter>,
-    );
-
-    const notPrevented = fireEvent.click(
-      screen.getByRole("link", { name: "Open Secrets plugin" }),
-    );
-
-    expect(notPrevented).toBe(false);
-    expect(onOpenPluginDetail).toHaveBeenCalledWith("secrets");
-    expect(openPaneContentInSplit).not.toHaveBeenCalled();
-    expect(screen.getByTestId("current-path").textContent).toBe(
-      "/threads/thr-current",
-    );
-  });
 });

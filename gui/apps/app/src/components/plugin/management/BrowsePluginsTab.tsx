@@ -62,7 +62,12 @@ export const PLUGINS_LIST_BAND_CLASSES =
   "mx-auto w-full max-w-5xl px-4 md:px-5";
 export const PLUGINS_LIST_SCROLL_CONTENT_CLASS = "[&>div]:block!";
 
-type OpenPlugin = (pluginId: string, trigger: HTMLButtonElement) => void;
+/** Opens a plugin; the marketplace picks the listing when two marketplaces share an ID. */
+export type OpenPlugin = (
+  pluginId: string,
+  trigger: HTMLButtonElement,
+  marketplace?: string,
+) => void;
 
 const EMPTY_MESSAGES: Record<PluginListFilter, string> = {
   all: "No plugins match this search.",
@@ -73,12 +78,10 @@ const EMPTY_MESSAGES: Record<PluginListFilter, string> = {
 
 export function BrowsePluginsTab({
   actions,
-  selectedPluginId,
   onInstall,
   onOpenPlugin,
 }: {
   actions: ReactNode;
-  selectedPluginId: string | null;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 }) {
@@ -152,7 +155,6 @@ export function BrowsePluginsTab({
         groups={groups}
         category={category}
         onCategoryChange={(next) => setParam("category", next)}
-        selectedPluginId={selectedPluginId}
         onInstall={onInstall}
         onOpenPlugin={onOpenPlugin}
       />
@@ -161,7 +163,6 @@ export function BrowsePluginsTab({
     content = (
       <PluginRowGroups
         groups={groups}
-        selectedPluginId={selectedPluginId}
         onInstall={onInstall}
         onOpenPlugin={onOpenPlugin}
       />
@@ -235,7 +236,6 @@ export function BrowsePluginsTab({
           <BuiltInPluginsSection
             rows={builtInRows}
             forceOpen={query.trim() !== ""}
-            selectedPluginId={selectedPluginId}
             onInstall={onInstall}
             onOpenPlugin={onOpenPlugin}
           />
@@ -303,12 +303,10 @@ function PluginFilterToggle({
 
 export function PluginRowGroups({
   groups,
-  selectedPluginId,
   onInstall,
   onOpenPlugin,
 }: {
   groups: readonly PluginListGroup[];
-  selectedPluginId: string | null;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 }) {
@@ -332,7 +330,6 @@ export function PluginRowGroups({
                 <PluginRow
                   key={row.key}
                   row={row}
-                  selected={row.pluginId === selectedPluginId}
                   onInstall={onInstall}
                   onOpenPlugin={onOpenPlugin}
                   onUpdate={setUpdateTargetId}
@@ -411,14 +408,12 @@ function PopularPlugins({
   groups,
   category,
   onCategoryChange,
-  selectedPluginId,
   onInstall,
   onOpenPlugin,
 }: {
   groups: readonly PluginListGroup[];
   category: string | null;
   onCategoryChange: (category: string | null) => void;
-  selectedPluginId: string | null;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 }) {
@@ -468,7 +463,6 @@ function PopularPlugins({
             key={row.key}
             row={row}
             rank={index + 1}
-            selected={row.pluginId === selectedPluginId}
             onInstall={onInstall}
             onOpenPlugin={onOpenPlugin}
             onUpdate={setUpdateTargetId}
@@ -483,7 +477,6 @@ function PopularPlugins({
 function PluginRow({
   row,
   rank,
-  selected,
   onInstall,
   onOpenPlugin,
   onUpdate,
@@ -491,7 +484,6 @@ function PluginRow({
   row: PluginListRow;
   /** Its place in the popularity list, which also shows the install count. */
   rank?: number;
-  selected: boolean;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
   onUpdate: (pluginId: string) => void;
@@ -503,18 +495,13 @@ function PluginRow({
   const openButtonRef = useRef<HTMLButtonElement>(null);
   const open = () => {
     if (openButtonRef.current !== null) {
-      onOpenPlugin(row.pluginId, openButtonRef.current);
+      onOpenPlugin(row.pluginId, openButtonRef.current, row.entry?.marketplace);
     }
   };
   return (
     <div
       data-testid={`plugin-row-${row.pluginId}`}
-      data-selected={selected || undefined}
-      className={cn(
-        "group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-state-hover",
-        selected &&
-          "bg-state-active shadow-[inset_2px_0_0_var(--primary)] hover:bg-state-active",
-      )}
+      className="group flex min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 transition-colors hover:bg-state-hover"
       onClick={(event) => {
         if ((event.target as Element).closest("button, a, [data-row-action]")) {
           return;
@@ -536,7 +523,6 @@ function PluginRow({
           ref={openButtonRef}
           type="button"
           aria-label={`Open ${row.title} details`}
-          aria-current={selected ? "true" : undefined}
           onClick={open}
           className="block max-w-full truncate rounded-sm text-left text-sm font-medium text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         >
@@ -646,13 +632,11 @@ function PluginRowIcon({
 function BuiltInPluginsSection({
   rows,
   forceOpen,
-  selectedPluginId,
   onInstall,
   onOpenPlugin,
 }: {
   rows: readonly PluginListRow[];
   forceOpen: boolean;
-  selectedPluginId: string | null;
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
 }) {
@@ -695,7 +679,6 @@ function BuiltInPluginsSection({
             <PluginRow
               key={row.key}
               row={row}
-              selected={row.pluginId === selectedPluginId}
               onInstall={onInstall}
               onOpenPlugin={onOpenPlugin}
               onUpdate={setUpdateTargetId}

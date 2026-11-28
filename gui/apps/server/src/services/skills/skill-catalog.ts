@@ -16,6 +16,16 @@ interface ResolveSkillCatalogSourcesArgs {
   includeTreeHash?: boolean;
 }
 
+let commandCatalogRevision = 0;
+
+export function getCommandCatalogRevision(): number {
+  return commandCatalogRevision;
+}
+
+export function invalidateCommandCatalog(): void {
+  commandCatalogRevision += 1;
+}
+
 export function resolveSkillCatalog(
   deps: Pick<LoggedWorkSessionDeps, "config" | "logger" | "skillTreeRegistry">,
   args: ResolveSkillCatalogSourcesArgs = {},

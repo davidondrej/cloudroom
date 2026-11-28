@@ -96,10 +96,13 @@ import {
 import { deriveTitleFallback } from "./title-generation.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
 import {
-  projectCheckoutPathOnHost,
   providerSetupError,
   resolveSystemProviderModels,
 } from "../system/execution-options.js";
+import {
+  createCheckoutInspectionCache,
+  getCachedProjectSourceByHost,
+} from "../environments/provider-availability.js";
 import { requireConnectedPrimaryHostId } from "../hosts/primary-host.js";
 import {
   getEnvironmentProvider,
@@ -1031,7 +1034,16 @@ export async function createThreadFromRequest(
     sourceThreadId: _requestedSourceThreadId,
     ...requestRest
   } = requestInput;
+  const checkoutInspectionCache = createCheckoutInspectionCache();
+  let readyHostId: string | null = null;
   const requestedEnvironment = await resolveCreateThreadEnvironment(deps, {
+    checkoutInspectionCache,
+    readyHost: async (hostId) => {
+      // A fork to the wrong host fails before that host is woken.
+      assertForkSourceHost(deps, { childHostId: hostId, originKind, sourceThread });
+      await ensureHostSessionReadyForWork(deps, { hostId });
+      readyHostId = hostId;
+    },
     parentThread:
       forkSourceEnvironmentId !== undefined || options.forkPoint !== undefined || options.importedText !== undefined
         ? null
@@ -1071,6 +1083,7 @@ export async function createThreadFromRequest(
       ? null
       : resolveStableThreadRequestEnvironment(deps, {
           allowUnmanagedPersonalProjectReuseEnvironmentId,
+          checkoutInspectionCache,
           environment: requestedEnvironment,
           projectId: request.projectId,
         });
@@ -1087,20 +1100,23 @@ export async function createThreadFromRequest(
     originKind: request.originKind ?? null,
     sourceThread,
   });
-  if (childHostId !== null) {
+  if (childHostId !== null && childHostId !== readyHostId) {
     await ensureHostSessionReadyForWork(deps, { hostId: childHostId });
   }
-  const modelCatalogCwd =
-    resolvedEnvironment !== null
-      ? modelCatalogCwdForResolvedEnvironment(resolvedEnvironment)
-      : request.environment.type === "provider" &&
-          request.environment.machine?.type === "existing"
-        ? projectCheckoutPathOnHost(
-            deps,
-            request.projectId,
-            request.environment.machine.hostId,
-          )
-        : undefined;
+  let modelCatalogCwd: string | undefined;
+  if (resolvedEnvironment !== null) {
+    modelCatalogCwd = modelCatalogCwdForResolvedEnvironment(resolvedEnvironment);
+  } else if (
+    request.environment.type === "provider" &&
+    request.environment.machine?.type === "existing"
+  ) {
+    const source = getCachedProjectSourceByHost(deps.db, {
+      cache: checkoutInspectionCache,
+      hostId: request.environment.machine.hostId,
+      projectId: request.projectId,
+    });
+    modelCatalogCwd = source?.type === "local_path" ? source.path : undefined;
+  }
   const resolvedExecutionDefaults = await resolveCatalogExecutionDefaults(
     deps,
     {
@@ -1133,6 +1149,7 @@ export async function createThreadFromRequest(
       ...(allowUnmanagedPersonalProjectReuseEnvironmentId !== undefined
         ? { allowUnmanagedPersonalProjectReuseEnvironmentId }
         : {}),
+      checkoutInspectionCache,
       projectId: request.projectId,
       requestedEnvironment: request.environment,
     });

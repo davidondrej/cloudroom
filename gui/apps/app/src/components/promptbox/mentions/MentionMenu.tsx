@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -254,7 +255,7 @@ interface SuggestionRowProps {
   onSelectIndex: (index: number) => void;
 }
 
-const SuggestionRow = memo(function SuggestionRow({
+function SuggestionRow({
   index,
   isSelected,
   icon,
@@ -284,7 +285,7 @@ const SuggestionRow = memo(function SuggestionRow({
       </div>
     </button>
   );
-});
+}
 
 function CloseSuggestionsButton({ onDismiss }: { onDismiss: () => void }) {
   return (
@@ -456,7 +457,7 @@ function sectionWindow(
   }
   const relativeScrollPx = Math.max(0, scrollTop - sectionTopOffsetPx);
   const firstVisible = Math.floor(relativeScrollPx / ESTIMATED_ROW_HEIGHT_PX);
-  let start = Math.max(0, firstVisible - WINDOW_OVERSCAN_ROWS);
+  let start = Math.min(count, Math.max(0, firstVisible - WINDOW_OVERSCAN_ROWS));
   let end = Math.min(
     count,
     firstVisible + VIEWPORT_ROWS + WINDOW_OVERSCAN_ROWS,
@@ -614,13 +615,14 @@ export const MentionMenu = memo(function MentionMenu({
 
   const isWindowed =
     state.trigger === "command" && items.length > WINDOW_THRESHOLD;
+  const resultsLength = items.length;
   const [scrollTop, setScrollTop] = useState(0);
   const handleScroll = useCallback(
     (event: UIEvent<HTMLDivElement>) => {
       if (!isWindowed) return;
       const nextTop = event.currentTarget.scrollTop;
       setScrollTop((current) =>
-        Math.abs(current - nextTop) >= ESTIMATED_ROW_HEIGHT_PX
+        nextTop === 0 || Math.abs(current - nextTop) >= ESTIMATED_ROW_HEIGHT_PX
           ? nextTop
           : current,
       );
@@ -628,12 +630,18 @@ export const MentionMenu = memo(function MentionMenu({
     [isWindowed],
   );
 
+  useLayoutEffect(() => {
+    const nextTop = isWindowed
+      ? (scrollContainerRef.current?.scrollTop ?? 0)
+      : 0;
+    setScrollTop((current) => (current === nextTop ? current : nextTop));
+  }, [isWindowed, resultsLength]);
+
   const handleSelectIndex = useCallback((index: number) => {
     const item = itemsRef.current[index];
     if (item) onApplyRef.current(item);
   }, []);
 
-  const resultsLength = items.length;
   useEffect(() => {
     if (resultsLength === 0) return;
     const container = scrollContainerRef.current;

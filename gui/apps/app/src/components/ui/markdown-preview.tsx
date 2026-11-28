@@ -2168,13 +2168,14 @@ function MarkdownPreviewComponent({
 
   let markdownPieces: ReturnType<typeof resolveMarkdownPieces> | null = null;
   if (usesIncrementalBlocks) {
-    if (
-      parseCacheKey !== null &&
+    const isFreshMount =
       markdownPieceCache.entries.length === 0 &&
-      markdownPieceCache.resolved === null
-    ) {
+      markdownPieceCache.resolved === null;
+    let usedCrossMountCache = false;
+    if (parseCacheKey !== null && isFreshMount) {
       const cachedPiece = readParsedMarkdownCache(parseCacheKey)?.piece;
       if (cachedPiece !== undefined) {
+        usedCrossMountCache = true;
         seedMarkdownPieceCache(
           markdownPieceCache,
           markdownPieceRenderConfig,
@@ -2189,10 +2190,11 @@ function MarkdownPreviewComponent({
       body,
     );
     if (
+      isFreshMount &&
+      !usedCrossMountCache &&
       parseCacheKey !== null &&
       markdownPieceCache.entries.length === 1 &&
-      markdownPieceCache.entries[0]?.source === body &&
-      readParsedMarkdownCache(parseCacheKey)?.piece === undefined
+      markdownPieceCache.entries[0]?.source === body
     ) {
       writeParsedMarkdownCache(parseCacheKey, {
         chars: body.length,

@@ -3,14 +3,17 @@ import {
   makeThreadResponse,
 } from "@get-bb/plugin-sdk/testing";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import { assetFor } from "./driver.js";
+import { DRIVER, assetFor } from "./driver.js";
 import {
+  createHostEntry,
   driverEnv,
   install,
   pruneOldVersions,
@@ -21,11 +24,47 @@ import {
 import computerUsePlugin, { decideGate, takesForeground } from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
+const proc = vi.hoisted(() => ({
+  execFile: null as
+    | ((
+        file: string,
+        args: readonly string[],
+        options?: { env?: NodeJS.ProcessEnv },
+      ) => Promise<{ stdout: string; stderr: string }>)
+    | null,
+  spawn: null as ((file: string, args: readonly string[]) => unknown) | null,
+}));
 vi.mock("node:fs", async (actual) => {
   const fs = await actual<typeof import("node:fs")>();
   const enospc = Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC", syscall: "write" });
   const full = () => new Writable({ write: (_chunk, _encoding, done) => done(enospc) });
   return { ...fs, createWriteStream: ((...args) => (disk.full ? full() : fs.createWriteStream(...args))) as typeof fs.createWriteStream };
+});
+vi.mock("node:child_process", async (actual) => {
+  const cp = await actual<typeof import("node:child_process")>();
+  const { promisify } = await import("node:util");
+  const execFile = Object.assign(
+    ((...args: Parameters<typeof cp.execFile>) =>
+      cp.execFile(...args)) as typeof cp.execFile,
+    {
+      [promisify.custom]: (
+        file: string,
+        args: readonly string[] = [],
+        options?: { env?: NodeJS.ProcessEnv },
+      ) =>
+        proc.execFile
+          ? proc.execFile(file, args, options)
+          : promisify(cp.execFile)(file, args, options as never),
+    },
+  );
+  return {
+    ...cp,
+    execFile,
+    spawn: ((file: string, args: readonly string[], options?: unknown) =>
+      proc.spawn
+        ? proc.spawn(file, args)
+        : cp.spawn(file, args, options as never)) as typeof cp.spawn,
+  };
 });
 
 describe("decideGate", () => {
@@ -714,6 +753,126 @@ it("pruneOldVersions removes sibling driver versions and keeps the active one an
     await pruneOldVersions(join(root, "0.55.0"));
     expect((await readdir(root)).sort()).toEqual([".install-abc", "0.55.0"]);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// #2745: ordinary Mac launch_app must confirm user-home prelaunch instead of falling back to the driver's private HOME.
+it("Mac launch_app requires confirmed user-home prelaunch and preserves bypass flags", async () => {
+  const root = await mkdtemp(join(tmpdir(), "cua-prelaunch-"));
+  const driverDir = join(root, "cua-driver", DRIVER.version);
+  await mkdir(driverDir, { recursive: true });
+  await writeFile(join(driverDir, "cua-driver"), "#!/bin/sh\n");
+  const sha = createHash("sha256").update("#!/bin/sh\n").digest("hex");
+  await writeFile(
+    join(driverDir, "verified.json"),
+    JSON.stringify({ sha256: sha }),
+  );
+  const privateHome = join(root, "home");
+  const launcherHomes: Array<string | undefined> = [];
+  const driverHomes: Array<string | undefined> = [];
+  let launcherReply: () => Promise<string> = async () => "launched";
+  const servers: ReturnType<typeof createServer>[] = [];
+  const origPlatform = process.platform;
+  Object.defineProperty(process, "platform", {
+    value: "darwin",
+    configurable: true,
+  });
+  proc.execFile = async (file, _args, options) => {
+    if (file === "/usr/bin/osascript") {
+      launcherHomes.push(options?.env?.HOME);
+      return { stdout: `${await launcherReply()}\n`, stderr: "" };
+    }
+    if (file.endsWith("/cua-driver")) {
+      driverHomes.push(options?.env?.HOME);
+      return { stdout: JSON.stringify({ pid: 42 }), stderr: "" };
+    }
+    return { stdout: "", stderr: "" };
+  };
+  proc.spawn = (_file, args) => {
+    const sock = args[args.indexOf("--socket") + 1];
+    if (sock) {
+      const server = createServer((s) => s.end());
+      server.listen(sock);
+      servers.push(server);
+    }
+    const fakeChild = Object.assign(new EventEmitter(), {
+      exitCode: null as number | null,
+      signalCode: null as string | null,
+      stdin: new EventEmitter(),
+      kill() {
+        fakeChild.exitCode = 0;
+        fakeChild.emit("exit", 0);
+      },
+    });
+    return fakeChild;
+  };
+  const entry = createHostEntry();
+  const ctx = {
+    signal: new AbortController().signal,
+    lifecycle: { signal: new AbortController().signal },
+    experimental_paths: { dataDir: root, tempDir: root },
+    experimental_retainWorker: () => ({ dispose: async () => undefined }),
+  } as Parameters<typeof entry.handlers.call>[1];
+  const launch = async (args: Record<string, unknown>) => {
+    launcherHomes.length = 0;
+    driverHomes.length = 0;
+    return entry.handlers.call(
+      { tool: "launch_app", args, session: "s1", shotsKey: "thr_1" },
+      ctx,
+    );
+  };
+  try {
+    // Already-running and freshly prelaunched apps use the user's HOME, then hand off to the driver's private HOME.
+    for (const status of ["running", "launched"]) {
+      launcherReply = async () => status;
+      const res = await launch({ bundle_id: "com.apple.TextEdit" });
+      expect(res.exitCode, status).toBe(0);
+      expect(launcherHomes, status).toEqual([homedir()]);
+      expect(driverHomes, status).toEqual([privateHome]);
+    }
+    // Failed, timed-out, exited, or unlocated prelaunches must error and never call the driver.
+    const failures: Array<[string, () => Promise<string>]> = [
+      ["timeout", async () => "timeout"],
+      ["exited", async () => "exited"],
+      ["not_found", async () => "not_found"],
+      [
+        "throw",
+        async () => {
+          throw Object.assign(new Error("boom"), { stderr: "jxa failed" });
+        },
+      ],
+    ];
+    for (const [label, reply] of failures) {
+      launcherReply = reply;
+      const res = await launch({ bundle_id: "com.example.App" });
+      expect(res.exitCode, label).toBe(1);
+      expect(JSON.parse(res.stdout).error, label).toBe("launch_failed");
+      expect(driverHomes, label).toEqual([]);
+    }
+    // Explicit inspector, new-instance, and extra-argument launches bypass prelaunch and keep the driver's private HOME.
+    launcherReply = async () => {
+      throw new Error("bypass should not call osascript");
+    };
+    for (const args of [
+      { bundle_id: "com.example.App", webkit_inspector_port: 9222 },
+      { bundle_id: "com.example.App", creates_new_application_instance: true },
+      { bundle_id: "com.example.App", additional_arguments: ["--incognito"] },
+    ]) {
+      const res = await launch(args);
+      expect(res.exitCode).toBe(0);
+      expect(launcherHomes).toEqual([]);
+      expect(driverHomes).toEqual([privateHome]);
+    }
+  } finally {
+    await entry.dispose?.();
+    for (const server of servers) server.close();
+    proc.execFile = null;
+    proc.spawn = null;
+    Object.defineProperty(process, "platform", {
+      value: origPlatform,
+      configurable: true,
+    });
     await rm(root, { recursive: true, force: true });
   }
 });

@@ -451,6 +451,7 @@ export const sidebarBootstrapResponseSchema = z.object({
   sections: z.array(threadSectionSchema),
   projects: z.array(projectWithThreadsResponseSchema),
   personalProject: projectWithThreadsResponseSchema,
+  mentionableHiddenThreads: z.array(threadListEntrySchema).optional(),
 });
 export type SidebarBootstrapResponse = z.infer<
   typeof sidebarBootstrapResponseSchema

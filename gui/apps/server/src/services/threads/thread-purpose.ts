@@ -9,13 +9,15 @@ import {
 import {
   events,
   getEnvironment,
+  getLatestThreadOutputEventRow,
   getThread,
+  hasRootStoredTurnStarted,
   setThreadPurpose,
   type DbConnection,
 } from "@cloudroom/db";
 import type { ThreadPurpose } from "@cloudroom/domain";
 import { Type } from "@earendil-works/pi-ai";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, lte, sql } from "drizzle-orm";
 import type { CommandResultSideEffectsDeps } from "../../internal/command-result-side-effects.js";
 import {
   INFERENCE_POLICY,
@@ -30,7 +32,7 @@ import {
 } from "../hosts/primary-host.js";
 import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { readUiPreferences } from "../system/ui-preferences.js";
-import { getLastThreadOutput } from "./thread-data.js";
+import { threadOutputText } from "./thread-data.js";
 import { cloudTurnsElsewhere } from "../plugins/plugin-thread-events.js";
 
 const MAX_MESSAGE_LENGTH = 600;
@@ -42,6 +44,9 @@ const exec = promisify(execFile);
 const MAX_PURPOSE_LENGTH = 110;
 const LOGIN_CHECK_MS = 5 * 60_000;
 const PERCENT_STAGES = [10, 25, 50, 75, 90, 100];
+const EARLIER_REPLIES = 3;
+const MAX_TURNS_SCANNED = 20;
+const BLANK = /^[\s\u0085]*$/u;
 
 const purposeSchema = Type.Object({
   goal: Type.String(),
@@ -176,6 +181,59 @@ function isDue(
     thread.status === "idle" &&
     lastTurnSequence(db, threadId) > thread.purpose.sourceSeq
   );
+}
+
+/** Non-blank root-turn replies that ended after the previous note, up to this one, oldest first, without the latest
+ *  reply: a refresh that failed, or ran while another turn ended, must not lose a reply to a later quiet one (#2437). */
+function earlierReplies(
+  db: DbConnection,
+  threadId: string,
+  range: { after: number; upTo: number; latestId: string | undefined },
+): string[] {
+  const turns = db
+    .select({ turnId: events.turnId })
+    .from(events)
+    .where(
+      and(
+        eq(events.threadId, threadId),
+        eq(events.type, "turn/completed"),
+        gt(events.sequence, range.after),
+        lte(events.sequence, range.upTo),
+      ),
+    )
+    .orderBy(desc(events.sequence))
+    .limit(MAX_TURNS_SCANNED)
+    .all();
+  const replies: string[] = [];
+  for (const { turnId } of turns) {
+    if (replies.length === EARLIER_REPLIES) break;
+    if (!turnId || !hasRootStoredTurnStarted(db, { threadId, turnId }))
+      continue;
+    // The turn's own last main-thread reply: a newer nested item can't hide it, and blank replies don't count.
+    const row = db
+      .select({
+        id: events.id,
+        text: sql<string>`json_extract(${events.data}, '$.item.text')`,
+      })
+      .from(events)
+      .where(
+        and(
+          eq(events.threadId, threadId),
+          eq(events.turnId, turnId),
+          eq(events.type, "item/completed"),
+          eq(events.itemKind, "agentMessage"),
+          isNull(events.parentToolCallId),
+          sql`TRIM(COALESCE(json_extract(${events.data}, '$.item.text'), ''), ' ' || char(9, 10, 13)) <> ''`,
+        ),
+      )
+      .orderBy(desc(events.sequence))
+      .limit(5)
+      .all()
+      // Unicode blanks (a lone NBSP or U+0085) slip past SQLite's TRIM.
+      .find((reply) => !BLANK.test(reply.text));
+    if (row && row.id !== range.latestId) replies.unshift(row.text);
+  }
+  return replies;
 }
 
 function lastTurnSequence(db: DbConnection, threadId: string): number {
@@ -343,16 +401,27 @@ async function writePurpose(
     (firstMessage ? clip(firstMessage, MAX_MESSAGE_LENGTH) : undefined) ??
     thread.titleFallback;
   if (!first) return;
-  const agentReply =
-    sourceSeq > 0 ? getLastThreadOutput(deps.db, threadId) : null;
+  const latestRow =
+    sourceSeq > 0 ? getLatestThreadOutputEventRow(deps.db, { threadId }) : null;
+  const agentReply = threadOutputText(latestRow);
   const models = await purposeModels(
     deps,
     preferences["threadPurpose.model"].value,
   );
   if (!models) return;
   const previous = thread.purpose;
+  const earlier = previous
+    ? earlierReplies(deps.db, threadId, {
+        after: previous.sourceSeq,
+        upTo: sourceSeq,
+        latestId: latestRow?.id,
+      })
+    : [];
   const prompt = renderTemplate("generateThreadPurpose", {
     agentReply: agentReply ? clipEnds(agentReply, MAX_REPLY_LENGTH) : "",
+    earlierReplies: earlier
+      .map((reply) => `- ${clipEnds(reply, MAX_MESSAGE_LENGTH)}`)
+      .join("\n"),
     firstMessage: first,
     gitFacts: sourceSeq > 0 ? await gitFacts(deps, thread.environmentId) : "",
     previousPurpose: previous ? previousNote(previous) : "",

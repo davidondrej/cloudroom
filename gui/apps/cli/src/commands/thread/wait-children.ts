@@ -1,4 +1,5 @@
-import type { ThreadListEntry } from "@cloudroom/domain";
+import { type ThreadListEntry, withoutHtmlPages } from "@cloudroom/domain";
+import { sliceUtf16HeadAndTail } from "@cloudroom/domain/utf16";
 import { retryConnectionReset } from "@cloudroom/sdk";
 import { CliExitError } from "../../action.js";
 import type { createCliRoomSdk } from "../../client.js";
@@ -16,8 +17,34 @@ type ChildState = "done" | "failed" | "needs input" | "queued" | "running";
 /** States where the child does nothing more until someone acts. */
 const SETTLED_STATES: readonly ChildState[] = ["done", "failed", "needs input"];
 const MAX_TITLE_WIDTH = 60;
+/** `thread show` keeps a retry's full error, often a provider's HTML page (#2601). */
+const MAX_WARNING_WIDTH = 300;
 /** A queued message that is paused or scheduled for later never starts by itself, so a queued child gets this long. */
 const QUEUED_GRACE_MS = 5_000;
+
+/** The silence warning's closing advice (agent-runtime's `warnSilentTurns`, #977). */
+const SILENCE_ADVICE =
+  /\)?\. It may be stalled\. Stop the thread, then send the message again\.\s*$/u;
+
+/**
+ * A silent or retrying thread's warning in one short line without HTML pages.
+ * The advice is set aside first, so a clipped page that runs to the end can't
+ * take it, and a long line loses its middle instead (#2601).
+ */
+export function shortWarning(warning: string): string {
+  const advice = SILENCE_ADVICE.exec(warning)?.[0] ?? "";
+  const line =
+    `${withoutHtmlPages(warning.slice(0, warning.length - advice.length))}${advice}`
+      .replace(/\s+/gu, " ")
+      .trim();
+  if (line.length <= MAX_WARNING_WIDTH) return line;
+  const { head, tail } = sliceUtf16HeadAndTail(
+    line,
+    MAX_WARNING_WIDTH / 2 - 1,
+    MAX_WARNING_WIDTH / 2,
+  );
+  return `${head}…${tail}`;
+}
 
 function childState(child: ThreadListEntry): ChildState {
   if (child.hasPendingInteraction) return "needs input";
@@ -99,7 +126,7 @@ export async function waitForChildren(
             );
           if (warning) {
             console.log(
-              `             ${warning} (room-cli thread stop ${child.id})`,
+              `             ${shortWarning(warning)} (room-cli thread stop ${child.id})`,
             );
           }
           continue;

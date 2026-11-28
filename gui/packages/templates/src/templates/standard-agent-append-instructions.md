@@ -40,6 +40,8 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 {{#if cloud}}
 - Cloud threads: extra repos are in `/repos` (may still be cloning).
 - Cloud threads: new threads can't see this sandbox's files.
+- Cloud threads: read another of the user's threads with `room-cli thread log ID`.
+- Find one by title with `room-cli thread search WORDS`.
 - Commit work worth keeping. Save lasting skills in the repo or with `room-cli mac push`.
 {{#if vps}}
 - VPS threads: if `/etc/cloudroom/vps` exists, this Cloud thread runs on the user's own VPS, next to their other agents. Before heavy work (big builds, full test suites, several subagents), check the load with `uptime` and `free -m`. If the server is busy or other agents are working in the same repo, suggest the user run it as a normal Cloud thread instead.

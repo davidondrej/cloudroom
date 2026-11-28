@@ -6,7 +6,6 @@ import {
   type ThreadExecutionOverride,
 } from "@cloudroom/db";
 import {
-  reconcileReasoningLevel,
   threadScope,
   THREAD_MODEL_SELECTION_OPERATION,
   type AvailableModel,
@@ -24,7 +23,10 @@ import {
   resolveSystemExecutionOptionsForValidation,
 } from "../system/execution-options.js";
 import { appendThreadEventInTransaction, getLastExecutionOptions } from "./thread-events.js";
-import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
+import {
+  reconcileInheritedReasoningLevel,
+  resolveSupportedReasoningLevelsForModel,
+} from "./thread-reasoning-policy.js";
 
 interface ThreadExecutionOverridePatch {
   model?: string | null;
@@ -84,11 +86,14 @@ export function resolveThreadExecutionOverrideUpdate(
   const effectiveModelEntry = effectiveModel
     ? models.find((candidate) => candidate.model === effectiveModel)
     : undefined;
-  const supportedReasoning: readonly ReasoningLevel[] = effectiveModelEntry
-    ? effectiveModelEntry.supportedReasoningEfforts.map(
-        (effort) => effort.reasoningEffort,
-      )
-    : getSupportedReasoningLevelsForProvider(registry, providerId);
+  // Explicit and inherited effort read the same levels, so an agent-managed placeholder falls back to the provider's (#2692).
+  const supportedReasoning: readonly ReasoningLevel[] =
+    effectiveModelEntry?.supportedReasoningEfforts.length === 0
+      ? []
+      : resolveSupportedReasoningLevelsForModel(registry, {
+          model: effectiveModelEntry,
+          providerId,
+        });
 
   let nextReasoning = existing.reasoningLevelOverride;
   if ("reasoningLevel" in patch) {
@@ -111,12 +116,12 @@ export function resolveThreadExecutionOverrideUpdate(
       }
       nextReasoning = patch.reasoningLevel;
     }
-  } else if (
-    nextReasoning !== null &&
-    supportedReasoning.length > 0 &&
-    !supportedReasoning.includes(nextReasoning)
-  ) {
-    nextReasoning = reconcileReasoningLevel(nextReasoning, supportedReasoning);
+  } else if (nextReasoning !== null) {
+    nextReasoning = reconcileInheritedReasoningLevel(registry, {
+      level: nextReasoning,
+      model: effectiveModelEntry,
+      providerId,
+    });
   }
 
   return { modelOverride: nextModel, reasoningLevelOverride: nextReasoning };
@@ -167,24 +172,47 @@ export async function applyThreadExecutionOverride(
   if (args.recordModelSelection) deps.hub.notifyThread(thread.id, ["events-appended"], { projectId: thread.projectId });
 }
 
-/** A harness switch (ADR 0211) checks the model against the new harness's catalog and starts its overrides fresh. */
+/**
+ * A harness switch (ADR 0211) checks the model against the new harness's catalog and reconciles inherited effort when omitted.
+ * It fails now, before the old agent stops; the returned function takes the last turn's effort, read after the stop.
+ */
 export async function resolveHarnessSwitchOverride(
   deps: LoggedWorkSessionDeps,
-  thread: Thread,
-  target: { providerId: string; model: string; reasoningLevel: ReasoningLevel | null },
-): Promise<ThreadExecutionOverride> {
-  return resolveThreadExecutionOverrideUpdate(deps.providerRegistry, {
-    existing: { modelOverride: null, reasoningLevelOverride: null },
-    patch: { model: target.model, reasoningLevel: target.reasoningLevel },
-    models: await loadThreadProviderModels(
-      deps,
-      { ...thread, providerId: target.providerId },
-      target.model,
-      true,
-    ),
-    providerId: target.providerId,
-    fallbackModel: null,
-  });
+  thread: Thread & Pick<ThreadExecutionOverride, "reasoningLevelOverride">,
+  target: {
+    providerId: string;
+    model: string;
+    reasoningLevel?: ReasoningLevel | null;
+  },
+): Promise<
+  (lastReasoningLevel: ReasoningLevel | null) => ThreadExecutionOverride
+> {
+  const models = await loadThreadProviderModels(
+    deps,
+    { ...thread, providerId: target.providerId },
+    target.model,
+    true,
+  );
+  const resolve = (lastReasoningLevel: ReasoningLevel | null) =>
+    resolveThreadExecutionOverrideUpdate(deps.providerRegistry, {
+      existing: {
+        modelOverride: null,
+        reasoningLevelOverride:
+          target.reasoningLevel === undefined
+            ? (thread.reasoningLevelOverride ?? lastReasoningLevel)
+            : null,
+      },
+      patch:
+        target.reasoningLevel === undefined
+          ? { model: target.model }
+          : { model: target.model, reasoningLevel: target.reasoningLevel },
+      models,
+      providerId: target.providerId,
+      fallbackModel: null,
+    });
+  // Only the model and an explicit effort can fail; inherited effort is reconciled.
+  resolve(null);
+  return resolve;
 }
 
 export async function recoverThreadModelOverride(

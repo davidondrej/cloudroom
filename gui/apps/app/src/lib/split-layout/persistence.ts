@@ -22,12 +22,6 @@ const paneContentSchema = z.discriminatedUnion("kind", [
       subPath: z.string(),
     })
     .strict(),
-  z
-    .object({
-      kind: z.literal("plugin-detail"),
-      pluginId: z.string().min(1),
-    })
-    .strict(),
 ]);
 
 const paneNodeSchema: z.ZodType<PaneNode> = z

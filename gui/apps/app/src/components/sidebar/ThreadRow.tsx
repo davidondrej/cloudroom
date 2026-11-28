@@ -39,7 +39,7 @@ import { useInlineThreadTitle } from "@/components/thread/InlineThreadTitle";
 import {
   preventPurposeOpenOnFocus,
   SidebarThreadPurposeHoverCard,
-  threadPurposeShowInSidebarAtom,
+  useSidebarPurposeCard,
 } from "@/components/thread/ThreadPurposeHoverCard";
 import {
   COARSE_POINTER_COMPACT_ROW_HEIGHT_CLASS,
@@ -634,9 +634,7 @@ function ThreadRowComponent({
   const prefetchOnHover = usePrefetchThreadOnHover(thread.id);
   const pluginThreadRowStatus = usePluginThreadRowStatus(thread.id);
   const harnessIconMode = useAtomValue(harnessIconModeAtom);
-  const sidebarPurpose = useAtomValue(threadPurposeShowInSidebarAtom)
-    ? (thread.purpose ?? null)
-    : null;
+  const sidebarCard = useSidebarPurposeCard(thread.id, thread.purpose ?? null);
   const showActive = isActive;
   const hasPendingInteraction = thread.hasPendingInteraction;
   const threadRuntimeBusy = isRuntimeBusyThread(thread);
@@ -916,7 +914,6 @@ function ThreadRowComponent({
         data-sidebar-thread-child={thread.parentThreadId ? "" : undefined}
         onPointerEnter={prefetchOnHover.onPointerEnter}
         onPointerLeave={prefetchOnHover.onPointerLeave}
-        onPointerDown={prefetchOnHover.onPointerDown}
         onClick={(event) => {
           if (isEditing) {
             event.preventDefault();
@@ -972,7 +969,7 @@ function ThreadRowComponent({
               "bb-thread-title",
               waiting && "flex-col font-semibold text-foreground",
             )}
-            title={sidebarPurpose ? undefined : labelTitle}
+            title={sidebarCard ? undefined : labelTitle}
             onDoubleClick={startTitleEditing}
           >
             {waiting ? (
@@ -1136,7 +1133,7 @@ function ThreadRowComponent({
 
   return (
     <SidebarThreadPurposeHoverCard
-      purpose={isEditing ? null : sidebarPurpose}
+      card={isEditing ? null : sidebarCard}
       threadId={thread.id}
     >
       <ThreadActionsContextMenu

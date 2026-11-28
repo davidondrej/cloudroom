@@ -82,6 +82,16 @@ export interface ProviderModelCatalogStore {
     deps: WorkSessionDeps,
     args: { hostId: string; provider: ProviderInfo; cwd: string | null },
   ): AvailableModel[];
+  /** Synchronously looks up one known model from the in-memory catalog (including selected-only and ephemeral hosts), loading SQLite once on cold miss. */
+  findKnownModel(
+    deps: Pick<WorkSessionDeps, "db">,
+    args: {
+      hostId: string;
+      provider: ProviderInfo;
+      cwd: string | null;
+      model: string;
+    },
+  ): AvailableModel | undefined;
   markProviderStale(hostId: string, providerId: string): void;
   markAllStale(): void;
   forgetHost(deps: WorkSessionDeps, hostId: string): void;
@@ -297,7 +307,7 @@ export function createProviderModelCatalogStore(options: {
   const offeredRefusedModels = new WeakMap<CatalogGood, Set<string>>();
 
   function loadStoredGood(
-    deps: WorkSessionDeps,
+    deps: Pick<WorkSessionDeps, "db">,
     key: ProviderModelCatalogRowKey,
   ): CatalogGood | null {
     const row = getStoredProviderModelCatalog(deps.db, key);
@@ -319,8 +329,19 @@ export function createProviderModelCatalogStore(options: {
     };
   }
 
+  function findInGood(
+    good: CatalogGood | null,
+    modelId: string,
+  ): AvailableModel | undefined {
+    if (good === null) return undefined;
+    return (
+      good.models.find((candidate) => candidate.model === modelId) ??
+      good.selectedOnlyModels.find((candidate) => candidate.model === modelId)
+    );
+  }
+
   function loadEntry(
-    deps: WorkSessionDeps,
+    deps: Pick<WorkSessionDeps, "db">,
     key: ProviderModelCatalogRowKey,
   ): CatalogEntry {
     const mapKey = JSON.stringify([key.hostId, key.providerId, key.scopeKey]);
@@ -686,6 +707,11 @@ export function createProviderModelCatalogStore(options: {
 
     lastListedModels(deps, args) {
       return loadEntry(deps, catalogKey(args)).good?.models ?? [];
+    },
+
+    findKnownModel(deps, args) {
+      // A cold worktree catalog answers nothing, so effort keeps the provider's levels until it loads (#2692).
+      return findInGood(loadEntry(deps, catalogKey(args)).good, args.model);
     },
 
     markProviderStale(hostId, providerId) {

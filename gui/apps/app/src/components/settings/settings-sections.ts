@@ -14,6 +14,7 @@ export const SETTINGS_NAV_SECTIONS = [
   { icon: "Star", id: "defaults", label: "Defaults" },
   { icon: "Cloud", id: "cloud-environment", label: "Cloud environment" },
   { icon: "Clock", id: "auto-delete", label: "Auto-delete" },
+  { icon: "MessageSquare", id: "thread-access", label: "Thread access" },
   { icon: "Bot", id: "providers", label: "Harness" },
   { icon: "Download", id: "import", label: "Import chats" },
   { icon: "FolderOpen", id: "export", label: "Export chats" },
@@ -135,7 +136,7 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
     icon: "Cloud",
     id: "cloud",
     label: "Cloud",
-    members: [section("cloud-environment"), plugin("repo-sync", "RepoSync"), section("auto-delete")],
+    members: [section("cloud-environment"), plugin("repo-sync", "RepoSync"), section("auto-delete"), section("thread-access")],
   },
   {
     icon: "Laptop",
@@ -182,6 +183,21 @@ export const SETTINGS_NAV_GROUPS: readonly SettingsNavGroup[] = [
   },
 ];
 
+/** The Settings group a plugin has its own tab in, like General for Notifications. */
+export function pluginSettingsGroup(
+  pluginId: string,
+): SettingsNavGroup | undefined {
+  return SETTINGS_NAV_GROUPS.find((group) =>
+    group.members.some(
+      (member) => member.kind === "plugin" && member.id === pluginId,
+    ),
+  );
+}
+
+export function pluginHasSettingsTab(pluginId: string): boolean {
+  return pluginSettingsGroup(pluginId) !== undefined;
+}
+
 export function findSettingsNavGroup(
   activeSection: SettingsSectionId | null,
   activePluginId: string | null,
@@ -193,9 +209,8 @@ export function findSettingsNavGroup(
         : member.kind === "section" && member.id === activeSection,
     ),
   );
-  const fallbackId = activePluginId !== null ? "plugins" : "general";
   return (
-    group ?? SETTINGS_NAV_GROUPS.find((candidate) => candidate.id === fallbackId)!
+    group ?? SETTINGS_NAV_GROUPS.find((candidate) => candidate.id === "general")!
   );
 }
 
@@ -203,7 +218,7 @@ export function getSettingsGroupLinks(
   group: SettingsNavGroup,
   state: SettingsNavLinkState,
 ): SettingsNavLink[] {
-  const links = group.members.flatMap((member): SettingsNavLink[] => {
+  return group.members.flatMap((member): SettingsNavLink[] => {
     if (member.kind === "section") {
       const available = state.sections.find((entry) => entry.id === member.id);
       return available
@@ -219,7 +234,9 @@ export function getSettingsGroupLinks(
           ]
         : [];
     }
-    return state.pluginEntries.some((entry) => entry.id === member.id)
+    // A plugin that is off has no tab, except while its own page is open.
+    return state.activePluginId === member.id ||
+      state.pluginEntries.some((entry) => entry.id === member.id)
       ? [
           {
             active: state.activePluginId === member.id,
@@ -230,19 +247,4 @@ export function getSettingsGroupLinks(
         ]
       : [];
   });
-  const activePluginId = state.activePluginId;
-  if (
-    group.id === "plugins" &&
-    activePluginId !== null &&
-    !links.some((link) => link.active)
-  ) {
-    const entry = state.pluginEntries.find(({ id }) => id === activePluginId);
-    links.push({
-      active: true,
-      key: activePluginId,
-      label: entry?.label ?? activePluginId,
-      to: getPluginConfigurationRoutePath({ pluginId: activePluginId }),
-    });
-  }
-  return links;
 }

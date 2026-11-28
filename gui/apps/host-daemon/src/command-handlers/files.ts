@@ -112,14 +112,14 @@ export async function writeHostFile(
 ): Promise<HostDaemonOnlineRpcResult<"host.write_file">> {
   const binary = core();
   const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.write_file">>(binary, "write", command) : await legacyWrite(command);
-  listings.clear();
+  clearListingCaches();
   return result;
 }
 
 export async function mkdirHostPath(command: CommandOf<"host.mkdir">): Promise<HostDaemonOnlineRpcResult<"host.mkdir">> {
   const binary = core();
   const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.mkdir">>(binary, "mkdir", command) : await legacyPaths.mkdirHostPath(command);
-  listings.clear();
+  clearListingCaches();
   return result;
 }
 
@@ -128,7 +128,7 @@ export async function moveHostPath(
 ): Promise<HostDaemonOnlineRpcResult<"host.move_path">> {
   const binary = core();
   const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.move_path">>(binary, "move", command) : await legacyPaths.moveHostPath(command);
-  listings.clear();
+  clearListingCaches();
   return result;
 }
 
@@ -137,7 +137,7 @@ export async function removeHostPath(
 ): Promise<HostDaemonOnlineRpcResult<"host.remove_path">> {
   const binary = core();
   const result = binary ? await coreFs<HostDaemonOnlineRpcResult<"host.remove_path">>(binary, "remove", command) : await legacyPaths.removeHostPath(command);
-  listings.clear();
+  clearListingCaches();
   return result;
 }
 
@@ -148,7 +148,7 @@ export async function checkHostPathsExist(
   return binary ? coreFs(binary, "exists", command) : legacy.checkHostPathsExist(command);
 }
 
-const LISTING_CACHE_TTL_MS = 15_000;
+const LISTING_CACHE_TTL_MS = 3_000;
 const LISTING_CACHE_MAX_ENTRIES = 16;
 
 interface CachedListing {
@@ -157,8 +157,15 @@ interface CachedListing {
   promise: Promise<Listed[]>;
 }
 
-/** Recent walks are reused for consecutive `@` keystrokes and shared across concurrent calls. */
+/** Short-lived walks reused for consecutive `@` keystrokes (query calls only). */
 const listings = new Map<string, CachedListing>();
+/** Deduplicates concurrent walks for non-query callers without caching stale results. */
+const inFlightListings = new Map<string, Promise<Listed[]>>();
+
+function clearListingCaches(): void {
+  listings.clear();
+  inFlightListings.clear();
+}
 
 async function readListingStamp(rootPath: string): Promise<string> {
   const [rootStat, ignoreStat] = await Promise.all([
@@ -178,6 +185,17 @@ async function listPaths(binary: string, command: CommandOf<"host.list_files"> |
     respectGitIgnore: command.respectGitIgnore,
   };
   const key = JSON.stringify(request);
+  if (!command.query) {
+    listings.delete(key);
+    const active = inFlightListings.get(key);
+    if (active !== undefined) return active;
+    const promise = coreFs<{ paths: Listed[] }>(binary, "list", request).then((reply) => reply.paths);
+    inFlightListings.set(key, promise);
+    void promise.finally(() => {
+      if (inFlightListings.get(key) === promise) inFlightListings.delete(key);
+    });
+    return promise;
+  }
   const stamp = await readListingStamp(command.path);
   const now = Date.now();
   const cached = listings.get(key);

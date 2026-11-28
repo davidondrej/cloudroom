@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import {
   stripGitUrlCredentials,
   stripTextGitUrlCredentials,
@@ -322,6 +322,7 @@ export function upsertInstalledPlugin(
       removedAt: null,
       installedAt: now,
       updatedAt: now,
+      changedAt: now,
     })
     .onConflictDoUpdate({
       target: installedPlugins.id,
@@ -332,6 +333,8 @@ export function upsertInstalledPlugin(
         enabled: plugin.enabled,
         ...normalized,
         removedAt: null,
+        // A plugin installed again after its removal counts as new.
+        installedAt: sql`CASE WHEN ${installedPlugins.removedAt} IS NULL THEN ${installedPlugins.installedAt} ELSE ${now} END`,
         updatedAt: now,
       },
     })
@@ -382,10 +385,18 @@ export function setInstalledPluginEnabled(
 ): boolean {
   const result = db
     .update(installedPlugins)
-    .set({ enabled, updatedAt: Date.now() })
+    .set({ enabled, updatedAt: Date.now(), changedAt: Date.now() })
     .where(eq(installedPlugins.id, id))
     .run();
   return result.changes > 0;
+}
+
+/** The user installed, updated, or reconfigured this plugin. Settings → Plugins lists the latest first. */
+export function markInstalledPluginChanged(db: DbConnection, id: string): void {
+  db.update(installedPlugins)
+    .set({ changedAt: Date.now() })
+    .where(eq(installedPlugins.id, id))
+    .run();
 }
 
 export function setInstalledPluginUpdateState(

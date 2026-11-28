@@ -1583,7 +1583,7 @@ describe("dispatchCommand", () => {
     });
   });
 
-  it("reuses a supported installation probe across thread starts", async () => {
+  it("reuses a supported installation probe across thread starts and status reads", async () => {
     const runtime = createRuntime();
     const manager = new RuntimeManager({
       createRuntime: () => runtime,
@@ -1597,14 +1597,28 @@ describe("dispatchCommand", () => {
       providerInstallationStatus,
     });
 
-    await expect(
+    // A status read starts the probe. Its timeout retry also serves the thread
+    // start that joins it (#2251, #2670).
+    providerInstallationStatus.mockRejectedValueOnce(
+      Object.assign(new Error("timed out"), { code: "rpc_timeout" }),
+    );
+    const [read] = await Promise.all([
+      dispatchOnlineRpcCommand(
+        {
+          type: "provider.installation.status",
+          providerId: "codex",
+          bridgeLaunch: createInstallationGatedThreadStart("t").bridgeLaunch,
+        },
+        options,
+      ),
       dispatchCommand(createInstallationGatedThreadStart("thread-1"), options),
-    ).resolves.toEqual({ providerThreadId: "provider-thread-1" });
+    ]);
+    expect(read).toMatchObject({ installed: true });
     await expect(
       dispatchCommand(createInstallationGatedThreadStart("thread-2"), options),
     ).resolves.toEqual({ providerThreadId: "provider-thread-1" });
 
-    expect(providerInstallationStatus).toHaveBeenCalledOnce();
+    expect(providerInstallationStatus).toHaveBeenCalledTimes(2);
     expect(runtime.startThread).toHaveBeenCalledTimes(2);
   });
 

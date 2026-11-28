@@ -7,6 +7,7 @@ import {
   setInstalledPluginLastFailure,
   setPluginStateSnapshotRollbackPending,
   setPluginStateSnapshotStatus,
+  markInstalledPluginChanged,
   upsertInstalledPlugin,
   type InstalledPluginRow,
   type PluginExactResolution,
@@ -254,6 +255,7 @@ export function createPluginActivation(context: PluginActivationContext) {
           version: args.manifest.version,
           enabled: args.row.enabled,
         });
+        markInstalledPluginChanged(deps.db, args.row.id);
         pointerWritten = true;
         const current = getInstalledPlugin(deps.db, args.row.id);
         stabilizingPluginIds.add(args.row.id);

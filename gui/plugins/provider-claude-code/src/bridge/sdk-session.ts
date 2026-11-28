@@ -103,6 +103,13 @@ interface BuildSdkDoneErrorMessageArgs {
 
 const SDK_STDERR_TAIL_MAX_CHARS = 4_000;
 const MCP_RECONNECT_MIN_COOLDOWN_MS = 60_000;
+const MCP_NEEDS_AUTH_COOLDOWNS_MS = [
+  60_000,
+  5 * 60_000,
+  15 * 60_000,
+  30 * 60_000,
+] as const;
+const MCP_RECONNECT_MAX_COOLDOWN_MS = 30 * 60_000;
 const MCP_RECONNECT_COOLDOWN_ATTEMPT_MULTIPLIER = 10;
 
 function isCurrentProcessRoot(): boolean {
@@ -338,6 +345,7 @@ export class SdkSession {
   private stopping = false;
   private mcpReconnecting = false;
   private readonly mcpRetryAt = new Map<string, number>();
+  private readonly mcpFailureCount = new Map<string, number>();
 
   constructor(
     private readonly options: SdkSessionOptions,
@@ -384,18 +392,28 @@ export class SdkSession {
   /** Retries `failed` and `needs-auth` servers, so a sign-in made after the thread started connects (#661). */
   async reconnectMcpServers(): Promise<void> {
     const q = this.query;
-    if (!q || this.mcpReconnecting) return;
+    if (!q || this.mcpReconnecting || this.stopping || this.inputDone) return;
     this.mcpReconnecting = true;
     let reconnects: Promise<void>[] = [];
     try {
       const now = Date.now();
-      reconnects = (await q.mcpServerStatus())
+      const servers = await q.mcpServerStatus();
+      if (!Array.isArray(servers)) return;
+      for (const server of servers) {
+        if (server.status === "connected") {
+          this.mcpRetryAt.delete(server.name);
+          this.mcpFailureCount.delete(server.name);
+        }
+      }
+      reconnects = servers
         .filter(
           (server) =>
             (server.status === "failed" || server.status === "needs-auth") &&
             now >= (this.mcpRetryAt.get(server.name) ?? 0),
         )
-        .map((server) => this.reconnectMcpServer(q, server.name));
+        .map((server) =>
+          this.reconnectMcpServer(q, server.name, server.status),
+        );
     } finally {
       void Promise.all(reconnects).then(() => {
         this.mcpReconnecting = false;
@@ -403,21 +421,37 @@ export class SdkSession {
     }
   }
 
-  private async reconnectMcpServer(q: Query, name: string): Promise<void> {
+  private async reconnectMcpServer(
+    q: Query,
+    name: string,
+    status: string,
+  ): Promise<void> {
     const startedAt = Date.now();
     try {
       await q.reconnectMcpServer(name);
       this.mcpRetryAt.delete(name);
+      this.mcpFailureCount.delete(name);
     } catch {
       const failedAt = Date.now();
-      this.mcpRetryAt.set(
-        name,
-        failedAt +
-          Math.max(
-            MCP_RECONNECT_MIN_COOLDOWN_MS,
-            MCP_RECONNECT_COOLDOWN_ATTEMPT_MULTIPLIER * (failedAt - startedAt),
-          ),
+      const failures = (this.mcpFailureCount.get(name) ?? 0) + 1;
+      this.mcpFailureCount.set(name, failures);
+      const baseCooldown =
+        status === "needs-auth"
+          ? MCP_NEEDS_AUTH_COOLDOWNS_MS[
+              Math.min(failures - 1, MCP_NEEDS_AUTH_COOLDOWNS_MS.length - 1)
+            ]!
+          : Math.min(
+              MCP_RECONNECT_MAX_COOLDOWN_MS,
+              MCP_RECONNECT_MIN_COOLDOWN_MS * 2 ** (failures - 1),
+            );
+      const cooldown = Math.min(
+        MCP_RECONNECT_MAX_COOLDOWN_MS,
+        Math.max(
+          baseCooldown,
+          MCP_RECONNECT_COOLDOWN_ATTEMPT_MULTIPLIER * (failedAt - startedAt),
+        ),
       );
+      this.mcpRetryAt.set(name, failedAt + cooldown);
     }
   }
 

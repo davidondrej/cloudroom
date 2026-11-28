@@ -2096,6 +2096,55 @@ it("tells a Local parent why its Cloud child's turn failed", async () => {
   } finally { await harness.cleanup(); }
 });
 
+// #247, #1015: Core leaves a `thread tell --parent` for a parent on this computer in the child's records.
+it("sends a Cloud child's tell --parent to its parent once and in order, however old the record", async () => {
+  const harness = await createTestAppHarness();
+  try {
+    const { host } = seedHostSession(harness.deps);
+    const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+    const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id });
+    const parent = seedThread(harness.deps, { environmentId: environment.id, projectId: project.id });
+    seedThreadRuntimeState(harness.deps, { environmentId: environment.id, providerThreadId: "provider-parent", threadId: parent.id });
+    const cloudChild = (parentThreadId: string, sessionId: string) => {
+      const child = createThread(harness.db, harness.hub, { projectId: project.id, parentThreadId, executionTarget: "cloud", providerId: "codex", status: "active" });
+      harness.db.insert(cloudroomThreads).values({ threadId: child.id, coreUrl: `sandbox:${child.id}`, sessionId, startRequestId: `start_${sessionId}`, nativeId: "native", model: "m", reasoning: "medium" }).run();
+      return child;
+    };
+    const child = cloudChild(parent.id, "cr_child");
+    const service = cloudroom(harness.deps) as unknown as { childTold: unknown; rt: { me(): Promise<string>; state(id: string): { actFrom: number | null } }; stream: { handleStreamRecord(...args: unknown[]): Promise<unknown> }; children: { tellParent(id: string, data: unknown): void } };
+    const state = Object.assign(service.rt.state(child.id), { actFrom: 0 });
+    // Written hours ago, while this computer was off, one right after the other.
+    const texts = ["Step 1 of 2 done.", "Step 2 of 2 done."];
+    const tell = (sequence: number) => ({ sequence, timestamp_ms: 1, session_id: "cr_child", kind: "parent_tell", data: { text: texts[sequence - 1], queue: true } });
+    const handle = (sequence: number, handled: number) => service.stream.handleStreamRecord(binding(harness.db, child.id), null, tell(sequence), new AbortController().signal, false, false, null, 0, handled, () => state, () => {});
+    // What the parent got, in order: its turns, then its queue.
+    const told = () => [
+      ...harness.db.select().from(events).where(eq(events.threadId, parent.id)).all().filter((row) => row.type === "client/turn/requested").map((row) => ({ data: row.data, fromChild: row.data.includes(child.id) })),
+      ...listQueuedThreadMessages(harness.db, parent.id).map((row) => ({ data: row.content, fromChild: row.senderThreadId === child.id })),
+    ].flatMap(({ data, fromChild }) => texts.filter((text) => data.includes(text)).map((text) => ({ text, fromChild })));
+    await handle(1, 0); await handle(2, 1);
+    await vi.waitFor(() => expect(told()).toEqual(texts.map((text) => ({ text, fromChild: true }))));
+    // The stream replays a record after a reconnect: past what this computer handled, so nothing is sent again.
+    await handle(1, 2);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(told()).toHaveLength(2);
+    // A Cloud parent (a stale move mark, or one sharing a sandbox) gets it too; blank text never goes.
+    const cloudParent = createThread(harness.db, harness.hub, { projectId: project.id, executionTarget: "cloud", providerId: "codex", status: "idle" });
+    harness.db.insert(cloudroomThreads).values({ threadId: cloudParent.id, coreUrl: `sandbox:${cloudParent.id}`, sessionId: "cr_parent", startRequestId: "start_parent", nativeId: "native", model: "m", reasoning: "medium" }).run();
+    const kid = cloudChild(cloudParent.id, "cr_kid");
+    let resolve: (args: unknown[]) => void = () => {};
+    const called = new Promise<unknown[]>((done) => { resolve = done; });
+    const sent = vi.fn(async (...args: unknown[]) => { resolve(args); return {}; });
+    service.childTold = sent;
+    // Only the child's home sends to a Cloud parent: this computer, once it knows its own tag.
+    await service.rt.me();
+    service.children.tellParent(kid.id, { text: "   " });
+    service.children.tellParent(kid.id, { text: "From a Cloud child." });
+    expect(await called).toEqual([expect.objectContaining({ id: cloudParent.id }), kid.id, "From a Cloud child.", false]);
+    expect(sent).toHaveBeenCalledTimes(1);
+  } finally { await harness.cleanup(); }
+});
+
 it("tells a Cloud parent once when Core keeps refusing its child's start for now, and keeps it trying (#865)", async () => {
   const harness = await createTestAppHarness(), service = cloudroom(harness.deps);
   const { project } = seedProjectWithSource(harness.deps, { hostId: seedHostSession(harness.deps).host.id });

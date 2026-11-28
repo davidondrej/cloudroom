@@ -8,8 +8,9 @@ import {
 import { useAtomValue, useSetAtom, useStore } from "jotai";
 import { useQueryClient } from "@tanstack/react-query";
 import { getThreadConversationCollapsedAtom } from "@/components/right-panel/store/panel-prefs";
-import { prefetchThread } from "@/hooks/queries/thread-queries";
+import { prefetchThreadTimeline } from "@/hooks/queries/thread-queries";
 import { isDocumentVisible } from "@/lib/document-visibility";
+import { usePointerCoarse } from "@cloudroom/shared-ui/hooks/use-pointer-coarse";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { setSidebarCards } from "@cloudroom/shared-ui/lib/sidebar-cards";
 import { THREAD_JUMP_APP_COMMAND_IDS } from "@cloudroom/domain";
@@ -122,6 +123,7 @@ function useShortcutTargetPreload(
   disabled: boolean,
 ): void {
   const queryClient = useQueryClient();
+  const preloadedIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (disabled) return;
     const root = sidebarRef.current;
@@ -129,7 +131,6 @@ function useShortcutTargetPreload(
     let cancelled = false;
     let timerId: number | null = null;
     let idleId: number | null = null;
-    let lastSignature = "";
 
     const runPreload = () => {
       if (cancelled || !isDocumentVisible()) return;
@@ -137,16 +138,15 @@ function useShortcutTargetPreload(
         sidebarRef.current,
         activeProjectId,
         activeThreadId,
-      );
-      const signature = ids.join(" ");
-      if (!signature || signature === lastSignature) return;
-      lastSignature = signature;
+      ).filter((threadId) => !preloadedIdsRef.current.has(threadId));
+      if (ids.length === 0) return;
       let cursor = 0;
       const worker = async () => {
         while (!cancelled && cursor < ids.length) {
           const threadId = ids[cursor++];
-          if (!threadId) continue;
-          await prefetchThread(queryClient, threadId).catch(() => {});
+          if (!threadId || preloadedIdsRef.current.has(threadId)) continue;
+          preloadedIdsRef.current.add(threadId);
+          await prefetchThreadTimeline(queryClient, threadId).catch(() => {});
         }
       };
       const workerCount = Math.min(SHORTCUT_PRELOAD_CONCURRENCY, ids.length);
@@ -221,6 +221,7 @@ export function AppSidebar({
   );
   const closePurposeCard = useSetAtom(closeSidebarPurposeCardAtom);
   const { isCompactViewport, openMobile } = useSidebar();
+  const isPointerCoarse = usePointerCoarse();
   const [compactCustomizeMode, setCompactCustomizeMode] = useState(false);
   const [threadShortcutKeysById, setThreadShortcutKeysById] = useState<
     ReadonlyMap<string, SidebarThreadShortcutPresentation>
@@ -231,7 +232,7 @@ export function AppSidebar({
     sidebarRef,
     activeProjectId,
     activeThreadId,
-    mobileHosted?.hidden === true,
+    mobileHosted?.hidden === true || isCompactViewport || isPointerCoarse,
   );
   const threadShortcutTargetsRef = useRef<
     readonly SidebarThreadShortcutTarget[]

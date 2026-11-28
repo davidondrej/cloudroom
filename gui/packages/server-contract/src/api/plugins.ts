@@ -164,6 +164,8 @@ export const installedPluginSchema = z.object({
   sourceDisplay: z.string(),
   updateState: pluginUpdateStateSchema,
   enabled: z.boolean(),
+  /** When the user last installed, updated, toggled, or reconfigured it. Older servers omit it. */
+  changedAt: z.number().optional(),
   alwaysEnabled: z.boolean().default(false),
   description: z.string().nullable(),
   name: z.string().nullable(),

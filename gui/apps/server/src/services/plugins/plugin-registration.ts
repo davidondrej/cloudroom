@@ -7,6 +7,7 @@ import {
   getInstalledPluginRegistration,
   listInstalledPlugins,
   listUnnormalizedPluginRegistrations,
+  markInstalledPluginChanged,
   markInstalledPluginRemoved,
   normalizeInstalledPluginRegistration,
   setInstalledPluginSourceClassification,
@@ -385,6 +386,7 @@ export function createPluginRegistration(context: PluginRegistrationContext) {
           version: manifest.version,
           enabled: movedFrom?.enabled ?? true,
         });
+        markInstalledPluginChanged(deps.db, manifest.id);
         const row = getInstalledPlugin(deps.db, manifest.id);
         if (row) {
           await loadOne(row);

@@ -22,7 +22,10 @@ import {
   runtimeErrorLogFields,
 } from "../lib/error-log-fields.js";
 import { isDispatchRequeuedRecently } from "./dispatch-hooks.js";
-import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
+import {
+  recordQueuedMessageDrainFailure,
+  tellSendersOfArchivedThreadQueue,
+} from "./queue-drain-failure.js";
 import { parseStoredQueuedThreadMessageWaitingOn } from "./thread-queued-messages.js";
 import {
   clearQueuedMessageWait,
@@ -481,6 +484,7 @@ async function attemptAutomaticQueuedMessage(
       return;
     }
     const currentThread = getThread(deps.db, row.threadId);
+    if (currentThread?.archivedAt) tellSendersOfArchivedThreadQueue(deps, currentThread);
     if (!isQueuedMessageAutoSendCandidate(currentThread)) {
       deps.logger.debug(
         {

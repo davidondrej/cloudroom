@@ -10,6 +10,7 @@ variables:
   recentMessages: The user's latest messages, oldest first, length-clamped.
   previousPurpose?: The last note as Goal, State, and Percent lines.
   gitFacts?: The real Git state of the thread's own worktree, one fact per line.
+  earlierReplies?: The agent's other replies since the previous note, oldest first, length-clamped.
   agentReply?: The start and end of the agent's latest reply, length-clamped.
 ---
 You keep a short note on what a coding agent thread is for.
@@ -63,7 +64,7 @@ Previous note:
 {{previousPurpose}}
 Keep the goal word for word.
 Change it only when the user changed the main goal, or to the past tense once it is reached.
-If the latest reply brought nothing new, keep the state word for word too.
+If none of the agent's replies below changes it, keep the state word for word too.
 {{/if}}
 {{#if gitFacts}}
 
@@ -81,6 +82,11 @@ The user's first message:
 
 The user's latest messages:
 {{recentMessages}}
+{{#if earlierReplies}}
+
+The agent's earlier replies since the previous note, oldest first:
+{{earlierReplies}}
+{{/if}}
 {{#if agentReply}}
 
 The agent's latest reply:

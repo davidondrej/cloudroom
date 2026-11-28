@@ -1193,14 +1193,15 @@ export class SandboxDirectory {
     if (known) {
       this.placed.set(view.thread, view.vps === true);
       this.forgotten.delete(view.thread);
-      this.awakeConfirmedAt.delete(view.thread);
+      this.recheckedAt.delete(view.thread);
     }
     return view;
   }
 
   private awake = new Map<string, { origin: string; token: string }>();
-  private awakeConfirmedAt = new Map<string, number>();
-  private readonly forgotten = new Set<string>();
+  private recheckedAt = new Map<string, number>();
+  private forgetSeq = 0;
+  private readonly forgotten = new Map<string, number>();
   awakeSandboxes(): { thread: string; url: string; token: string }[] {
     const awake = new Map([...this.awake].map(([thread, { origin, token }]) => [thread, { thread, url: origin, token }]));
     for (const view of this.views.values()) {
@@ -1221,15 +1222,15 @@ export class SandboxDirectory {
   private async awakeList(fresh = false): Promise<Map<string, { origin: string; token: string }>> {
     if (!fresh && Date.now() < this.awakeNext) return this.awake;
     if (!this.awakeCheck) {
-      const checked = new Set(this.forgotten);
+      const checkedSeq = this.forgetSeq;
+      const checked = [...this.forgotten.keys()];
       const check: Promise<void> = this.call({ action: "awake" }).then(value => awakeSchema.parse(value)).then(listed => {
         if (this.awakeCheck !== check) return;
         const before = this.awake.size;
         const now = Date.now();
         this.awake = new Map(listed.sandboxes.map(({ thread, origin, token }) => [thread, { origin, token }]));
-        this.awakeConfirmedAt = new Map(listed.sandboxes.map(({ thread }) => [thread, now]));
-        for (const thread of checked) this.forgotten.delete(thread);
-        for (const { thread } of listed.sandboxes) this.forgotten.delete(thread);
+        this.recheckedAt = new Map(listed.sandboxes.map(({ thread }) => [thread, now]));
+        for (const [thread, seq] of this.forgotten) if (seq <= checkedSeq) this.forgotten.delete(thread);
         if (this.refused && (this.awake.has(this.refused.thread) || (this.refused.code === CONCURRENT_LIMIT && this.awake.size < before))) this.refused = null;
         if (this.awake.size < before) for (const [thread, waiting] of this.backoff) if (waiting.refusal?.code === CONCURRENT_LIMIT) this.backoff.delete(thread);
         this.awakeChecks++;
@@ -1239,9 +1240,11 @@ export class SandboxDirectory {
         this.awakeNext = now + (now < this.soonUntil ? SOON_MS : listed.recheck_ms);
       }, (error: unknown) => {
         if (this.awakeCheck !== check) return;
+        const now = Date.now();
+        for (const thread of checked) this.recheckedAt.set(thread, now);
+        for (const thread of this.forgotten.keys()) this.recheckedAt.set(thread, now);
         this.awakeIssue = error instanceof CloudroomError ? error : new CloudroomError("The website's list of awake cloud sandboxes was unreadable.");
-        this.awakeChecks++;
-        this.awakeNext = Date.now() + Math.min(this.awakeEvery, 10_000);
+        this.awakeNext = now + Math.min(this.awakeEvery, 10_000);
       }).finally(() => { if (this.awakeCheck === check) this.awakeCheck = null; });
       this.awakeCheck = check;
     }
@@ -1283,7 +1286,7 @@ export class SandboxDirectory {
       // A locally forgotten sandbox (e.g. after a transient 502) must recheck with the website before being treated as asleep,
       // rate-limited to at most once per 10 s after a recent awake confirmation so a 502 storm can't hammer /sandboxes.
       const forgotten = this.forgotten.has(thread);
-      if (forgotten && !fresh && Date.now() - (this.awakeConfirmedAt.get(thread) ?? 0) < 10_000) {
+      if (forgotten && !fresh && Date.now() - (this.recheckedAt.get(thread) ?? 0) < 10_000) {
         throw new CloudroomConnectionError("Waiting to recheck the cloud sandbox.");
       }
       const found = (await this.awakeList(fresh || forgotten)).get(thread);
@@ -1433,13 +1436,16 @@ export class SandboxDirectory {
     return refused && Date.now() - refused.at < 360_000 && day(refused.at) === day(Date.now()) ? refused.message : null;
   }
   /** The only API keys a thread's sandbox gets (a Cloud loop's pick, ADR 0342); null for every key, and undefined when
-   *  the website has no sandbox row for the thread. */
-  async loopSecrets(thread: string): Promise<string[] | null | undefined> {
+   *  the website has no sandbox row for the thread. `confirmed`, for checks that allow on null: undefined too unless the
+   *  website says it found the row, as the Mac helper requires (core/src/helper/jobs.rs `limited`). */
+  async loopSecrets(thread: string, confirmed = false): Promise<string[] | null | undefined> {
     const { secrets, found } = z.object({ secrets: z.array(z.string()).nullable(), found: z.boolean().optional() }).parse(await this.call({ action: "secrets", thread }));
-    return found === false ? undefined : secrets;
+    return found === false || (confirmed && found !== true) ? undefined : secrets;
   }
   /** Whether this run last saw the sandbox awake, without asking the website. */
   isAwake(thread: string): boolean { return this.views.get(thread)?.state === "awake" || this.awake.has(thread); }
+  hasAwakeIssue(): boolean { return this.awakeIssue !== null; }
+  isForgotten(thread: string): boolean { return this.forgotten.has(thread); }
 
   private plan: string | null = null;
   currentPlan(): string | null { return this.plan; }
@@ -1561,7 +1567,7 @@ export class SandboxDirectory {
     this.views.clear();
     this.burning.clear();
     this.awake = new Map();
-    this.awakeConfirmedAt.clear();
+    this.recheckedAt.clear();
     this.forgotten.clear();
     this.awakeNext = 0;
     this.awakeIssue = null;
@@ -1596,13 +1602,13 @@ export class SandboxDirectory {
   forget(thread: string): void {
     this.views.delete(thread);
     this.awake.delete(thread);
-    this.forgotten.add(thread);
+    this.forgotten.set(thread, ++this.forgetSeq);
   }
   private drop(thread: string): void {
     this.views.delete(thread);
     this.awake.delete(thread);
     this.forgotten.delete(thread);
-    this.awakeConfirmedAt.delete(thread);
+    this.recheckedAt.delete(thread);
   }
   /** What the website says the thread's sandbox is doing. Never wakes it; the answer isn't kept. */
   async state(thread: string): Promise<View["state"]> { return viewSchema.parse(await this.call({ action: "lookup", thread })).state; }
@@ -1761,6 +1767,11 @@ export class SandboxDirectory {
 
   async autoDelete(body: { action: "get" | "deleted" } | { action: "set"; days: number | null }): Promise<unknown> {
     return this.call(body, "auto-delete");
+  }
+
+  /** Settings > Cloud > Thread access (ADR 0286), saved and enforced on the website. */
+  async threadAccess(body: { action: "get" } | { action: "set"; level: string }): Promise<unknown> {
+    return this.call(body, "thread-access");
   }
 
   /** The user's own VPS (ADR 0319): status with live health, a pairing code, the two switches, or disconnect. */

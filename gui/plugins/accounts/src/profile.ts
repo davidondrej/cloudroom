@@ -29,6 +29,7 @@ const claudeHome = () =>
 const claudeConfig = () =>
   path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), ".claude.json");
 const synced = new Map<string, number>();
+const linkedHome = new Map<string, { home: string; mtimeMs: number }>();
 
 async function keepNewer(target: string, link: string): Promise<boolean> {
   const [from, to] = await Promise.all([
@@ -57,6 +58,9 @@ async function linkOnWindows(target: string, link: string): Promise<void> {
 }
 
 export async function releaseProfile(profile: string): Promise<void> {
+  synced.delete(profile);
+  linkedHome.delete(profile);
+  mcpSyncedAt.delete(profile);
   if (process.platform !== "win32") return;
   const home = claudeHome();
   for (const name of SHARED) {
@@ -68,26 +72,43 @@ export async function releaseProfile(profile: string): Promise<void> {
 
 export async function prepareProfile(profile: string): Promise<void> {
   const home = claudeHome();
-  await fs.mkdir(profile, { recursive: true, mode: 0o700 });
-  await Promise.all(
-    SESSION_DIRS.map((name) =>
-      fs.mkdir(path.join(home, name), { recursive: true }),
-    ),
-  );
-  await Promise.all(
-    SHARED.map(async (name) => {
-      const target = path.join(home, name);
-      if (!(await fs.lstat(target).catch(() => null))) return;
-      const link = path.join(profile, name);
-      await (
-        process.platform === "win32"
-          ? linkOnWindows(target, link)
-          : fs.symlink(target, link)
-      ).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "EEXIST") throw error;
-      });
-    }),
-  );
+  const homeMtime =
+    process.platform !== "win32"
+      ? (await fs.stat(home).catch(() => null))?.mtimeMs
+      : undefined;
+  const cachedLinks = linkedHome.get(profile);
+  if (
+    process.platform === "win32" ||
+    homeMtime === undefined ||
+    cachedLinks?.home !== home ||
+    cachedLinks.mtimeMs !== homeMtime
+  ) {
+    await fs.mkdir(profile, { recursive: true, mode: 0o700 });
+    await Promise.all(
+      SESSION_DIRS.map((name) =>
+        fs.mkdir(path.join(home, name), { recursive: true }),
+      ),
+    );
+    await Promise.all(
+      SHARED.map(async (name) => {
+        const target = path.join(home, name);
+        if (!(await fs.lstat(target).catch(() => null))) return;
+        const link = path.join(profile, name);
+        await (
+          process.platform === "win32"
+            ? linkOnWindows(target, link)
+            : fs.symlink(target, link)
+        ).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== "EEXIST") throw error;
+        });
+      }),
+    );
+    if (process.platform !== "win32") {
+      const nextHomeMtime = (await fs.stat(home).catch(() => null))?.mtimeMs;
+      if (nextHomeMtime !== undefined)
+        linkedHome.set(profile, { home, mtimeMs: nextHomeMtime });
+    }
+  }
   const changed = (await fs.stat(claudeConfig()).catch(() => null))?.mtimeMs;
   if (changed === undefined || synced.get(profile) === changed) return;
   const main = JSON.parse(await fs.readFile(claudeConfig(), "utf8")) as Record<
@@ -406,25 +427,36 @@ export async function readLogin(profile?: string): Promise<unknown> {
   return readCredentials(profile ?? claudeHome(), profile ?? process.env.CLAUDE_CONFIG_DIR).catch(() => null);
 }
 
+const MCP_SYNC_MIN_INTERVAL_MS = 60_000;
 const mcpSyncs = new Map<string, Promise<void>>();
+const mcpSyncedAt = new Map<string, number>();
 
 /**
- * Runs syncMcpSignIns in the background, one at a time per profile, and waits for it at most `waitMs`.
- * The provider env has a 5 s deadline and each Keychain call can take seconds: a slow Keychain may delay
- * this turn's MCP sign-ins, never its account.
+ * Runs syncMcpSignIns in the background, one at a time per profile.
+ * Waits up to `waitMs` on the first sync per profile so a newly started app or account gets its MCP sign-ins;
+ * later turns refresh in the background at most once per minute so Keychain calls never block follow-up turns.
  */
 export async function startMcpSync(
   profile: string,
   onError: (error: unknown) => void,
   waitMs = 1_000,
 ): Promise<void> {
+  const lastSyncedAt = mcpSyncedAt.get(profile);
+  if (
+    lastSyncedAt !== undefined &&
+    Date.now() - lastSyncedAt < MCP_SYNC_MIN_INTERVAL_MS
+  )
+    return;
   let running = mcpSyncs.get(profile);
   if (!running) {
     running = syncMcpSignIns(profile, onError)
-      .then(() => {}, onError)
+      .then(() => {
+        mcpSyncedAt.set(profile, Date.now());
+      }, onError)
       .finally(() => mcpSyncs.delete(profile));
     mcpSyncs.set(profile, running);
   }
+  if (lastSyncedAt !== undefined) return;
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([running, new Promise((resolve) => (timer = setTimeout(resolve, waitMs)))]);
   clearTimeout(timer);

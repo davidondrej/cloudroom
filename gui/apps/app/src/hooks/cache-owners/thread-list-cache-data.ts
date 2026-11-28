@@ -50,7 +50,15 @@ function mapThreadListCacheData<T extends ThreadListCacheData>(
   if (isThreadListEntryArray(data)) {
     return mapper(data) as T;
   }
-  return { ...data, pages: data.pages.map(mapper) } as T;
+  let changed = false;
+  const pages = data.pages.map((page) => {
+    const nextPage = mapper(page);
+    if (nextPage !== page) {
+      changed = true;
+    }
+    return nextPage;
+  });
+  return changed ? ({ ...data, pages } as T) : data;
 }
 
 function isThreadListCacheData(value: unknown): value is ThreadListCacheData {
@@ -153,9 +161,10 @@ export function applyToCachedThreadLists(
   for (const { queryKey, data } of getCachedThreadLists(queryClient, {
     queryKey: options.queryKey,
   })) {
-    queryClient.setQueryData(
-      queryKey,
-      mapThreadListCacheData(data, options.mapper),
-    );
+    const next = mapThreadListCacheData(data, options.mapper);
+    if (next === data) {
+      continue;
+    }
+    queryClient.setQueryData(queryKey, next);
   }
 }

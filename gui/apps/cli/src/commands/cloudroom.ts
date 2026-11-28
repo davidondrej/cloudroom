@@ -385,7 +385,7 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
   }));
   const repo = group.command("repo").description("GitHub repos cloned into every cloud sandbox, next to the project");
   repo.command("add <owner/name>").option("--json", "Print JSON").action(action(async (name: string, options: JsonOutputOptions) => {
-    await change({ action: "addRepo", repo: name }, options, `Added ${name}. New cloud sandboxes clone it into /repos.`);
+    await change({ action: "addRepo", repo: name }, options, `Added ${name}. New cloud sandboxes clone it into /repos/<owner>/<repo>.`);
   }));
   repo.command("remove <owner/name>").option("--json", "Print JSON").action(action(async (name: string, options: JsonOutputOptions) => {
     await change({ action: "removeRepo", repo: name }, options, `Removed ${name}.`);
@@ -402,6 +402,12 @@ export function registerCloudCommands(program: Command, getUrl: () => string): v
     const kept = result.kept ?? result.days;
     const limit = result.plan && kept === result.plan.days ? `${result.plan.label} (${result.plan.name} limit)` : `${kept} days`;
     if (!outputJson(options, result)) console.log(kept === null ? "Unused cloud threads are kept forever." : `Unused cloud threads are deleted after ${limit}.`);
+  }));
+  group.command("thread-access [level]").description("Show or set what Cloud agents may do with your other threads: off, read, or full").option("--json", "Print JSON").action(action(async (level: string | undefined, options: JsonOutputOptions) => {
+    const sdk = createCliRoomSdk(getUrl()).cloudroom;
+    if (level !== undefined && level !== "off" && level !== "read" && level !== "full") throw new Error("Pick one of: off, read, full.");
+    const result = level === undefined ? await sdk.threadAccess() : await sdk.setThreadAccess(level);
+    if (!outputJson(options, result)) console.log({ off: "Cloud agents can't read or message your other threads.", read: "Cloud agents can read your other threads, not message them.", full: "Cloud agents can read and message your other threads." }[result.level]);
   }));
   group.command("sign-in").option("--project <id>", "Legacy prepared-project binding (optional)")
     .option("--website-url <url>", "Loopback website for local development")

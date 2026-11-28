@@ -33,6 +33,7 @@ import {
 } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
 import { SANDBOX_PREFIX, SandboxAsleep, sandboxThread, type AutomationRun } from "./sandboxes.js";
+import { accessRefusal, chatAnswer, searchAnswer, SEARCH_LIMIT, THREAD_EVENTS, THREAD_REQUEST_MS, threadAccessSettingSchema, threadRequestSchema, type ThreadRequest } from "./thread-access.js";
 import { binding, command, commands, localTeleports, teleportBlocked, type Binding, type Command } from "./store.js";
 
 export interface ChildrenHooks {
@@ -46,7 +47,10 @@ export interface ChildrenHooks {
 /** Coordinates Cloud subagents, child adoption, parent labels, agent forks, and child turn reports. */
 export class CloudChildren {
   private readonly heldStarts = new Set<string>();
+  private readonly threadRequests = new Set<string>();
   private delivering?: Promise<void>;
+  /** Each parent's Cloud child tells still going out, in order (tellParent). */
+  private readonly telling = new Map<string, Promise<void>>();
 
   constructor(private readonly rt: CloudRuntime, private readonly hooks: ChildrenHooks) {}
 
@@ -341,6 +345,34 @@ export class CloudChildren {
     this.rt.host.hooks.childTurnEnded?.({ ...thread, parentThreadId: thread.parentThreadId }, status, error, turn);
   }
 
+  /** A Cloud child's `thread tell --parent` when its parent runs on this computer, which nothing in Cloud reaches
+   *  (#247, #1015): Core left it in the child's records (core/src/session/relay.rs). The record names no thread, so
+   *  only the parent saved here gets it. Sent once, after the record is saved as read, like a turn's report, and one
+   *  at a time per parent, so it hears them in the order its child sent them. */
+  tellParent(childId: string, data: unknown): void {
+    const parentId = this.rt.host.getThread(childId)?.parentThreadId;
+    // Core's own limits on a tell (MAX_PROMPT): the record comes from a sandbox whose agent could write anything.
+    const input = z.object({ text: z.string().refine((text) => text.trim() !== "" && Buffer.byteLength(text, "utf8") <= 262_144), queue: z.boolean().optional() }).safeParse(data);
+    if (!parentId || !input.success) return;
+    const { text, queue = false } = input.data;
+    const send = async () => {
+      // A Teleport either way refuses sends until it lands: wait for it, for up to 10 minutes.
+      for (let waits = 0; this.moving(parentId) && waits < 300 && !this.rt.stopped; waits++) await new Promise((resolve) => setTimeout(resolve, 2000));
+      if (this.moving(parentId)) throw new Error("its parent was still moving after 10 minutes");
+      const parent = this.rt.host.getThread(parentId);
+      if (!parent || parent.archivedAt || parent.deletedAt) return;
+      // A Cloud parent (a stale move mark, one sharing a sandbox, or a Teleport that landed there) shows on every computer
+      // of the account: only the child's home sends it, and never to another account's thread.
+      const saved = isCloudThread(parent) ? binding(this.rt.host.db, parentId) : null;
+      if (isCloudThread(parent) && (!saved || !this.rt.isHome(childId) || await this.rt.otherAccountThread(saved))) return;
+      await this.rt.host.hooks.childTold?.(parent, childId, text, queue);
+    };
+    const next: Promise<void> = (this.telling.get(parentId) ?? Promise.resolve()).then(send)
+      .catch((error: unknown) => this.rt.host.warn("A Cloud child's message to its parent was not delivered", error, { threadId: parentId, childId }))
+      .finally(() => { if (this.telling.get(parentId) === next) this.telling.delete(parentId); });
+    this.telling.set(parentId, next);
+  }
+
   /** A parent moving either way holds its children's reports until it lands. Teleport to Local closes the Cloud session
    *  that Core's reports go to, so without the hold a turn ending meanwhile reaches neither copy. */
   teleportingParent(threadId: string): boolean {
@@ -460,7 +492,17 @@ export class CloudChildren {
     if (record.kind === "child_command") {
       const input = z.object({ id: z.string(), action: z.enum(["tell", "stop", "archive"]), text: z.string().min(1).optional() }).parse(record.data);
       const child = this.rt.host.getThread(input.id);
-      if (!child || child.parentThreadId !== parentThread.id || this.reportedParent(child)?.id !== parentThread.id) return;
+      if (!child || child.parentThreadId !== parentThread.id || this.reportedParent(child)?.id !== parentThread.id) {
+        // Not a child this app reports for: a subagent sharing its parent's sandbox messages another thread this way
+        // once the website refused or didn't know it (Core's `via_app`), so only as `threadRequest` would allow it.
+        const text = input.action === "tell" ? input.text : undefined;
+        if (child && text) {
+          await this.outsideRefusal(parent, "tell", child)
+            .then((refusal) => { if (refusal) throw new ApiError(403, "thread_access", refusal); return this.tellOther(parentThread.id, child, text, once("tell")); })
+            .catch((error: unknown) => this.rt.host.warn("A message to another thread was not sent", error, { threadId: parentThread.id }));
+        }
+        return;
+      }
       if (input.action === "archive") this.rt.host.hooks.archiveRequest?.(child.id);
       else if (input.action === "tell" && input.text) this.queuePrompt(child.id, once("tell"), input.text);
       else if (input.action === "stop" && !command(this.rt.host.db, once("stop"))) {
@@ -570,13 +612,61 @@ export class CloudChildren {
     return this.rt.updateRecords(AGENT_FORKS, z.string(), (forks) => ({ ...forks, [requestId]: threadId }));
   }
 
+  /** A Cloud agent reads, messages or searches threads only this computer holds: Local ones, and subagents sharing
+   *  their parent's sandbox (ADR 0286). Only live requests of this account count. The computer holding the thread
+   *  answers; home answers a search, and a thread no computer holds after a moment. */
+  async threadRequest(parent: Binding, client: CloudroomClient, record: SessionRecord): Promise<void> {
+    const deadline = (record.timestamp_ms ?? Date.now()) + THREAD_REQUEST_MS - 3_000;
+    const live = async () => !this.rt.stopped && Date.now() < deadline && !await this.rt.otherAccountThread(binding(this.rt.host.db, parent.threadId) ?? parent);
+    const parsed = threadRequestSchema.safeParse(record.data);
+    const key = `${parent.threadId}:${parsed.data?.id}`;
+    if (!parsed.success || this.threadRequests.has(key) || !await live()) return;
+    const request = parsed.data, home = this.rt.isHome(parent.threadId);
+    const target = request.action === "search" ? null : this.rt.host.getThread(request.thread);
+    const held = target && !target.deletedAt && target.visibility !== "hidden" ? target : null;
+    if (!held && !home) return;
+    if (this.threadRequests.size > 1000) this.threadRequests.clear();
+    this.threadRequests.add(key);
+    if (!held && request.action !== "search") await new Promise((resolve) => setTimeout(resolve, 3_000));
+    let answer: { output: unknown } | { error: string };
+    try {
+      const refusal = await this.outsideRefusal(parent, request.action, held);
+      if (refusal) throw new ApiError(403, "thread_access", refusal);
+      // A slow check can outlast Core's wait: nothing is read or sent for a request it gave up on.
+      if (!await live()) return;
+      if (request.action === "search") answer = { output: searchAnswer(this.rt.host.localThreads(request.search, request.archived, SEARCH_LIMIT + 1)) };
+      else if (!held || held.id === parent.threadId) throw new ApiError(404, "thread_not_found", held ? "That is this thread: its chat is already in your context." : "No Local or Cloud thread of this user has this ID.");
+      else if (request.action === "read") { const { messages, cut } = this.rt.host.recentMessages(held.id, THREAD_EVENTS); answer = { output: chatAnswer(held, messages, cut, request.all) }; }
+      else answer = { output: await this.tellOther(parent.threadId, held, request.text, `tell_${createHash("sha256").update(`${parent.threadId}:${request.key ?? request.id}`).digest("hex").slice(0, 40)}`) };
+    } catch (error) { answer = { error: publicError(error) }; }
+    if (await live()) await this.answerChild(client, parent, request.id, answer);
+  }
+
+  /** Why `caller` may not reach `target` (or search) through this computer, or null (`accessRefusal`): the account's
+   *  level and the key list of the sandbox it runs in, read together; a failed check is unconfirmed. A thread in the
+   *  caller's own sandbox, such as its shared child or sibling, is never outside: it has the same Core and keys. */
+  private async outsideRefusal(caller: Binding, action: ThreadRequest["action"], target: Thread | null): Promise<string | null> {
+    const sandbox = sandboxThread((binding(this.rt.host.db, caller.threadId) ?? caller).coreUrl);
+    if (sandbox && target && sandboxThread(binding(this.rt.host.db, target.id)?.coreUrl ?? "") === sandbox) return null;
+    const [setting, keys] = await Promise.all([this.rt.sandboxes.threadAccess({ action: "get" }), this.rt.keyList(caller.threadId, caller).catch(() => undefined)]);
+    return accessRefusal(threadAccessSettingSchema.parse(setting).level, action, keys);
+  }
+
+  private async tellOther(sender: string, target: Thread, text: string, id: string) {
+    if (target.archivedAt) throw new ApiError(409, "thread_archived", "That thread is archived: agents can read it, not message it.");
+    let state = "queued";
+    if (target.executionTarget === "local") state = await this.rt.host.tellLocal(target, text, sender);
+    else this.queuePrompt(target.id, id, `[message from thread:${sender}]\n\n${text}`);
+    return { id: target.id, state, note: `Sent. It isn't your subagent, so it won't report back: read its reply with \`room-cli thread output ${target.id}\`.` };
+  }
+
   /** True when Core confirmed the child. A refusal is final; a network error is retried briefly. */
-  private async answerChild(client: CloudroomClient, parent: Binding, id: string, answer: { thread: string } | { error: string }): Promise<boolean> {
+  private async answerChild(client: CloudroomClient, parent: Binding, id: string, answer: { thread: string } | { error: string } | { output: unknown }): Promise<boolean> {
     for (let tries = 1; ; tries++) {
-      try { await client.answerChild(parent.sessionId!, id, answer); return "thread" in answer; }
+      try { await client.answerChild(parent.sessionId!, id, answer); return !("error" in answer); }
       catch (error) {
         if ((error instanceof CloudroomError && (error.status === 404 || error.status === 409)) || tries === 3) {
-          this.rt.host.warn(id.startsWith("fork_") ? "Core did not take a Cloud fork's answer" : "Core did not take a Cloud child's start", error, { threadId: parent.threadId });
+          this.rt.host.warn(id.startsWith("fork_") ? "Core did not take a Cloud fork's answer" : id.startsWith("thread_") ? "Core did not take a thread request's answer" : "Core did not take a Cloud child's start", error, { threadId: parent.threadId });
           return false;
         }
         await new Promise((resolve) => setTimeout(resolve, tries * 1000));

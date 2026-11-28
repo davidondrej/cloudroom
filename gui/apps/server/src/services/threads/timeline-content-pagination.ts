@@ -32,15 +32,15 @@ export function paginateTimelineContents(
   maxLeaves: number,
   maxBytes: number,
 ): TimelineContentPage {
-  const costs: number[] = [];
+  // Leaves are sized only while filling the page: sizing every row was slow on huge turns (#1032).
+  const leaves: { ancestorBytes: number; row: TimelineRow }[] = [];
   const measure = (
     items: readonly TimelineRow[],
     ancestorBytes: number,
   ): void => {
     for (const row of items) {
       const nested = children(row);
-      if (nested === null)
-        costs.push(Buffer.byteLength(JSON.stringify(row)) + ancestorBytes);
+      if (nested === null) leaves.push({ ancestorBytes, row });
       else
         measure(
           nested,
@@ -50,11 +50,13 @@ export function paginateTimelineContents(
     }
   };
   measure(rows, 0);
-  const end = Math.min(before ?? costs.length, costs.length);
+  const end = Math.min(before ?? leaves.length, leaves.length);
   let start = end;
   let bytes = 0;
   while (start > 0 && end - start < Math.max(1, maxLeaves)) {
-    const cost = costs[start - 1]!;
+    const leaf = leaves[start - 1]!;
+    const cost =
+      Buffer.byteLength(JSON.stringify(leaf.row)) + leaf.ancestorBytes;
     if (start < end && bytes + cost > maxBytes) break;
     bytes += cost;
     start -= 1;
@@ -85,6 +87,6 @@ export function paginateTimelineContents(
     rows: selectedRows,
     start,
     end,
-    total: costs.length,
+    total: leaves.length,
   };
 }

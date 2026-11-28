@@ -55,6 +55,7 @@ interface ThreadMutationRequest {
 type UpdateThreadMutationRequest = ThreadMutationRequest & UpdateThreadRequest;
 type PinThreadMutationRequest = ThreadMutationRequest & {
   position?: PinThreadPosition;
+  onOptimisticApplied?: () => void;
 };
 type ReorderPinnedThreadMutationRequest = ThreadMutationRequest &
   ReorderPinnedThreadRequest;
@@ -252,13 +253,19 @@ export function usePinThread() {
     onMutate: async ({
       id,
       position,
-    }): Promise<ThreadListMutationTransaction> =>
-      beginPinThreadTransaction({
-        pinnedAt: Date.now(),
-        position,
-        queryClient,
-        threadId: id,
-      }),
+      onOptimisticApplied,
+    }): Promise<ThreadListMutationTransaction> => {
+      try {
+        return await beginPinThreadTransaction({
+          pinnedAt: Date.now(),
+          position,
+          queryClient,
+          threadId: id,
+        });
+      } finally {
+        onOptimisticApplied?.();
+      }
+    },
     onError: (_error, variables, context) => {
       rollbackThreadListMutationTransaction({
         queryClient,

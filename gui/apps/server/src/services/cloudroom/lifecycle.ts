@@ -352,7 +352,7 @@ export class CloudLifecycle {
     const thread = this.rt.host.db.transaction((tx) => {
       const created = this.rt.host.createThread(tx, {
         executionTarget: "cloud", projectId: source.projectId, providerId: source.providerId, status: "pending", originKind: "fork", sourceThreadId: source.id,
-        title: request.title, titleFallback: this.rt.host.deriveTitleFallback(request.input), sectionId: request.sectionId, visibility: request.visibility,
+        title: request.title, titleFallback: this.rt.host.deriveTitleFallback(request.input), pinned: request.pinned, sectionId: request.sectionId, visibility: request.visibility,
       });
       tx.insert(cloudroomThreads).values({ threadId: created.id, coreUrl: SANDBOX_PREFIX + created.id, startRequestId, model, reasoning }).run();
       tx.insert(cloudroomCommands).values({

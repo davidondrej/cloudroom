@@ -616,8 +616,17 @@ const UNSUPPORTED_MODEL_NOTE =
  */
 const ROUTING_DISCOVERY_PATTERN =
   /\bworkspace routing discovery (?:timed out|failed)\b/iu;
-const ROUTING_DISCOVERY_NOTE =
-  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree. The chat is kept: send again to retry. If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
+const ROUTING_DISCOVERY_CAUSE =
+  "Codex couldn't get an answer from ChatGPT about this account's workspace, so the model was never reached. This is usually a network or ChatGPT problem, not this thread or its worktree.";
+const ROUTING_DISCOVERY_RETRY = "The chat is kept: send again to retry.";
+const ROUTING_DISCOVERY_CHECK =
+  "If it keeps failing, check that this computer can reach chatgpt.com (VPN, proxy or firewall).";
+
+function isRoutingDiscoveryFailure(error: CodexErrorParams["error"]) {
+  return ROUTING_DISCOVERY_PATTERN.test(
+    `${error.message}\n${error.additionalDetails ?? ""}`,
+  );
+}
 
 function codexProviderErrorDelta(
   state: CodexEventTranslationState,
@@ -659,11 +668,8 @@ function codexProviderErrorDelta(
           : BARE_BAD_REQUEST_NOTE
         : null,
       unsupportedModel ? UNSUPPORTED_MODEL_NOTE : null,
-      willRetry !== true &&
-      ROUTING_DISCOVERY_PATTERN.test(
-        `${error.message}\n${error.additionalDetails ?? ""}`,
-      )
-        ? ROUTING_DISCOVERY_NOTE
+      willRetry !== true && isRoutingDiscoveryFailure(error)
+        ? `${ROUTING_DISCOVERY_CAUSE} ${ROUTING_DISCOVERY_RETRY} ${ROUTING_DISCOVERY_CHECK}`
         : null,
     ]
       .filter(Boolean)
@@ -1352,7 +1358,10 @@ export function translateCodexEventToDeltas(
 
   if (envelope.data.method === "hook/completed") {
     const reason = commandGuardBlockReason(envelope.data.params);
-    if (reason) return [{ kind: "provider.warning", category: "general", summary: reason }];
+    if (reason)
+      return [
+        { kind: "provider.warning", category: "general", summary: reason },
+      ];
     const problem = hookProblemWarning(envelope.data.params);
     if (problem) return [problem];
   }
@@ -1419,8 +1428,16 @@ export function translateCodexEventToDeltas(
           kind: "turn.boundary",
           providerTurnId: turn.id,
           status,
+          // A parent's notice of a failed child reads this message, and a
+          // batched one cuts it at 300 characters: the retry goes first (#2771).
           ...(turn.error?.message
-            ? { error: { message: turn.error.message } }
+            ? {
+                error: {
+                  message: isRoutingDiscoveryFailure(turn.error)
+                    ? `${ROUTING_DISCOVERY_RETRY}\n${turn.error.message}\n${ROUTING_DISCOVERY_CAUSE} ${ROUTING_DISCOVERY_CHECK}`
+                    : turn.error.message,
+                },
+              }
             : {}),
           ...(status === "completed" || status === "interrupted"
             ? { providerCheckpointId: turn.id }

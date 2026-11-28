@@ -101,6 +101,6 @@ describe("plugin marketplace author links", () => {
     expect(screen.queryByText(/trusted|official|installed/iu)).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Open Alpha details" }));
-    expect(onOpenPlugin).toHaveBeenCalledWith("Alpha");
+    expect(onOpenPlugin).toHaveBeenCalledWith("Alpha", "bb-community");
   });
 });

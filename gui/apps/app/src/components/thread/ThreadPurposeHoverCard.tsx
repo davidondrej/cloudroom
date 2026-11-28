@@ -19,25 +19,57 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { formatRelativeTime } from "@/lib/relative-time";
 import { createSyncedPreferenceAtom } from "@/lib/ui-preferences/synced-preference-atom";
 import { fetchWithAppSurface } from "@/lib/app-surface";
-import { useLoopThreadLabel } from "@/lib/loop-threads";
+import { useLoopLines, type LoopLine } from "@/lib/loop-threads";
 
 export const threadPurposeShowInSidebarAtom = createSyncedPreferenceAtom(
   "threadPurpose.showInSidebar",
 );
 
-/** Which loops started or wake the thread (#1136): "Started by loop: A. Woken by loops: B, C" as [verb, names] pairs. */
-function useLoopLines(threadId: string): [verb: string, names: string][] {
-  const label = useLoopThreadLabel(threadId);
-  if (!label) return [];
-  return label.split(/\. (?=Woken by loops?: )/).map((part) => {
-    const at = part.indexOf(": ");
-    return [part.slice(0, at), part.slice(at + 2)];
-  });
+// The loops that started or wake a thread (#1136), in both cards (David, 2026-11-27): a lime strip on top of the
+// sidebar card (design B), black chips under the note in the title card (design C). Names wrap, never cut off.
+function LoopStrip({ loops, alone }: { loops: LoopLine[]; alone: boolean }) {
+  return (
+    <div
+      className={cn(
+        "-mx-3.5 space-y-0.5 bg-primary px-3.5 py-2 text-xs text-primary-foreground",
+        alone ? "-my-3 rounded-md" : "-mt-3 mb-3 rounded-t-md",
+      )}
+    >
+      {loops.map(([verb, names], index) => (
+        <div key={index} className="flex items-baseline gap-1.5">
+          <span className="shrink-0 opacity-70">{verb}</span>
+          <span className="min-w-0 font-semibold break-words">{names}</span>
+        </div>
+      ))}
+    </div>
+  );
 }
 
-// The sidebar card: a lime strip on top names the loops (David, 2026-11-27, design B).
-function ThreadPurposeCardBody({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
+function LoopChips({ loops }: { loops: LoopLine[] }) {
+  return (
+    <div className="flex flex-col items-start gap-1.5">
+      {loops.map(([verb, names], index) => (
+        <span
+          key={index}
+          className="max-w-full rounded-lg bg-black px-2.5 py-1 font-mono text-[11px] break-words text-white dark:text-primary"
+        >
+          {verb.toLowerCase()} · {names}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+export type SidebarPurposeCard = { purpose: ThreadPurpose | null; loops: LoopLine[] };
+
+/** The sidebar card for a thread, or null: it shows a purpose, loops, or both, unless Settings turned it off. */
+export function useSidebarPurposeCard(threadId: string, purpose: ThreadPurpose | null): SidebarPurposeCard | null {
+  const show = useAtomValue(threadPurposeShowInSidebarAtom);
   const loops = useLoopLines(threadId);
+  return show && (purpose || loops.length) ? { purpose, loops } : null;
+}
+
+function ThreadPurposeCardBody({ purpose, loops }: SidebarPurposeCard) {
   return (
     <>
       <span
@@ -47,16 +79,15 @@ function ThreadPurposeCardBody({ purpose, threadId }: { purpose: ThreadPurpose; 
           loops.length ? "bg-primary" : "bg-popover",
         )}
       />
-      {loops.length ? (
-        <div className="-mx-3.5 -mt-3 mb-3 space-y-0.5 rounded-t-md bg-primary px-3.5 py-2 text-xs text-primary-foreground">
-          {loops.map(([verb, names]) => (
-            <div key={verb} className="flex items-baseline gap-1.5">
-              <span className="shrink-0 opacity-70">{verb}</span>
-              <span className="truncate font-semibold">{names}</span>
-            </div>
-          ))}
-        </div>
-      ) : null}
+      {loops.length ? <LoopStrip loops={loops} alone={!purpose} /> : null}
+      {purpose ? <PurposeSummary purpose={purpose} /> : null}
+    </>
+  );
+}
+
+function PurposeSummary({ purpose }: { purpose: ThreadPurpose }) {
+  return (
+    <>
       <div className="flex items-center justify-between text-[11px] text-muted-foreground">
         <span className="font-medium uppercase tracking-wider">Purpose</span>
         <span>
@@ -139,24 +170,22 @@ function ThreadCredits({ threadId }: { threadId: string }) {
   );
 }
 
-function PurposeCreditsCard({ purpose, threadId }: { purpose: ThreadPurpose; threadId: string }) {
-  const loops = useLoopLines(threadId);
+function PurposeCreditsCard({ purpose, loops, threadId }: SidebarPurposeCard & { threadId: string }) {
   return (
     <div className="flex">
       <div className="flex min-w-0 flex-1 basis-0 flex-col gap-3 bg-primary p-5 text-primary-foreground">
-        <div className="text-[11px] font-semibold uppercase tracking-wider opacity-70">Purpose</div>
-        <div className="flex items-baseline gap-2.5">
-          <span className="font-mono text-[34px] leading-none font-semibold tabular-nums">{purpose.percent}%</span>
-          <span className="text-xs font-semibold opacity-70">{purpose.percent >= 100 ? "done" : "done so far"}</span>
-        </div>
-        <p className="text-sm leading-relaxed font-medium">{purpose.text}</p>
-        {/* The loops, on a black chip (David, 2026-11-27, design C). */}
-        {loops.map(([verb, names]) => (
-          <span key={verb} className="max-w-full self-start truncate rounded-full bg-black px-2.5 py-1 font-mono text-[11px] text-primary">
-            {verb.toLowerCase()} · {names}
-          </span>
-        ))}
-        <div className="mt-auto pt-2 text-xs opacity-60">{updatedText(purpose)}</div>
+        {purpose ? (
+          <>
+            <div className="text-[11px] font-semibold uppercase tracking-wider opacity-70">Purpose</div>
+            <div className="flex items-baseline gap-2.5">
+              <span className="font-mono text-[34px] leading-none font-semibold tabular-nums">{purpose.percent}%</span>
+              <span className="text-xs font-semibold opacity-70">{purpose.percent >= 100 ? "done" : "done so far"}</span>
+            </div>
+            <p className="text-sm leading-relaxed font-medium">{purpose.text}</p>
+          </>
+        ) : null}
+        {loops.length ? <LoopChips loops={loops} /> : null}
+        {purpose ? <div className="mt-auto pt-2 text-xs opacity-60">{updatedText(purpose)}</div> : null}
       </div>
       <ThreadCredits threadId={threadId} />
     </div>
@@ -172,7 +201,8 @@ export function ThreadPurposeHoverCard({
   purpose: ThreadPurpose | null;
   threadId: string;
 }) {
-  if (!purpose) return children;
+  const loops = useLoopLines(threadId);
+  if (!purpose && !loops.length) return children;
   return (
     <HoverCard openDelay={250} closeDelay={100}>
       <HoverCardTrigger asChild>{children}</HoverCardTrigger>
@@ -181,7 +211,7 @@ export function ThreadPurposeHoverCard({
         sideOffset={8}
         className="w-[660px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl p-0 shadow-xl"
       >
-        <PurposeCreditsCard purpose={purpose} threadId={threadId} />
+        <PurposeCreditsCard purpose={purpose} loops={loops} threadId={threadId} />
       </HoverCardContent>
     </HoverCard>
   );
@@ -205,11 +235,11 @@ export const preventPurposeOpenOnFocus = (event: FocusEvent) =>
 
 export function SidebarThreadPurposeHoverCard({
   children,
-  purpose,
+  card,
   threadId,
 }: {
   children: ReactNode;
-  purpose: ThreadPurpose | null;
+  card: SidebarPurposeCard | null;
   threadId: string;
 }) {
   const store = useStore();
@@ -234,7 +264,7 @@ export function SidebarThreadPurposeHoverCard({
     [store, threadId],
   );
   const handleOpenChange = (next: boolean) => {
-    if (next && !purpose) return;
+    if (next && !card) return;
     setOpenedHere(next);
     window.clearTimeout(coolSidebarPurposeTimer);
     if (next) {
@@ -252,13 +282,13 @@ export function SidebarThreadPurposeHoverCard({
   };
   return (
     <HoverCard
-      open={open && purpose !== null}
+      open={open && card !== null}
       onOpenChange={handleOpenChange}
       openDelay={isWarm ? 0 : SIDEBAR_PURPOSE_OPEN_DELAY_MS}
       closeDelay={0}
     >
       {children}
-      {purpose ? (
+      {card ? (
         <HoverCardContent
           side="bottom"
           align="start"
@@ -268,7 +298,7 @@ export function SidebarThreadPurposeHoverCard({
             openedWarm && "data-[state=open]:animate-none!",
           )}
         >
-          <ThreadPurposeCardBody purpose={purpose} threadId={threadId} />
+          <ThreadPurposeCardBody {...card} />
         </HoverCardContent>
       ) : null}
     </HoverCard>

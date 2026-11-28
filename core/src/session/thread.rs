@@ -34,22 +34,22 @@ room-cli thread compact --self|CHILD_ID [--then TEXT|--no-then]
 room-cli thread spawn --provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero [--model MODEL] [--reasoning-level LEVEL] [--service-tier default|fast] [--title TITLE] [--pin] [--shared-sandbox|--top-level] --prompt TEXT|--prompt-file PATH
 room-cli thread fork [--provider codex|claude-code|cursor|pi|opencode|hermes|devin|droid|kimi|antigravity|fx|openclaw|agent-zero] [--model MODEL] [--reasoning-level LEVEL] [--title TITLE] --prompt TEXT|--prompt-file PATH
 room-cli thread list [--include-archived]
+room-cli thread search WORDS [--include-archived]
 room-cli thread wait --children
-room-cli thread output CHILD_ID [--all | --input TOOL_INPUT_ID [--offset N]]
-room-cli thread log CHILD_ID
+room-cli thread output THREAD_ID [--all | --input TOOL_INPUT_ID [--offset N]]
+room-cli thread log THREAD_ID
 room-cli thread tell THREAD_ID|--parent [--mode queue|steer|auto] [--request-id ID] TEXT|--message-file PATH
 room-cli thread stop CHILD_ID
 room-cli thread archive CHILD_ID...
 Flags go in any order.";
-const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one. `tell` prints a request_id: to send the same message again after an unclear answer, rerun the exact command with --request-id ID, and it is delivered once.";
+const ABOUT: &str = "Shows, renames, pins, archives, moves, compacts or changes the effort of this cloud thread, or starts, checks, pins, compacts, stops and archives its child threads. `compact` waits for a running turn to end, then sends the --then message (by default, keep going). --top-level starts a top-level thread instead of a child, only when the user asks for one. `search`, `output`, `log` and `tell` also reach the user's other threads, Local and Cloud, when Settings > Cloud > Thread access allows it. `tell` to a child you stopped starts it again; one the user stopped waits for the user. `tell` prints a request_id: to send the same message again after an unclear answer, rerun the exact command with --request-id ID, and it is delivered once.";
 /// `room-cli thread` commands only the app on the user's computer has.
-const LOCAL_ONLY: [&str; 26] = [
+const LOCAL_ONLY: [&str; 25] = [
     "count",
     "context",
     "open",
     "pane",
     "section",
-    "search",
     "history",
     "read",
     "unread",
@@ -75,7 +75,7 @@ const LOCAL_ONLY: [&str; 26] = [
 /// access, so both Mac commands need `--write`, as in helper/jobs.rs.
 fn mark_note(verb: &str) -> String {
     format!(
-        "`room-cli thread {verb}` prints no messages: it only changes a thread's unread dot in the user's app. Run it only when the user asks: room-cli mac run --write '~/.local/bin/room-cli thread {verb} THREAD_ID'. To read a thread's messages: room-cli thread log CHILD_ID for your child threads, room-cli team read THREAD_ID for a teammate's, or room-cli mac run --write '~/.local/bin/room-cli thread log THREAD_ID' for another thread of the user's. With --write, Full Mac access runs it at once and Ask first asks the user; with Read-only, ask the user to run it on their Mac."
+        "`room-cli thread {verb}` prints no messages: it only changes a thread's unread dot in the user's app. Run it only when the user asks: room-cli mac run --write '~/.local/bin/room-cli thread {verb} THREAD_ID'. To read a thread's messages: room-cli thread log THREAD_ID for any of the user's threads (find one with room-cli thread search WORDS), or room-cli team read THREAD_ID for a teammate's. With --write, Full Mac access runs it at once and Ask first asks the user; with Read-only, ask the user to run it on their Mac."
     )
 }
 /// `thread compact`'s follow-up unless `--then` or `--no-then`. The Local CLI sends the same.
@@ -117,6 +117,10 @@ const FORK_WAIT: Duration = Duration::from_secs(90);
 /// How long `thread wait` blocks before the agent must run it again. It stays under Claude Code's 2-minute command
 /// limit, so the agent always sees the outcome instead of a killed command.
 const CHILD_WAIT: Duration = Duration::from_secs(100);
+/// How long a read or message for a Local thread waits for the user's Cloudroom app, which alone holds Local threads
+/// (ADR 0286), and how long `thread search` waits for their titles. Each stays well under Claude Code's 2-minute limit.
+const LOCAL_WAIT: Duration = Duration::from_secs(20);
+const LOCAL_SEARCH_WAIT: Duration = Duration::from_secs(8);
 /// How long a child request's outcome is remembered, so a retried spawn or a repeated app answer gets the same one.
 const OUTCOME_KEPT: Duration = Duration::from_secs(3600);
 /// Each fork request's outcome, by session and request ID. It is decided once, under this lock, so a late answer
@@ -213,6 +217,9 @@ pub struct ForkBody {
 pub struct ChildAnswer {
     thread: Option<String>,
     error: Option<String>,
+    /// A thread request's answer (ADR 0286): a Local thread's chat, a message's receipt, or matching titles.
+    #[serde(default)]
+    output: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -267,6 +274,7 @@ pub(crate) fn agent_routes() -> Router<Arc<Manager>> {
         .route("/working", get(working))
         .route("/fork", post(fork))
         .route("/children/{id}", get(output))
+        .route("/threads", get(search))
         .route("/children/{id}/messages", post(tell))
         .route("/children/{id}/stop", post(stop_child))
         .route("/children/{id}/pin", post(pin_child))
@@ -920,7 +928,8 @@ async fn answer_child(
             "Unknown or expired child request",
         )),
         Some(Outcome::Waiting(reply)) => {
-            let result = match input.thread {
+            let output = input.output.map(|output| output.to_string());
+            let result = match output.or(input.thread) {
                 Some(thread) => {
                     children.insert(slot, Outcome::Started(thread.clone(), Instant::now()));
                     Ok(thread)
@@ -979,11 +988,14 @@ async fn working(
         .filter_map(|child| Some(child["id"].as_str()?.to_owned()))
         .collect();
     let local = m.local.lock().unwrap();
-    let own = local.sessions.get(&parent).map(|s| s.child_states.iter());
+    let session = local.sessions.get(&parent);
+    // Its own parent is never its child: older Cores noted it as one after `tell --parent`.
+    let up = session.and_then(|s| s.parent_thread());
     working.extend(
-        own.into_iter()
-            .flatten()
-            .filter(|(_, state)| matches!(state.as_str(), "starting" | "running"))
+        (session.into_iter().flat_map(|s| &s.child_states))
+            .filter(|(child, state)| {
+                matches!(state.as_str(), "starting" | "running") && up != Some(child.as_str())
+            })
             .map(|(child, _)| child.clone()),
     );
     Ok(Json(json!({"working":working})))
@@ -1036,7 +1048,17 @@ async fn output(
         }
         let all = if query.all { "1" } else { "0" };
         let failed = start_error(&m, &parent, &id);
-        return match api.get("chat", &[("thread", &id), ("all", all)]).await {
+        let read = api.get("chat", &[("thread", &id), ("all", all)]).await;
+        // Not a Cloud thread the website knows: it may be one of the user's Local threads (ADR 0286).
+        if matches!(read, Err(super::history::ApiError::Status(404, _)))
+            && failed.is_none()
+            && !known_child(&m, &parent, &id)
+            && !starting(&m, &parent, true).contains(&id)
+        {
+            let read = json!({"action":"read","thread":id,"all":query.all});
+            return ask_local(&m, &parent, read, LOCAL_WAIT).await;
+        }
+        return match read {
             // The website may not know a child that just started yet, or has no chat of it yet (#317).
             Err(super::history::ApiError::Status(404, _))
                 if starting(&m, &parent, true).contains(&id) =>
@@ -1118,9 +1140,17 @@ async fn tell(
     if relay::thread_id(&id) || id == "parent" {
         let text = Some(input.text.as_str());
         let relayed = format!("{key}{}", if queue { relay::QUEUE } else { "" });
-        return relay::command(&m, &sender, &id, "tell", text, to_parent, Some(&relayed))
-            .await
-            .map_err(|failure| resend(failure, &key));
+        return match relay::command(&m, &sender, &id, "tell", text, to_parent, Some(&relayed)).await
+        {
+            // Not a Cloud thread the website knows: it may be one of the user's Local threads (ADR 0286).
+            Err((StatusCode::NOT_FOUND, _))
+                if !to_parent && id != "parent" && !known_child(&m, &sender, &id) =>
+            {
+                let tell = json!({"action":"tell","thread":id,"text":input.text,"key":key});
+                ask_local(&m, &sender, tell, LOCAL_WAIT).await
+            }
+            answer => answer.map_err(|failure| resend(failure, &key)),
+        };
     }
     let under = m.tell_target(&sender, &id).map_err(session_failure)?;
     let text = if under {
@@ -1135,7 +1165,7 @@ async fn tell(
     }
     let request = format!("tell_{key}");
     if under {
-        revive(&m, &id, &request, Some(&sender));
+        revive(&m, &id, &request, Some(&sender), true);
     }
     let told = if to_parent {
         "your parent thread"
@@ -1146,6 +1176,100 @@ async fn tell(
         .map_err(|failure| resend(not_running(failure, told), &key))?;
     answer["request_id"] = json!(key);
     Ok(answer)
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    search: String,
+    #[serde(default)]
+    include_archived: bool,
+}
+
+/// `thread search WORDS` (ADR 0286): the user's Cloud threads whose title matches, from the website, then their Local
+/// ones from the app on their computer, when it answers in time.
+async fn search(
+    State(m): State<Arc<Manager>>,
+    ConnectInfo(peer): ConnectInfo<Peer>,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<Value>, Failure> {
+    let caller = caller(&m, peer, "thread search")?;
+    let Some(api) = &m.history.api else {
+        return Err(fail(
+            StatusCode::CONFLICT,
+            "Other threads are found through Cloudroom's website, which this Cloudroom doesn't use.",
+        ));
+    };
+    let archived = if query.include_archived { "1" } else { "0" };
+    let ask = [("search", query.search.as_str()), ("archived", archived)];
+    let mut answer = match api.get("threads", &ask).await {
+        Err(super::history::ApiError::Status(404, _)) => {
+            return Err(fail(
+                StatusCode::BAD_GATEWAY,
+                "Cloudroom's website can't search threads yet. Try again after it updates.",
+            ));
+        }
+        answer => answer.map_err(|error| website_failure(error, "search the user's threads"))?,
+    };
+    let local = json!({"action":"search","search":query.search,"archived":query.include_archived});
+    match ask_local(&m, &caller, local, LOCAL_SEARCH_WAIT).await {
+        Ok(Json(local)) => {
+            let found = local["threads"].as_array().cloned().unwrap_or_default();
+            if let Some(threads) = answer["threads"].as_array_mut() {
+                threads.extend(found);
+            }
+            if local["more"] == true {
+                answer["more"] = json!(true);
+            }
+        }
+        Err((status, Json(error))) => {
+            let why = if status == StatusCode::SERVICE_UNAVAILABLE {
+                "the user's computer is off or its Cloudroom app didn't answer"
+            } else {
+                error["error"].as_str().unwrap_or("unknown error")
+            };
+            answer["note"] = json!(format!("Cloud threads only, no Local ones: {why}."));
+        }
+    }
+    Ok(Json(answer))
+}
+
+/// A child this thread started in a sandbox of its own: the website's 404 for it (say, no session yet) is about the
+/// child, never a sign it is a Local thread.
+fn known_child(m: &Manager, caller: &str, id: &str) -> bool {
+    let local = m.local.lock().unwrap();
+    local
+        .sessions
+        .get(caller)
+        .is_some_and(|s| s.child_states.contains_key(id))
+}
+
+/// A thread the website doesn't know may be one of the user's Local threads, or a subagent sharing its parent's
+/// sandbox. Only the Cloudroom app on their computer reaches those, and it checks Thread access first (ADR 0286).
+async fn ask_local(
+    m: &Manager,
+    caller: &str,
+    mut data: Value,
+    wait: Duration,
+) -> Result<Json<Value>, Failure> {
+    let key = random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()))?;
+    let id = format!("thread_{key}");
+    data["id"] = json!(id);
+    let asked = ask_app(m, caller, "thread_request", data, wait).await;
+    // Nothing retries a thread request, so its answer (a whole chat, say) isn't kept like a child's start.
+    CHILDREN.lock().unwrap().remove(&format!("{caller}/{id}"));
+    match asked? {
+        Asked::Started(output) => serde_json::from_str(&output).map(Json).map_err(|_| {
+            fail(
+                StatusCode::BAD_GATEWAY,
+                "The Cloudroom app sent an unreadable answer.",
+            )
+        }),
+        Asked::Refused(error) => Err(fail(StatusCode::CONFLICT, &error)),
+        Asked::Missed => Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cloudroom's website doesn't have this thread, so it is a Local thread, a subagent sharing its parent's sandbox, or not one of the user's. Those are reachable only while the user's computer is on with an up-to-date Cloudroom app open, and it didn't answer.",
+        )),
+    }
 }
 
 /// A tell's request ID: the sender's (`--request-id`, one an earlier tell printed) or a new one. Short and without
@@ -1194,15 +1318,22 @@ fn not_running(failure: Failure, told: &str) -> Failure {
 
 /// A tell from a thread that started this one first restarts its lost agent (a crash after its one automatic
 /// recovery) from its saved chat, as the app's message does (#154, #1629), or starts again one whose start failed
-/// before it existed (#2036). Never one stopped (its queue paused) or archived, and never for a tell already steered
+/// before it existed (#2036). With `unpause` (a tell, not a report), it also resumes one a thread above stopped
+/// (`agent_paused`), so the tell runs. Never one the user stopped or archived, and never for a tell already steered
 /// or queued. `resume` checks that no agent runs, the chat is intact or none was started, and, with `sender`, the
 /// tell's own ancestry, in the step that accepts it; a refusal leaves the tell refused as before.
-pub(super) fn revive(m: &Arc<Manager>, id: &str, request: &str, sender: Option<&str>) {
+pub(super) fn revive(
+    m: &Arc<Manager>,
+    id: &str,
+    request: &str,
+    sender: Option<&str>,
+    unpause: bool,
+) {
     let local = m.local.lock().unwrap();
     let lost = (local.sessions.get(id)).is_some_and(|s| {
-        (s.state == SessionState::ProcessLost || s.failed_start().is_some())
-            && !s.archived
-            && !s.queue_paused
+        let lost = s.state == SessionState::ProcessLost || s.failed_start().is_some();
+        let parent_stop = unpause && s.queue_paused && s.agent_paused;
+        !s.archived && ((lost && !s.queue_paused) || parent_stop)
     });
     drop(local);
     let sent = [request.to_owned(), format!("{request}_steer")]
@@ -1212,6 +1343,15 @@ pub(super) fn revive(m: &Arc<Manager>, id: &str, request: &str, sender: Option<&
         let wake = format!("{request}_wake");
         let _ = m.command_from(id, wake, "resume", json!({}), false, sender);
     }
+}
+
+/// A `thread stop` from the thread above, in this sandbox; one relayed from another sandbox has `relay_`. The user's
+/// stops (the app, the phone) have UUIDs.
+const PARENT_STOP: &str = "parent_stop_";
+
+/// Whether a stop came from a thread above, not the user.
+pub(super) fn agent_stop(request: &str) -> bool {
+    request.starts_with(PARENT_STOP) || request.starts_with("relay_")
 }
 
 pub(super) const NO_PARENT: &str = "This thread has no parent that `thread tell --parent` can reach. If another thread started it, Cloudroom passes it your reply when this turn ends.";
@@ -1240,9 +1380,9 @@ pub(super) async fn deliver(
             json!({"id":id,"state":done.state,"note":REPEAT_NOTE,"repeat":true}),
         ));
     }
-    // A steer that failed falls back to the queue, even on a retry.
+    // A steer that failed falls back to the queue, even on a retry; `queue` queues it whatever its steer did.
     let steered = match m.receipt(id, &steer_id) {
-        Some(s) if s.state != "failed" => {
+        Some(s) if s.state != "failed" && !queue => {
             return Ok(Json(
                 json!({"id":id,"state":s.state,"note":REPEAT_NOTE,"repeat":true}),
             ));
@@ -1352,7 +1492,7 @@ async fn stop_child(
     m.own_child(&parent, &id).map_err(session_failure)?;
     let key = || random_key().map_err(|e| fail(StatusCode::SERVICE_UNAVAILABLE, &e.to_string()));
     let receipt = m
-        .command(&id, key()?, "stop", json!({}))
+        .command(&id, format!("{PARENT_STOP}{}", key()?), "stop", json!({}))
         .map_err(session_failure)?;
     if m.stop_sleeps(&id) {
         let _ = m.command(&id, key()?, "sleep", json!({"end_jobs":true}));
@@ -1891,7 +2031,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
                         return Ok(1);
                     }
                     eprintln!(
-                        "{} is not a child thread of this thread. See room-cli thread list.",
+                        "{} is not a child thread of this thread. See room-cli thread list; to read another of the user's threads: room-cli thread log THREAD_ID.",
                         ids[0]
                     );
                     return Ok(1);
@@ -1944,7 +2084,7 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
             }
             Ok(_) => {
                 eprintln!(
-                    "Name a child: room-cli thread {command} CHILD_ID. Your own chat is already in your context."
+                    "Name a thread: room-cli thread {command} THREAD_ID. Your own chat is already in your context."
                 );
                 return Ok(2);
             }
@@ -2088,6 +2228,31 @@ pub async fn cli(args: &[String]) -> io::Result<i32> {
         "read" | "unread" => {
             eprintln!("{}", mark_note(command));
             return Ok(2);
+        }
+        "search" => {
+            let words = match own(&[], &["--include-archived"]) {
+                Ok(words) if !words.is_empty() => words.join(" "),
+                Ok(_) => {
+                    eprintln!("Name what to search for: room-cli thread search WORDS");
+                    return Ok(2);
+                }
+                Err(code) => return Ok(code),
+            };
+            let archived = rest.contains(&"--include-archived");
+            let words: String = (words.bytes())
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        (b as char).to_string()
+                    }
+                    _ => format!("%{b:02X}"),
+                })
+                .collect();
+            call(
+                "GET",
+                &format!("/threads?search={words}&include_archived={archived}"),
+                None,
+            )
+            .await?
         }
         other if LOCAL_ONLY.contains(&other) => {
             eprintln!("{}", super::info::on_computer(&format!("thread {other}")));

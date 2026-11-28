@@ -1,9 +1,8 @@
-import { and, eq } from "drizzle-orm";
 import {
   deleteQueuedThreadMessage,
-  events,
   getQueuedThreadMessage,
   getStoredTurnRequestEventForTurn,
+  hasTurnContextCompaction,
   listQueuedThreadMessages,
   reorderQueuedThreadMessage,
   updateQueuedThreadMessage,
@@ -65,13 +64,8 @@ export function settleCompactFollowUp(
     deleteQueuedThreadMessage(deps.db, deps.hub, id);
     return false;
   }
-  const compacted = deps.db
-    .select({ type: events.type })
-    .from(events)
-    .where(
-      and(eq(events.threadId, args.threadId), eq(events.turnId, args.turnId), eq(events.type, "thread/compacted")),
-    )
-    .get();
+  // Codex 0.149 reports only a finished contextCompaction item, no `thread/compacted` (#2424).
+  const compacted = hasTurnContextCompaction(deps.db, args);
   tellFollowUp(
     deps,
     row,

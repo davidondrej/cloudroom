@@ -200,6 +200,78 @@ describe("getCheckoutRef", () => {
       branchName: "main",
     });
   });
+
+  it("distinguishes plain directories from missing paths and unreadable git directories", async () => {
+    const plainDir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-plain-dir-"));
+    tempDirs.push(plainDir);
+
+    await expect(getCheckoutRef(plainDir)).resolves.toEqual({
+      kind: "unknown",
+      reason: "Path is not a git repository",
+    });
+    await expect(
+      getCheckoutRef(path.join(plainDir, "missing")),
+    ).resolves.toEqual({
+      kind: "unknown",
+      reason: "Path does not exist",
+    });
+
+    const brokenRepo = await fs.mkdtemp(
+      path.join(os.tmpdir(), "bb-broken-git-"),
+    );
+    tempDirs.push(brokenRepo);
+    await fs.writeFile(
+      path.join(brokenRepo, ".git"),
+      "gitdir: /nonexistent-gitdir\n",
+      "utf8",
+    );
+    const brokenSubdir = path.join(brokenRepo, "docs");
+    await fs.mkdir(brokenSubdir);
+    await expect(getCheckoutRef(brokenRepo)).resolves.toEqual({
+      kind: "unknown",
+      reason: "Git repository is unreadable or invalid",
+    });
+    await expect(getCheckoutRef(brokenSubdir)).resolves.toEqual({
+      kind: "unknown",
+      reason: "Git repository is unreadable or invalid",
+    });
+
+    // Bare repositories are Git storage, never plain folders (#2704).
+    const bare = { kind: "unknown", reason: "Path is a bare Git repository" };
+    const emptyBare = await fs.mkdtemp(path.join(os.tmpdir(), "bb-bare-"));
+    tempDirs.push(emptyBare);
+    await runGit(["init", "--bare"], { cwd: emptyBare });
+    await expect(getCheckoutRef(emptyBare)).resolves.toEqual(bare);
+    const refusedBare = `${emptyBare}-clone`;
+    tempDirs.push(refusedBare);
+    const source = await initReadGitBlobRepo();
+    await runGit(["clone", "--bare", source, refusedBare], { cwd: source });
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "safe.bareRepository");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "explicit");
+    await expect(getCheckoutRef(refusedBare)).resolves.toEqual(bare);
+    vi.unstubAllEnvs();
+
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const unreadableRepo = await initReadGitBlobRepo();
+      const unreadableSubdir = path.join(unreadableRepo, "docs");
+      await fs.mkdir(unreadableSubdir, { recursive: true });
+      const gitDir = path.join(unreadableRepo, ".git");
+      await fs.chmod(gitDir, 0o000);
+      try {
+        await expect(getCheckoutRef(unreadableRepo)).resolves.toEqual({
+          kind: "unknown",
+          reason: "Git repository is unreadable or invalid",
+        });
+        await expect(getCheckoutRef(unreadableSubdir)).resolves.toEqual({
+          kind: "unknown",
+          reason: "Git repository is unreadable or invalid",
+        });
+      } finally {
+        await fs.chmod(gitDir, 0o700);
+      }
+    }
+  });
 });
 
 describe("readDefaultBranchRefs", () => {
@@ -509,4 +581,3 @@ describe("parsePorcelainEntries", () => {
     ]);
   });
 });
-

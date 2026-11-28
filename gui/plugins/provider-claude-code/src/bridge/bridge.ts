@@ -378,8 +378,6 @@ const TURN_INTERRUPT_TIMEOUT_MS = 2_000;
 /** Same text as `UNDELIVERED_MESSAGE_WARNING` in @cloudroom/domain (the bridge test checks). */
 const UNDELIVERED_MESSAGE_WARNING =
   "May not have been delivered: the agent stopped before reading it";
-/** How long a new turn waits on its MCP check before Claude gets the prompt. */
-const MCP_CHECK_WAIT_MS = 10_000;
 const THREAD_STOPPED_MESSAGE =
   "Thread stopped while awaiting permission approval";
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
@@ -1666,6 +1664,16 @@ function createOnSdkMessage(
             ]),
         });
       }
+      if (message.type === "result" && !threadSession.closing) {
+        // Retry failed/needs-auth MCP servers while Claude is idle between turns,
+        // never on the critical path of turn/start.
+        void threadSession.session.reconnectMcpServers().catch((error) => {
+          if (threadSession.closing || threadSession.streamEnded) return;
+          logBridgeError(
+            `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }
     }
     const recoveryKind = getAssistantMessageRecoveryKind(message);
     if (recoveryKind !== null) {
@@ -2764,21 +2772,6 @@ async function runTurnInput(
     );
     if (stopped) return text;
     await enterPlanModeIfRequested(threadSession, params);
-    if (intent === "new-turn") {
-      // Best effort. Claude still starting, or stuck, must not hold the turn
-      // past the host's wait for turn/start (#1574).
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      await Promise.race([
-        threadSession.session.reconnectMcpServers().catch((error) => {
-          logBridgeError(
-            `Failed to check MCP servers: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }),
-        new Promise((resolve) => {
-          timer = setTimeout(resolve, MCP_CHECK_WAIT_MS);
-        }),
-      ]).finally(() => clearTimeout(timer));
-    }
     return text;
   });
   threadSession.turnSetup = setup.then(

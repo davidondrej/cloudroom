@@ -90,8 +90,10 @@ import {
 import { decideWithinBox } from "./dispatch-hooks.js";
 import { throwEnvironmentNotReady } from "../lib/lifecycle-api-errors.js";
 import {
+  getCachedProjectSourceByHost,
   resolveGitCheckoutAvailability,
   resolvePluginEnvironmentProviderAvailability,
+  type CheckoutInspectionCache,
 } from "../environments/provider-availability.js";
 import { resolveStableThreadRequestEnvironment } from "./thread-request-eligibility.js";
 import type { ThreadProvisionEnvironmentIntent } from "./thread-startup-store.js";
@@ -246,6 +248,7 @@ export async function completeProviderSelection(
   record: PluginEnvironmentProviderRecord,
   projectId: string,
   selection: ProviderSelection,
+  checkoutInspectionCache?: CheckoutInspectionCache,
 ): Promise<ProviderSelection> {
   const environmentProviderId = record.provider.id;
   const requires = record.provider.requires;
@@ -253,7 +256,12 @@ export async function completeProviderSelection(
   if (selection.machine.type === "existing") {
     requireEnvironmentPlacementHost(deps, selection.machine.hostId);
     if (requires.projectCheckout) {
-      requireSourceForHost(deps, projectId, selection.machine.hostId);
+      requireSourceForHost(
+        deps,
+        projectId,
+        selection.machine.hostId,
+        checkoutInspectionCache,
+      );
     }
     machine = selection.machine;
   } else {
@@ -278,6 +286,9 @@ export async function completeProviderSelection(
   const inputs = await parseProviderInputs(record, selection.inputs);
   if (machine.type === "existing") {
     await validateProviderSelection(deps, record, {
+      ...(checkoutInspectionCache !== undefined
+        ? { checkoutInspectionCache }
+        : {}),
       hostId: machine.hostId,
       inputs,
       projectId,
@@ -291,6 +302,7 @@ async function resolveCompleteProviderSelection(
   projectId: string,
   environmentProviderId: string,
   selection: ProviderSelection,
+  checkoutInspectionCache?: CheckoutInspectionCache,
 ): Promise<ResolvedProviderSelection> {
   const record = getEnvironmentProvider(environmentProviderId);
   if (record === undefined) {
@@ -301,6 +313,7 @@ async function resolveCompleteProviderSelection(
     record,
     projectId,
     selection,
+    checkoutInspectionCache,
   );
   return { ...completed, selectionResolved: true };
 }
@@ -321,7 +334,12 @@ const validateDecisionSchema = z.discriminatedUnion("action", [
 export async function validateProviderSelection(
   deps: PlacementDeps,
   record: PluginEnvironmentProviderRecord,
-  args: { hostId: string; inputs: JsonValue | null; projectId: string },
+  args: {
+    checkoutInspectionCache?: CheckoutInspectionCache;
+    hostId: string;
+    inputs: JsonValue | null;
+    projectId: string;
+  },
 ): Promise<void> {
   const environmentProviderId = record.provider.id;
   const requires = record.provider.requires;
@@ -336,7 +354,13 @@ export async function validateProviderSelection(
   const checkout =
     host === null
       ? null
-      : getProjectSourceByHost(deps.db, args.projectId, host.id);
+      : getCachedProjectSourceByHost(deps.db, {
+          ...(args.checkoutInspectionCache !== undefined
+            ? { cache: args.checkoutInspectionCache }
+            : {}),
+          hostId: host.id,
+          projectId: args.projectId,
+        });
   const projectCheckout = toProviderProjectCheckout(deps.db, {
     checkout,
     hostId: host.id,
@@ -352,6 +376,9 @@ export async function validateProviderSelection(
   }
   if (requires.gitCheckout && projectCheckout !== null) {
     const availability = await resolveGitCheckoutAvailability(deps, {
+      ...(args.checkoutInspectionCache !== undefined
+        ? { cache: args.checkoutInspectionCache }
+        : {}),
       hostId: host.id,
       path:
         worktreeSourcePath(environmentProviderId, args.inputs) ??
@@ -458,6 +485,7 @@ export async function validateProviderSelection(
 
 export interface ResolveThreadEnvironmentPlacementArgs {
   allowUnmanagedPersonalProjectReuseEnvironmentId?: string;
+  checkoutInspectionCache?: CheckoutInspectionCache;
   projectId: string;
   requestedEnvironment: EnvironmentArgs | ProviderEnvironmentArgs;
 }
@@ -535,10 +563,16 @@ export async function resolveThreadEnvironmentPlacement(
           "requires a project with a Git remote",
         );
     }
-    return providerPlacement(deps, args.projectId, environmentProviderId, {
-      machine,
-      inputs: requested.inputs,
-    });
+    return providerPlacement(
+      deps,
+      args.projectId,
+      environmentProviderId,
+      {
+        machine,
+        inputs: requested.inputs,
+      },
+      args.checkoutInspectionCache,
+    );
   }
   const resolvedEnvironment = resolveStableThreadRequestEnvironment(deps, {
     ...(args.allowUnmanagedPersonalProjectReuseEnvironmentId !== undefined
@@ -546,6 +580,9 @@ export async function resolveThreadEnvironmentPlacement(
           allowUnmanagedPersonalProjectReuseEnvironmentId:
             args.allowUnmanagedPersonalProjectReuseEnvironmentId,
         }
+      : {}),
+    ...(args.checkoutInspectionCache !== undefined
+      ? { checkoutInspectionCache: args.checkoutInspectionCache }
       : {}),
     environment: args.requestedEnvironment,
     projectId: args.projectId,
@@ -567,6 +604,7 @@ export async function resolveThreadEnvironmentPlacement(
             },
             inputs: worktreeProviderInputs(workspace.baseBranch),
           },
+          args.checkoutInspectionCache,
         );
       }
       if (resolvedEnvironment.unmanagedPath === null) {
@@ -609,6 +647,7 @@ export async function resolveThreadEnvironmentPlacement(
             workspace.branch,
           ),
         },
+        args.checkoutInspectionCache,
       );
     }
     case "personal": {
@@ -623,6 +662,7 @@ export async function resolveThreadEnvironmentPlacement(
           },
           inputs: null,
         },
+        args.checkoutInspectionCache,
       );
     }
   }
@@ -1387,12 +1427,14 @@ async function providerPlacement(
   projectId: string,
   environmentProviderId: string,
   requested: ProviderSelection,
+  checkoutInspectionCache?: CheckoutInspectionCache,
 ): Promise<ThreadEnvironmentPlacement> {
   const selection = await resolveCompleteProviderSelection(
     deps,
     projectId,
     environmentProviderId,
     requested,
+    checkoutInspectionCache,
   );
   return {
     environmentId: null,

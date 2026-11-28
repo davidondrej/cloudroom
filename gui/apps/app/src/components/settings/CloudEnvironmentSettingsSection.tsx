@@ -18,7 +18,7 @@ import { formatRelativeTime } from "@/lib/relative-time";
 import { MAC_MCP_KEY, useMcpSignIn } from "@/components/CloudMcpSignIn";
 import { useThisComputer } from "@/hooks/useHostDaemon";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
-import { getPluginConfigurationRoutePath, getPluginDetailRoutePath } from "@/lib/route-paths";
+import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
 import { Link } from "react-router";
 
 const ENVIRONMENT_KEY = ["cloudroom-environment"];
@@ -295,14 +295,14 @@ function GithubCard({ synced }: { synced: number }) {
   );
 }
 
-/** Where RepoSync is found: its tab when the plugin is on, else its plugin page to turn it on (docs/scopes/repo-sync.md). */
+/** Links to RepoSync's page in Settings, where it is set up or turned on (docs/scopes/repo-sync.md). */
 function RepoSyncLine({ synced }: { synced: number }) {
   const plugins = usePluginList({ enabled: true });
   const on = plugins.data?.plugins.some((plugin) => plugin.id === "repo-sync" && plugin.enabled) ?? false;
   return (
     <div className="flex items-center justify-between gap-3 border-t border-border bg-surface-recessed/40 px-4 py-2 text-xs text-subtle-foreground">
       <span>{synced ? <><span className="text-foreground">RepoSync</span> pushes {synced} {synced === 1 ? "repo" : "repos"} to GitHub automatically</> : "Push cloud work to GitHub automatically with RepoSync"}</span>
-      <Link to={on ? getPluginConfigurationRoutePath({ pluginId: "repo-sync" }) : getPluginDetailRoutePath({ pluginId: "repo-sync" })} className="shrink-0 text-foreground underline-offset-2 hover:underline">
+      <Link to={getPluginConfigurationRoutePath({ pluginId: "repo-sync" })} className="shrink-0 text-foreground underline-offset-2 hover:underline">
         {on ? "Open RepoSync" : "Turn on"}
       </Link>
     </div>
@@ -765,7 +765,7 @@ function ReposCard({ repos, busy, onChange }: { repos: string[]; busy: boolean; 
       </div>
       <div className="flex items-center justify-between gap-3 border-t border-border bg-surface-recessed/40 px-4 py-2 text-xs text-subtle-foreground">
         <span>
-          {repos.length ? <><span className="text-foreground">{repos.length} GitHub {repos.length === 1 ? "repo" : "repos"}</span> clone into <code>/repos</code> in every cloud sandbox</> : <>Picked repos clone into <code>/repos</code> in every cloud sandbox</>}
+          {repos.length ? <><span className="text-foreground">{repos.length} GitHub {repos.length === 1 ? "repo" : "repos"}</span> clone into <code>{"/repos/<owner>/<repo>"}</code> in every cloud sandbox</> : <>Picked repos clone into <code>{"/repos/<owner>/<repo>"}</code> in every cloud sandbox</>}
         </span>
         {available.length > 0 && <span>Most recently pushed first</span>}
       </div>

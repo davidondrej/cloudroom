@@ -220,11 +220,20 @@ export async function install(dir: string, signal: AbortSignal, delays = [2_000,
   }
 }
 
-async function osascript(script: string, env?: NodeJS.ProcessEnv) {
-  const { stdout } = await run("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], {
-    timeout: 15_000,
-    env,
-  });
+async function osascript(
+  script: string,
+  env?: NodeJS.ProcessEnv,
+  options?: { timeout?: number; signal?: AbortSignal },
+) {
+  const { stdout } = await run(
+    "/usr/bin/osascript",
+    ["-l", "JavaScript", "-e", script],
+    {
+      timeout: options?.timeout ?? 15_000,
+      env,
+      signal: options?.signal,
+    },
+  );
   return stdout.trim();
 }
 
@@ -276,15 +285,23 @@ function launchScript(app: string, byName: boolean) {
   return `ObjC.import("AppKit");
 (() => {
   const ws = $.NSWorkspace.sharedWorkspace, ref = ${JSON.stringify(app)};
-  const file = ref.endsWith(".app") ? ref : ref + ".app";
+  const trimmed = ref.replace(/\\/+$/, "");
+  const file = trimmed.endsWith(".app") ? trimmed : trimmed + ".app";
   const roots = ${JSON.stringify(APP_ROOTS)};
-  const path = ${byName} ? roots.map((root) => root + "/" + file).find((p) => $.NSFileManager.defaultManager.fileExistsAtPath(p)) : undefined;
-  const bundle = path ? $.NSBundle.bundleWithPath(path) : null;
-  const bid = !bundle ? ref : bundle.isNil() || bundle.bundleIdentifier.isNil() ? "" : bundle.bundleIdentifier.js;
-  const url = path ? $.NSURL.fileURLWithPath(path) : ws.URLForApplicationWithBundleIdentifier(ref);
-  if (!bid || url.isNil() || bid === "com.trycua.driver" || bid === "com.trycua.driver.local") return "skip";
+  const hasSlash = ${byName} && trimmed.includes("/");
+  const path = hasSlash
+    ? (trimmed.startsWith("/") && trimmed.endsWith(".app") && $.NSFileManager.defaultManager.fileExistsAtPath(trimmed) ? trimmed : undefined)
+    : ${byName}
+      ? roots.map((root) => root + "/" + file).find((p) => $.NSFileManager.defaultManager.fileExistsAtPath(p))
+      : undefined;
+  const url = path ? $.NSURL.fileURLWithPath(path) : hasSlash ? null : ws.URLForApplicationWithBundleIdentifier(ref);
+  const bundle = url && !url.isNil() ? $.NSBundle.bundleWithURL(url) : null;
+  const bid = bundle && !bundle.isNil() && bundle.bundleIdentifier && !bundle.bundleIdentifier.isNil() ? bundle.bundleIdentifier.js : "";
+  if (!url || url.isNil() || !bid) return "not_found";
+  if (bid === "com.trycua.driver" || bid === "com.trycua.driver.local") return "protected";
   const live = () => {
     const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier(bid);
+    if (!apps || apps.isNil()) return false;
     for (let i = 0; i < apps.count; i++) if (!apps.objectAtIndex(i).isTerminated) return true;
     return false;
   };
@@ -308,29 +325,100 @@ function launchScript(app: string, byName: boolean) {
     if (prior && idOf(frontApp()) === bid) prior.activateWithOptions(0);
     if (!up && live()) up = Date.now();
   }
-  return up ? "launched" : "timeout";
+  return up && live() ? "launched" : up ? "exited" : "timeout";
 })()`;
+}
+
+type PrelaunchResult = { ok: true } | { ok: false; message: string };
+
+function prelaunchErrorDetail(error: unknown, signal?: AbortSignal) {
+  if (signal?.aborted) return "cancelled";
+  const err = error as {
+    killed?: boolean;
+    stderr?: string;
+    message?: string;
+    code?: unknown;
+  };
+  if (err.killed) return "launcher timed out";
+  const stderr = err.stderr?.trim();
+  if (stderr) return stderr;
+  if (
+    error instanceof Error &&
+    !error.message.includes("osascript -l JavaScript")
+  )
+    return error.message;
+  return typeof err.code === "number"
+    ? `launcher exited with code ${err.code}`
+    : "launcher failed";
 }
 
 // An app the driver cold-starts inherits the driver's private HOME (#942), so the host starts
 // it first the driver's way, but with the user's own HOME; the driver's launch_app then finds
-// it running. Inspector ports, new instances and extra arguments need the driver's own launch,
-// so those keep the private HOME. Never pass process.env: it has ELECTRON_RUN_AS_NODE, which
-// breaks Electron apps.
-async function openWithUserHome(args: Record<string, unknown>) {
+// it running. If prelaunch fails or cannot confirm the app is running, return an error instead
+// of letting the driver cold-start it with its private HOME (#2745). Inspector ports, new
+// instances and extra arguments need the driver's own launch, so those keep the private HOME.
+// Never pass process.env: it has ELECTRON_RUN_AS_NODE, which breaks Electron apps.
+async function openWithUserHome(
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<PrelaunchResult> {
   const byName = typeof args.bundle_id !== "string";
   const app = byName ? args.name : args.bundle_id;
   const extra = args.additional_arguments;
+  const hasInspectorPort =
+    typeof args.webkit_inspector_port === "number" &&
+    Number.isInteger(args.webkit_inspector_port) &&
+    args.webkit_inspector_port >= 0;
   if (
     process.platform !== "darwin" ||
     typeof app !== "string" ||
     !app ||
-    args.webkit_inspector_port != null ||
+    hasInspectorPort ||
     args.creates_new_application_instance === true ||
-    (Array.isArray(extra) && extra.length > 0)
+    (Array.isArray(extra) && extra.some((arg) => typeof arg === "string"))
   )
-    return;
-  await osascript(launchScript(app, byName), driverEnv(homedir()));
+    return { ok: true };
+  let outcome: string;
+  try {
+    outcome = await osascript(launchScript(app, byName), driverEnv(homedir()), {
+      timeout: 20_000,
+      signal,
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Could not confirm "${app}" started with your home folder (${prelaunchErrorDetail(error, signal)}). Refused to fall back to Cua Driver's private profile.`,
+    };
+  }
+  if (outcome === "running" || outcome === "launched") return { ok: true };
+  if (outcome === "timeout") {
+    return {
+      ok: false,
+      message: `Timed out waiting for "${app}" to start with your home folder. Refused to fall back to Cua Driver's private profile.`,
+    };
+  }
+  if (outcome === "exited") {
+    return {
+      ok: false,
+      message: `"${app}" exited before startup could be confirmed with your home folder. Refused to fall back to Cua Driver's private profile.`,
+    };
+  }
+  if (outcome === "protected") {
+    return {
+      ok: false,
+      message: `launch_app cannot launch "${app}" because it is a protected Cua Driver bundle.`,
+    };
+  }
+  if (outcome === "not_found" || outcome === "skip") {
+    return {
+      ok: false,
+      message: `Could not locate "${app}" to start it with your home folder. Refused to fall back to Cua Driver's private profile.`,
+    };
+  }
+  return {
+    ok: false,
+    message: `Could not confirm "${app}" started with your home folder (unexpected prelaunch result: ${JSON.stringify(outcome)}). Refused to fall back to Cua Driver's private profile.`,
+  };
 }
 
 async function readPermissions(): Promise<HostStatus["permissions"]> {
@@ -772,10 +860,20 @@ export function createHostEntry() {
         }
         const args: Record<string, unknown> = { ...input.args };
         if (SESSION_TOOLS.has(input.tool) && args.session === undefined) args.session = input.session;
-        // On failure the driver launches the app as before.
         if (input.tool === "launch_app") {
           await withBundleId(args).catch(() => {});
-          await openWithUserHome(args).catch(() => {});
+          const prelaunch = await openWithUserHome(args, context.signal);
+          if (!prelaunch.ok) {
+            lastUsed = Date.now();
+            const exits = driverExits;
+            driverExits = 0;
+            return {
+              exitCode: 1,
+              stdout: `${JSON.stringify({ error: "launch_failed", message: prelaunch.message })}\n`,
+              stderr: "",
+              driverExits: exits,
+            };
+          }
         }
         const runTool = (
           tool: string,

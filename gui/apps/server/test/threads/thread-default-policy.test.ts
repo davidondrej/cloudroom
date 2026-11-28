@@ -1,4 +1,5 @@
 import {
+  defaultEnvironmentProviderRecords,
   installFakeGitWorktreeProvider,
   installFakePersonalWorkspaceProvider,
 } from "../helpers/environment-provider.js";
@@ -8,8 +9,18 @@ import {
   type ProjectExecutionDefaults,
   type Thread,
 } from "@cloudroom/domain";
-import { createEnvironment } from "@cloudroom/db";
+import {
+  createEnvironment,
+  createProjectSource,
+  createThread,
+} from "@cloudroom/db";
 import { describe, expect, it } from "vitest";
+import {
+  getEnvironmentProvider,
+  setPluginEnvironmentProviderBridge,
+} from "../../src/services/plugins/plugin-environment-provider-registry.js";
+import { createCheckoutInspectionCache } from "../../src/services/environments/provider-availability.js";
+import { invokePluginInline } from "../../src/services/plugins/plugin-hook-registry.js";
 import {
   resolveCreateThreadEnvironment,
   resolveCreateThreadExecutionDefaults,
@@ -17,6 +28,7 @@ import {
   resolveThreadDefaultPermissionMode,
   resolveThreadExecutionPermissionMode,
 } from "../../src/services/threads/thread-default-policy.js";
+import { resolveThreadEnvironmentPlacement } from "../../src/services/threads/thread-environment-placement.js";
 import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 import {
   createTestProviderRegistry,
@@ -524,6 +536,22 @@ describe("resolveCreateThreadEnvironment", () => {
       },
       name: "explicit unmanaged paths",
     },
+    {
+      args: {
+        parentThread: makeParentThread(),
+        projectId: "proj-1",
+        requestedEnvironment: {
+          type: "host" as const,
+          hostId: "host-1",
+          workspace: {
+            type: "unmanaged" as const,
+            path: null,
+            branch: { kind: "existing" as const, name: "feature/x" },
+          },
+        },
+      },
+      name: "unmanaged host requests with an explicit branch",
+    },
   ])("passes through $name", async ({ args }) => {
     await expect(resolveEnvironment(args)).resolves.toEqual(
       args.requestedEnvironment,
@@ -543,17 +571,39 @@ describe("resolveCreateThreadEnvironment", () => {
       checkout: { kind: "unborn" as const, branchName: "main" },
     },
   ])(
-    "shares the parent's environment when the project $name",
+    "falls back from worktree for non-Git hosts when the project $name",
     async ({ checkout }) => {
       await withTestHarness(async (harness) => {
         installFakeGitWorktreeProvider();
+        const worktree = getEnvironmentProvider("git-worktree")!;
+        const providers = [...defaultEnvironmentProviderRecords(), worktree];
+        setPluginEnvironmentProviderBridge({
+          listEnvironmentProviders: () => providers,
+          getEnvironmentProvider: (id) =>
+            providers.find((record) => record.provider.id === id),
+          invokeProvider: (_pluginId, _label, run) => invokePluginInline(run),
+          decisionTimeoutMs: 10_000,
+        });
         const { host, session } = seedHostSession(harness.deps, {
           id: "host-default-order",
+        });
+        const { host: otherHost, session: otherSession } = seedHostSession(
+          harness.deps,
+          { id: "host-other-plain" },
+        );
+        const { host: unregisteredHost } = seedHostSession(harness.deps, {
+          id: "host-unregistered",
         });
         seedPrimaryHost(harness.deps, host.id);
         const { project } = seedProjectWithSource(harness.deps, {
           hostId: host.id,
           path: "/tmp/default-order-source",
+        });
+        createProjectSource(harness.db, harness.hub, {
+          projectId: project.id,
+          type: "local_path",
+          hostId: otherHost.id,
+          path: "/tmp/other-host-source",
         });
         const parentEnvironment = createEnvironment(harness.db, harness.hub, {
           projectId: project.id,
@@ -563,21 +613,28 @@ describe("resolveCreateThreadEnvironment", () => {
           status: "ready",
           environmentProvider: null,
         });
-        registerHostRpcResponder(harness, {
-          hostId: host.id,
-          sessionId: session.id,
-          handle: () => ({
-            ok: true,
-            result: {
-              checkout,
-              defaultBranch: null,
-              defaultBranchRelation: null,
-              isWorktree: false,
-              hasUncommittedChanges: false,
-              operation: { kind: "none" as const },
-              originDefaultBranch: null,
-            } satisfies GitSourceInspection,
-          }),
+        const inspection = {
+          checkout,
+          defaultBranch: null,
+          defaultBranchRelation: null,
+          isWorktree: false,
+          hasUncommittedChanges: false,
+          operation: { kind: "none" as const },
+          originDefaultBranch: null,
+        } satisfies GitSourceInspection;
+        for (const [hostId, sessionId] of [
+          [host.id, session.id],
+          [otherHost.id, otherSession.id],
+        ] as const) {
+          registerHostRpcResponder(harness, {
+            hostId,
+            sessionId,
+            handle: () => ({ ok: true, result: inspection }),
+          });
+        }
+        const parentThread = makeParentThread({
+          projectId: project.id,
+          environmentId: parentEnvironment.id,
         });
 
         // No --machine, and --machine naming the parent's own host (#822).
@@ -591,10 +648,7 @@ describe("resolveCreateThreadEnvironment", () => {
         ]) {
           await expect(
             resolveCreateThreadEnvironment(harness.deps, {
-              parentThread: makeParentThread({
-                projectId: project.id,
-                environmentId: parentEnvironment.id,
-              }),
+              parentThread,
               projectId: project.id,
               requestedEnvironment,
             }),
@@ -603,9 +657,447 @@ describe("resolveCreateThreadEnvironment", () => {
             environmentId: parentEnvironment.id,
           });
         }
+
+        // Another host with a registered plain/unborn folder uses its project checkout (#2704).
+        const otherResolved = await resolveCreateThreadEnvironment(
+          harness.deps,
+          {
+            parentThread,
+            projectId: project.id,
+            requestedEnvironment: {
+              type: "host",
+              hostId: otherHost.id,
+              workspace: { type: "unmanaged", path: null },
+            },
+          },
+        );
+        expect(otherResolved).toEqual({
+          type: "provider",
+          environmentProviderId: "project-checkout",
+          machine: { type: "existing", hostId: otherHost.id },
+          inputs: { path: "/tmp/other-host-source" },
+        });
+        await expect(
+          resolveThreadEnvironmentPlacement(harness.deps, {
+            projectId: project.id,
+            requestedEnvironment: otherResolved,
+          }),
+        ).resolves.toMatchObject({
+          environmentId: null,
+          environmentIntent: {
+            type: "provider",
+            environmentProviderId: "project-checkout",
+            machine: { type: "existing", hostId: otherHost.id },
+            inputs: { path: "/tmp/other-host-source" },
+            selectionResolved: true,
+          },
+        });
+
+        // Explicit --new-environment worktree still enforces Git validation.
+        const explicitWorktree = await resolveCreateThreadEnvironment(
+          harness.deps,
+          {
+            parentThread,
+            projectId: project.id,
+            requestedEnvironment: {
+              type: "host",
+              hostId: otherHost.id,
+              workspace: {
+                type: "managed-worktree",
+                baseBranch: { kind: "default" },
+              },
+            },
+          },
+        );
+        await expect(
+          resolveThreadEnvironmentPlacement(harness.deps, {
+            projectId: project.id,
+            requestedEnvironment: explicitWorktree,
+          }),
+        ).rejects.toMatchObject({
+          status: 409,
+          body: { code: "environment_provider_rejected" },
+        });
+
+        // Another host with no registered source points to `room-cli project source add`.
+        const missingSource = await resolveCreateThreadEnvironment(
+          harness.deps,
+          {
+            parentThread,
+            projectId: project.id,
+            requestedEnvironment: {
+              type: "host",
+              hostId: unregisteredHost.id,
+              workspace: { type: "unmanaged", path: null },
+            },
+          },
+        );
+        await expect(
+          resolveThreadEnvironmentPlacement(harness.deps, {
+            projectId: project.id,
+            requestedEnvironment: missingSource,
+          }),
+        ).rejects.toMatchObject({
+          status: 409,
+          message: expect.stringContaining(
+            `room-cli project source add ${project.id} --machine ${unregisteredHost.id} --path <path>`,
+          ),
+        });
       });
     },
   );
+
+  it.each([
+    ["missing folder", "Path does not exist"],
+    ["unreadable git repo", "Git repository is unreadable or invalid"],
+  ] as const)(
+    "preserves 409 rejection instead of falling back for a %s on another host",
+    async (_label, reason) => {
+      await withTestHarness(async (harness) => {
+        installFakeGitWorktreeProvider();
+        const worktree = getEnvironmentProvider("git-worktree")!;
+        const providers = [...defaultEnvironmentProviderRecords(), worktree];
+        setPluginEnvironmentProviderBridge({
+          listEnvironmentProviders: () => providers,
+          getEnvironmentProvider: (id) =>
+            providers.find((record) => record.provider.id === id),
+          invokeProvider: (_pluginId, _label, run) => invokePluginInline(run),
+          decisionTimeoutMs: 10_000,
+        });
+        const { host } = seedHostSession(harness.deps, { id: "host-a" });
+        const { host: otherHost, session: otherSession } = seedHostSession(
+          harness.deps,
+          { id: "host-b-broken" },
+        );
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+          path: "/tmp/host-a-source",
+        });
+        createProjectSource(harness.db, harness.hub, {
+          projectId: project.id,
+          type: "local_path",
+          hostId: otherHost.id,
+          path: "/tmp/host-b-broken",
+        });
+        const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+          projectId: project.id,
+          hostId: host.id,
+          path: "/tmp/host-a-source",
+          providerOwnsPath: false,
+          status: "ready",
+          environmentProvider: null,
+        });
+        registerHostRpcResponder(harness, {
+          hostId: otherHost.id,
+          sessionId: otherSession.id,
+          handle: () => ({
+            ok: true,
+            result: {
+              checkout: { kind: "unknown" as const, reason },
+              defaultBranch: null,
+              defaultBranchRelation: null,
+              isWorktree: false,
+              hasUncommittedChanges: false,
+              operation: { kind: "none" as const },
+              originDefaultBranch: null,
+            } satisfies GitSourceInspection,
+          }),
+        });
+
+        const resolved = await resolveCreateThreadEnvironment(harness.deps, {
+          parentThread: makeParentThread({
+            projectId: project.id,
+            environmentId: parentEnvironment.id,
+          }),
+          projectId: project.id,
+          requestedEnvironment: {
+            type: "host",
+            hostId: otherHost.id,
+            workspace: { type: "unmanaged", path: null },
+          },
+        });
+        expect(resolved).toMatchObject({
+          type: "provider",
+          environmentProviderId: "git-worktree",
+        });
+        await expect(
+          resolveThreadEnvironmentPlacement(harness.deps, {
+            projectId: project.id,
+            requestedEnvironment: resolved,
+          }),
+        ).rejects.toMatchObject({
+          status: 409,
+          body: { code: "environment_provider_rejected" },
+          message: expect.stringContaining(reason),
+        });
+      });
+    },
+  );
+
+  it("inspects a healthy remote Git checkout once per child thread creation request", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host } = seedHostSession(harness.deps, { id: "host-a" });
+      const { host: otherHost, session: otherSession } = seedHostSession(
+        harness.deps,
+        { id: "host-b-git" },
+      );
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/host-a-source",
+      });
+      createProjectSource(harness.db, harness.hub, {
+        projectId: project.id,
+        type: "local_path",
+        hostId: otherHost.id,
+        path: "/tmp/host-b-git",
+      });
+      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/host-a-source",
+        providerOwnsPath: false,
+        status: "ready",
+        environmentProvider: null,
+      });
+      const parentThread = createThread(harness.db, harness.hub, {
+        projectId: project.id,
+        environmentId: parentEnvironment.id,
+        providerId: "codex",
+        status: "idle",
+      });
+      const responder = registerHostRpcResponder(harness, {
+        hostId: otherHost.id,
+        sessionId: otherSession.id,
+        handle: (request) => {
+          if (request.command.type !== "host.inspect_git_source") {
+            return {
+              ok: false,
+              errorCode: "unexpected_command",
+              errorMessage: `Unexpected command ${request.command.type}`,
+            };
+          }
+          return {
+            ok: true,
+            result: {
+              checkout: {
+                kind: "branch" as const,
+                branchName: "main",
+                headSha: "abc123",
+              },
+              defaultBranch: "main",
+              defaultBranchRelation: null,
+              isWorktree: false,
+              hasUncommittedChanges: false,
+              operation: { kind: "none" as const },
+              originDefaultBranch: null,
+            } satisfies GitSourceInspection,
+          };
+        },
+      });
+
+      const spawnChild = () =>
+        harness.app.request("/api/v1/threads", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            origin: "sdk",
+            projectId: project.id,
+            parentThreadId: parentThread.id,
+            providerId: "codex",
+            model: "gpt-5",
+            reasoningLevel: "medium",
+            permissionMode: "full",
+            input: [{ type: "text", text: "Spawn a child on another host" }],
+            environment: {
+              type: "host",
+              hostId: otherHost.id,
+              workspace: { type: "unmanaged", path: null },
+            },
+          }),
+        });
+
+      const first = await spawnChild();
+      expect(first.status).toBe(201);
+      expect(
+        responder.requests.filter(
+          (req) => req.command.type === "host.inspect_git_source",
+        ),
+      ).toHaveLength(1);
+
+      const second = await spawnChild();
+      expect(second.status).toBe(201);
+      expect(
+        responder.requests.filter(
+          (req) => req.command.type === "host.inspect_git_source",
+        ),
+      ).toHaveLength(2);
+    });
+  });
+
+  it("still reuses the parent environment on the parent's host when its registered source moved", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-moved-source",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/moved-source",
+      });
+      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/working-parent-folder",
+        providerOwnsPath: false,
+        status: "ready",
+        environmentProvider: null,
+      });
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: () => ({
+          ok: true,
+          result: {
+            checkout: {
+              kind: "unknown" as const,
+              reason: "Path does not exist",
+            },
+            defaultBranch: null,
+            defaultBranchRelation: null,
+            isWorktree: false,
+            hasUncommittedChanges: false,
+            operation: { kind: "none" as const },
+            originDefaultBranch: null,
+          } satisfies GitSourceInspection,
+        }),
+      });
+      const parentThread = makeParentThread({
+        projectId: project.id,
+        environmentId: parentEnvironment.id,
+      });
+
+      await expect(
+        resolveCreateThreadEnvironment(harness.deps, {
+          parentThread,
+          projectId: project.id,
+          requestedEnvironment: { type: "project-default" },
+        }),
+      ).resolves.toEqual({
+        type: "reuse",
+        environmentId: parentEnvironment.id,
+      });
+      await expect(
+        resolveCreateThreadEnvironment(harness.deps, {
+          parentThread,
+          projectId: project.id,
+          requestedEnvironment: {
+            type: "host",
+            hostId: host.id,
+            workspace: { type: "unmanaged", path: null },
+          },
+        }),
+      ).resolves.toEqual({
+        type: "reuse",
+        environmentId: parentEnvironment.id,
+      });
+    });
+  });
+
+  it("does not cache a failed inspection RPC in the per-request cache", async () => {
+    await withTestHarness(async (harness) => {
+      installFakeGitWorktreeProvider();
+      const { host } = seedHostSession(harness.deps, { id: "host-a" });
+      const { host: otherHost, session: otherSession } = seedHostSession(
+        harness.deps,
+        { id: "host-b-waking" },
+      );
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/host-a-source",
+      });
+      createProjectSource(harness.db, harness.hub, {
+        projectId: project.id,
+        type: "local_path",
+        hostId: otherHost.id,
+        path: "/tmp/host-b-missing",
+      });
+      const parentEnvironment = createEnvironment(harness.db, harness.hub, {
+        projectId: project.id,
+        hostId: host.id,
+        path: "/tmp/host-a-source",
+        providerOwnsPath: false,
+        status: "ready",
+        environmentProvider: null,
+      });
+      let attempts = 0;
+      const responder = registerHostRpcResponder(harness, {
+        hostId: otherHost.id,
+        sessionId: otherSession.id,
+        handle: () => {
+          attempts += 1;
+          if (attempts === 1) {
+            return {
+              ok: false,
+              errorCode: "command_failed",
+              errorMessage: "temporary failure",
+            };
+          }
+          return {
+            ok: true,
+            result: {
+              checkout: {
+                kind: "unknown" as const,
+                reason: "Path does not exist",
+              },
+              defaultBranch: null,
+              defaultBranchRelation: null,
+              isWorktree: false,
+              hasUncommittedChanges: false,
+              operation: { kind: "none" as const },
+              originDefaultBranch: null,
+            } satisfies GitSourceInspection,
+          };
+        },
+      });
+
+      const checkoutInspectionCache = createCheckoutInspectionCache();
+      const resolved = await resolveCreateThreadEnvironment(harness.deps, {
+        checkoutInspectionCache,
+        parentThread: makeParentThread({
+          projectId: project.id,
+          environmentId: parentEnvironment.id,
+        }),
+        projectId: project.id,
+        requestedEnvironment: {
+          type: "host",
+          hostId: otherHost.id,
+          workspace: { type: "unmanaged", path: null },
+        },
+      });
+      expect(resolved).toMatchObject({
+        type: "provider",
+        environmentProviderId: "git-worktree",
+      });
+
+      await expect(
+        resolveThreadEnvironmentPlacement(harness.deps, {
+          checkoutInspectionCache,
+          projectId: project.id,
+          requestedEnvironment: resolved,
+        }),
+      ).rejects.toMatchObject({
+        status: 409,
+        body: { code: "environment_provider_rejected" },
+        message: expect.stringContaining("Path does not exist"),
+      });
+      expect(
+        responder.requests.filter(
+          (req) => req.command.type === "host.inspect_git_source",
+        ),
+      ).toHaveLength(2);
+    });
+  });
 });
 
 describe("resolveProjectDefaultThreadEnvironment", () => {

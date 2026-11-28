@@ -3352,6 +3352,20 @@ export function listContextWindowUsageHistory(
   return [...byTurn.values()].reverse();
 }
 
+/** True when this turn compacted the context, by either signal. */
+export function hasTurnContextCompaction(
+  db: DbQueryConnection,
+  args: { threadId: string; turnId: string },
+): boolean {
+  return (
+    db
+      .select({ id: events.id })
+      .from(events)
+      .where(and(eq(events.threadId, args.threadId), eq(events.turnId, args.turnId), isContextCompaction))
+      .get() !== undefined
+  );
+}
+
 // Matches the timeline: one "Context compacted" row per turn.
 export function countContextCompactions(
   db: DbConnection,

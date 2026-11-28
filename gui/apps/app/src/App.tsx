@@ -120,14 +120,6 @@ function NavigatePreservingLocation({ pathname }: { pathname: string }) {
   );
 }
 
-function LegacyProviderUsageSettings() {
-  const { search } = useLocation();
-  // The installed plugin details share this path with the former Usage tab.
-  return new URLSearchParams(search).get("view") === "installed"
-    ? <SettingsView />
-    : <Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />;
-}
-
 function LegacyProjectSettingsRedirect() {
   const { projectId } = useParams<{ projectId: string }>();
   return (
@@ -289,10 +281,6 @@ export function AppRoutes() {
           <Route
             path="/settings/usage"
             element={<Navigate to={CLOUD_CREDITS_SETTINGS_PATH} replace />}
-          />
-          <Route
-            path="/settings/plugins/provider-usage"
-            element={<LegacyProviderUsageSettings />}
           />
           <Route path={SETTINGS_ROUTE_PATH} element={<SettingsView />} />
           <Route

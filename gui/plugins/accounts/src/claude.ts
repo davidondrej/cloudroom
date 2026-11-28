@@ -594,14 +594,39 @@ export async function claudeUsage(
 
 export type MacClaude = { email: string; org: string | null };
 
+let macAccountCache: {
+  file: string;
+  ino: number;
+  mtimeMs: number;
+  size: number;
+  value: MacClaude | null;
+} | null = null;
+
 /** The Mac's own Claude login: null when signed out, undefined when Claude is mid-write and the file can't be read. */
 export async function localClaudeAccount(): Promise<
   MacClaude | null | undefined
 > {
+  const file = path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), ".claude.json");
+  let stat: { ino: number; mtimeMs: number; size: number };
+  try {
+    stat = await fs.stat(file);
+  } catch {
+    macAccountCache = null;
+    return null;
+  }
+  if (
+    macAccountCache &&
+    macAccountCache.file === file &&
+    macAccountCache.ino === stat.ino &&
+    macAccountCache.mtimeMs === stat.mtimeMs &&
+    macAccountCache.size === stat.size
+  )
+    return macAccountCache.value;
   let text: string;
   try {
-    text = await fs.readFile(path.join(process.env.CLAUDE_CONFIG_DIR || os.homedir(), ".claude.json"), "utf8");
+    text = await fs.readFile(file, "utf8");
   } catch {
+    macAccountCache = null;
     return null;
   }
   try {
@@ -613,12 +638,20 @@ export async function localClaudeAccount(): Promise<
         }),
       })
       .safeParse(JSON.parse(text));
-    return login.success
+    const value = login.success
       ? {
           email: login.data.oauthAccount.emailAddress,
           org: login.data.oauthAccount.organizationUuid ?? null,
         }
       : null;
+    macAccountCache = {
+      file,
+      ino: stat.ino,
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      value,
+    };
+    return value;
   } catch {
     return undefined;
   }

@@ -2,6 +2,7 @@ import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { PANE_FOCUS_APP_COMMAND_IDS } from "@cloudroom/domain";
 import { useAtom, useAtomValue, useStore } from "jotai";
 import {
+  Activity,
   Fragment,
   lazy,
   Suspense,
@@ -116,27 +117,12 @@ import {
 } from "@/components/ui/context-selection";
 import { PaneMaximizeButton } from "./PaneMaximizeButton";
 import { wsManager } from "@/lib/ws";
-import { PluginDetailOpenerBoundary } from "@/components/plugin/plugin-detail-opener";
 
 const LazyPluginPanelRightPanelHost = lazy(() =>
   import("@/components/plugin/PluginPanelRightPanelHost").then(
     ({ PluginPanelRightPanelHost }) => ({ default: PluginPanelRightPanelHost }),
   ),
 );
-
-const LazyPluginDetailPaneView = lazy(() =>
-  import("@/views/ToolsView").then(({ PluginDetailPaneView }) => ({
-    default: PluginDetailPaneView,
-  })),
-);
-
-function PluginDetailPaneView({ pluginId }: { pluginId: string }) {
-  return (
-    <Suspense fallback={null}>
-      <LazyPluginDetailPaneView pluginId={pluginId} />
-    </Suspense>
-  );
-}
 
 function PluginPagePanelHost({
   children,
@@ -149,18 +135,13 @@ function PluginPagePanelHost({
   pluginId: string;
   subPath: string;
 }) {
-  const pane = useOptionalPaneContext();
   return (
-    <PluginDetailOpenerBoundary
-      key={`${props.pluginId}/${props.panelPath}`}
-      isFocused={pane?.isFocused ?? true}
-    >
-      <Suspense fallback={null}>
-        <LazyPluginPanelRightPanelHost {...props}>
-          {children}
-        </LazyPluginPanelRightPanelHost>
-      </Suspense>
-    </PluginDetailOpenerBoundary>
+    // The key gives each plugin page a fresh panel host.
+    <Suspense key={`${props.pluginId}/${props.panelPath}`} fallback={null}>
+      <LazyPluginPanelRightPanelHost {...props}>
+        {children}
+      </LazyPluginPanelRightPanelHost>
+    </Suspense>
   );
 }
 
@@ -751,26 +732,28 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
                   onStale={() => evictKeptThread(entry.threadId)}
                 />
               )}
-              <WorkspacePaneContent
-                content={{
-                  kind: "thread",
-                  projectId: entry.projectId,
-                  threadId: entry.threadId,
-                }}
-                paneId={firstPane.paneId}
-                isFocused={isActive}
-                isHidden={!isActive}
-                isSplitPane={false}
-                secondaryPanelRegistry={null}
-                reservesWindowPanelToggle={false}
-                onRequestClose={null}
-                isMaximized={false}
-                onToggleMaximize={null}
-                isBoundedPane={false}
-                isTopRow
-                ownsWindowTopLeft={isActive}
-                onNavigateInPane={navigateInPane}
-              />
+              <Activity mode={isActive ? "visible" : "hidden"}>
+                <WorkspacePaneContent
+                  content={{
+                    kind: "thread",
+                    projectId: entry.projectId,
+                    threadId: entry.threadId,
+                  }}
+                  paneId={firstPane.paneId}
+                  isFocused={isActive}
+                  isHidden={!isActive}
+                  isSplitPane={false}
+                  secondaryPanelRegistry={null}
+                  reservesWindowPanelToggle={false}
+                  onRequestClose={null}
+                  isMaximized={false}
+                  onToggleMaximize={null}
+                  isBoundedPane={false}
+                  isTopRow={isActive}
+                  ownsWindowTopLeft={isActive}
+                  onNavigateInPane={navigateInPane}
+                />
+              </Activity>
             </Fragment>
           );
         })}
@@ -1148,9 +1131,6 @@ function StandalonePaneContent({
   if (content.kind === "new-thread") {
     return <RootComposeView />;
   }
-  if (content.kind === "plugin-detail") {
-    return <PluginDetailPaneView pluginId={content.pluginId} />;
-  }
   const panelEntry = navPanelChrome.find(
     (candidate) =>
       candidate.chrome.pluginId === content.pluginId &&
@@ -1241,9 +1221,7 @@ function NonThreadPaneContent({
           isFocused ? resourceRouteLabel : null,
         )
       : null;
-  const label =
-    panelChrome?.title ??
-    (content.kind === "plugin-detail" ? "Extension" : "New thread");
+  const label = panelChrome?.title ?? "New thread";
   const handlePointerDown = (event: ReactPointerEvent) => {
     if (
       event.target instanceof Element &&
@@ -1338,9 +1316,7 @@ function NonThreadPaneContent({
                       CONTEXT_INACTIVE_TEXT_CLASS,
                   )}
                 >
-                  {content.kind === "plugin-detail"
-                    ? "Extension"
-                    : "New thread"}
+                  New thread
                 </p>
               )}
             </div>
@@ -1356,8 +1332,6 @@ function NonThreadPaneContent({
       >
         {content.kind === "new-thread" ? (
           <RootComposeView />
-        ) : content.kind === "plugin-detail" ? (
-          <PluginDetailPaneView pluginId={content.pluginId} />
         ) : (
           <PluginPanelView
             pluginId={content.pluginId}

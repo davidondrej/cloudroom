@@ -382,45 +382,19 @@ describe("PluginsOverview", () => {
     );
   });
 
-  it("sorts enabled plugins before inactive plugins and published plugins first within enabled", async () => {
+  it("lists the most recently changed plugin first, and by name on request", async () => {
     installFetch([
+      { ...AUTOMATIONS_PLUGIN, id: "alpha", name: "Alpha", changedAt: 1_000 },
       {
         ...AUTOMATIONS_PLUGIN,
-        id: "inactive-official",
-        name: "Inactive Official",
+        id: "zulu",
+        name: "Zulu",
         enabled: false,
         status: "disabled",
-        provenance: "catalog",
-        publisherKey: "bb-community",
-        publisherLabel: "BB Community",
-        catalogEntryId: "inactive-official",
+        changedAt: 3_000,
       },
-      {
-        ...AUTOMATIONS_PLUGIN,
-        id: "enabled-local-alpha",
-        name: "Enabled Local",
-        provenance: "direct",
-        publisherLabel: null,
-      },
-      {
-        ...AUTOMATIONS_PLUGIN,
-        id: "enabled-official-zulu",
-        name: "Enabled Official Zulu",
-      },
-      {
-        ...AUTOMATIONS_PLUGIN,
-        id: "enabled-official-alpha",
-        name: "Enabled Official Alpha",
-      },
-      {
-        ...AUTOMATIONS_PLUGIN,
-        id: "inactive-local",
-        name: "Inactive Local",
-        enabled: false,
-        status: "disabled",
-        provenance: "direct",
-        publisherLabel: null,
-      },
+      { ...AUTOMATIONS_PLUGIN, id: "mike", name: "Mike", changedAt: 2_000 },
+      { ...AUTOMATIONS_PLUGIN, id: "bravo", name: "Bravo", changedAt: 1_000 },
     ]);
     const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
     render(
@@ -430,30 +404,27 @@ describe("PluginsOverview", () => {
         </QueryClientWrapper>
       </MemoryRouter>,
     );
+    const rowIds = () =>
+      [...document.querySelectorAll('[data-testid^="plugin-row-"]')].map(
+        (row) => row.getAttribute("data-testid"),
+      );
 
-    await screen.findByText("Enabled Official Alpha");
-    const rows = [...document.querySelectorAll('[data-testid^="plugin-row-"]')];
-    expect(rows.map((row) => row.getAttribute("data-testid"))).toEqual([
-      "plugin-row-enabled-official-alpha",
-      "plugin-row-enabled-official-zulu",
-      "plugin-row-enabled-local-alpha",
-      "plugin-row-inactive-local",
-      "plugin-row-inactive-official",
+    await screen.findByText("Zulu");
+    expect(rowIds()).toEqual([
+      "plugin-row-zulu",
+      "plugin-row-mike",
+      "plugin-row-alpha",
+      "plugin-row-bravo",
     ]);
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "Plugin list options" }),
     );
-    fireEvent.click(screen.getByRole("menuitem", { name: "Sort Z to A" }));
-    expect(
-      [...document.querySelectorAll('[data-testid^="plugin-row-"]')].map(
-        (row) => row.getAttribute("data-testid"),
-      ),
-    ).toEqual([
-      "plugin-row-enabled-official-zulu",
-      "plugin-row-enabled-official-alpha",
-      "plugin-row-enabled-local-alpha",
-      "plugin-row-inactive-official",
-      "plugin-row-inactive-local",
+    fireEvent.click(screen.getByRole("menuitem", { name: "Sort by name" }));
+    expect(rowIds()).toEqual([
+      "plugin-row-alpha",
+      "plugin-row-bravo",
+      "plugin-row-mike",
+      "plugin-row-zulu",
     ]);
   });
 

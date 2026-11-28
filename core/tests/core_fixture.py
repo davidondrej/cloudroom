@@ -151,6 +151,10 @@ def codex():
                     time.sleep(.05)
                     send(reply)
                     continue
+                if text == "unsure":
+                    # Its start's answer lacks the turn ID, so Core can't be sure it started, yet it runs (#1579).
+                    send({"id": message["id"], "result": {}})
+                    continue
                 if text != "reply-first":
                     send(reply)
                 if text == "hold-turn":
@@ -207,6 +211,11 @@ def codex():
                 if params.get("expectedTurnId") != turn:
                     send({"id": message["id"], "error": {"code": -32602, "message": "steer target is no longer active"}})
                     continue
+                if Path("steer-refuse").exists():
+                    send({"id": message["id"], "error": {"code": -32602, "message": "fixture refuses the steer"}})
+                    continue
+                if Path("steer-die").exists():
+                    os._exit(1)  # The agent dies with the steer unconfirmed.
                 if Path("steer-late").exists():
                     # The turn ends before the agent confirms the steer (#1579).
                     event("turn/completed", turn={"id": turn, "status": "completed"})
@@ -1252,6 +1261,27 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(self.status()["queue_paused"])
         self.assertEqual(self.status()["queue"], ["relay_report"])
 
+    def test_a_parent_tell_restarts_a_child_the_parent_stopped_but_never_one_the_user_did(self):
+        # #485, #602, #768: a tell to a child its parent had stopped only queued, paused for good.
+        self.seed(); self.start(); self.ready()
+        relay = lambda key, action="tell": self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": action, **({"text": "hello"} if action == "tell" else {})})
+        stop = lambda key: self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": key}, 202)
+        relay("relay_stop", "stop")
+        self.wait(lambda: self.status()["queue_paused"], "parent's stop")
+        relay("relay_go")
+        self.wait(lambda: self.status()["receipts"].get("relay_go", {}).get("state") == "completed", "tell after the parent's stop")
+        self.assertFalse(self.status()["queue_paused"])
+        # The user's Stop sticks, also one after the parent's.
+        for steps in [["user_stop"], ["relay_stop2", "user_stop2"]]:
+            for key in steps:
+                relay(key, "stop") if key.startswith("relay_") else stop(key)
+            self.wait(lambda: self.status()["queue_paused"], "stopped")
+            tell = f"relay_wait_{len(steps)}"
+            self.assertTrue(relay(tell)["paused"], steps)
+            self.assertEqual(self.status()["queue"], [tell])
+            self.service.request("POST", "/v1/sessions/cr_seed/resume", {"request_id": f"resume_{len(steps)}"}, 202)
+            self.wait(lambda: self.status()["receipts"][tell]["state"] == "completed", "user's resume")
+
     def test_a_parent_tell_restarts_a_child_whose_agent_was_killed(self):
         # #1629: a child killed twice (signal 9) stays lost, and its parent's tell got 409, which the website calls busy.
         self.seed(); self.start(); self.ready()
@@ -1260,7 +1290,7 @@ class RecoveryTests(unittest.TestCase):
             while self.status()["state"] != "process_lost":
                 n = len(pids()); os.kill(pids()[-1], signal.SIGKILL)
                 self.wait(lambda: self.status()["state"] == "process_lost" or (len(pids()) > n and self.status()["state"] == "idle"), "lost or recovered")
-        relay = lambda key, text="hello", expected=200: self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, "action": "tell", "text": text}, expected)
+        relay = lambda key, text="hello", expected=200: self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": key, **(text if isinstance(text, dict) else {"action": "tell", "text": text})}, expected)
         # Kill the agent during a running turn. This recovery case needs no detached tool process.
         self.prompt("running", "hold-turn")
         self.wait(lambda: self.status()["state"] == "running", "running turn")
@@ -1273,9 +1303,12 @@ class RecoveryTests(unittest.TestCase):
             (None, "sibling", "[message from thread:thr_other]\n\nhello", 409, False),
             (None, "parent_tell", "hello", 200, True),
             (None, "parent_tell", "hello", 200, False),  # A retry restarts nothing more.
+            # Its own child's turn report restarts it too: it may be all the lost parent waits for.
+            ("lose", "child_report", {"action": "report", "child": "thr_kid", "state": "completed", "reply": "done"}, 200, True),
             ("stop", "stopped", "hello", 409, False),
             ("archive", "archived", "hello", 409, False),
         ]:
+            if step == "lose": lose()
             if step == "stop":
                 self.service.request("POST", "/v1/sessions/cr_seed/stop", {"request_id": "user_stop"}, 202)
                 self.wait(lambda: self.status()["queue_paused"], "stopped"); lose()
@@ -1290,7 +1323,22 @@ class RecoveryTests(unittest.TestCase):
                 self.wait(lambda: self.status()["receipts"][key]["state"] == "completed", "tell after restart")
             self.assertEqual(len(pids()), launched + restarts, key)
         self.assertEqual(self.status()["native_id"], self.native)
-        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "parent_tell"])
+        self.assertEqual((self.repo / (self.native + ".requests")).read_text().splitlines(), ["running", "parent_tell", "child_report"])
+
+    def test_a_relayed_report_whose_steer_died_with_the_agent_is_queued(self):
+        # A report steered into a turn whose agent then died was taken as delivered, so the parent never heard of it.
+        self.seed(); self.start(); self.ready()
+        self.prompt("running", "hold")
+        self.wait(lambda: self.status()["state"] == "running", "running turn")
+        (self.repo / "steer-die").touch()
+        report = {"request_id": "n_kid", "action": "report", "child": "thr_kid", "state": "completed", "reply": "done"}
+        self.service.request("POST", "/v1/sessions/cr_seed/relay", report)
+        (self.repo / "steer-die").unlink()
+        receipts = lambda: self.status()["receipts"]
+        self.wait(lambda: receipts().get("n_kid", {}).get("state") == "completed", "queued report")
+        self.assertTrue(receipts()["n_kid_steer"]["state"].startswith("unknown"))
+        # A retry of the report adds nothing.
+        self.assertEqual(self.service.request("POST", "/v1/sessions/cr_seed/relay", report)["state"], "completed")
 
     def test_a_parent_tell_retries_a_child_whose_agent_never_started(self):
         # #2036: a child whose agent failed to start before any turn refused every tell, which the website called busy.
@@ -1373,7 +1421,9 @@ for line in sys.stdin:
         # other report, say from a session that replaced it after a restore, still updates it.
         self.seed([("receipt", {"request_id": "done", "command": "prompt", "input": {}, "state": "completed"}),
                    ("child_state", {"child": "thr_gone", "state": "archived", "late": ["n_late"]}),
-                   ("child_state", {"child": "thr_live", "state": "running"})])
+                   ("child_state", {"child": "thr_live", "state": "running"}),
+                   # A start the website hasn't named yet holds back only a child no session here knows.
+                   ("child_start", {"request_id": "unnamed", "body": {}})])
         # An earlier session of this thread, closed by a harness switch, still has a turn to report.
         for n, (kind, data) in enumerate([("receipt", {"request_id": "s", "command": "start", "input": {"parent_thread": "thr_up"}, "state": "completed"}),
                                           ("receipt", {"request_id": "old", "command": "prompt", "input": {}, "state": "completed"}),
@@ -1385,6 +1435,7 @@ for line in sys.stdin:
             report = {"request_id": request, "action": "report", "child": child, "state": "completed"}
             self.service.request("POST", "/v1/sessions/cr_seed/relay", report)
             self.assertEqual(self.status()["child_states"][child], known)
+        self.service.request("POST", "/v1/sessions/cr_seed/relay", {**report, "request_id": "n_new_kid", "child": "thr_new"}, 503)
         # As a child, its archive names the turns not reported yet: its own and an earlier session's.
         archived = self.service.request("POST", "/v1/sessions/cr_seed/relay", {"request_id": "bye", "action": "archive"})
         for late in ["notice_cr_seed_done", "notice_cr_old_old"]:
@@ -1409,6 +1460,19 @@ for line in sys.stdin:
         self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "again", "text": "hello"}, 202)
         self.wait(lambda: receipts().get("notice_cr_child_kid_again", {}).get("state") == "completed", "queued notice")
         self.assertNotIn("notice_cr_child_kid_again_steer", receipts())
+        # A running turn whose prompt Core marked unknown still takes the steer; no copy is queued meanwhile (#1579).
+        self.ready(); self.prompt("unsure", "unsure")
+        self.wait(lambda: self.status()["state"] == "running" and receipts()["unsure"]["state"] == "unknown", "unsure turn")
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "doubt", "text": "hello"}, 202)
+        self.wait(lambda: receipts().get("notice_cr_child_kid_doubt_steer", {}).get("state") == "completed", "unsure steer")
+        time.sleep(.5)
+        self.assertNotIn("notice_cr_child_kid_doubt", receipts())
+        # A refused steer for a turn with a reply still queues it: the reply only repeats that steer's own.
+        (self.repo / "steer-refuse").touch()
+        self.service.request("POST", "/v1/sessions/cr_child_kid/prompts", {"request_id": "spoke", "text": "long"}, 202)
+        self.wait(lambda: receipts().get("notice_cr_child_kid_spoke_steer", {}).get("state") == "failed", "refused steer")
+        self.wait(lambda: "notice_cr_child_kid_spoke" in receipts(), "queued fallback")
+        (self.repo / "steer-refuse").unlink()
 
     def test_a_finished_shared_child_frees_its_agent_soon_and_keeps_its_whole_reply(self):
         # #339: idle children in the parent's sandbox kept their agent loaded for 30 minutes and ran it out of memory.

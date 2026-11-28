@@ -30,6 +30,11 @@ export const MAX_REASONING_EFFORT: ModelReasoningEffort = {
   reasoningEffort: "max",
   description: "Maximum reasoning effort",
 };
+/** An ACP agent's lone level when Cloudroom couldn't read the model's levels: the agent picks the effort itself. */
+export const ACP_AGENT_MANAGED_REASONING_EFFORT: ModelReasoningEffort = {
+  reasoningEffort: "medium",
+  description: "Reasoning effort is managed by the connected ACP agent.",
+};
 const ULTRA_REASONING_EFFORT: ModelReasoningEffort = {
   reasoningEffort: "ultra",
   description: "Maximum reasoning with automatic task delegation",

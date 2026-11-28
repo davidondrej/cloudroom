@@ -137,13 +137,12 @@ describe("stale model recovery", () => {
       const fallback =
         harness.deps.providerRegistry.get("claude-code")!.fallbackModels[0]!
           .model;
-      await expect(
-        resolveHarnessSwitchOverride(harness.deps, thread, {
-          providerId: "claude-code",
-          model: fallback,
-          reasoningLevel: null,
-        }),
-      ).resolves.toMatchObject({ modelOverride: fallback });
+      const resolveOverride = await resolveHarnessSwitchOverride(
+        harness.deps,
+        thread,
+        { providerId: "claude-code", model: fallback, reasoningLevel: null },
+      );
+      expect(resolveOverride(null)).toMatchObject({ modelOverride: fallback });
       temporaryFailure.unregister();
       registerProviderHostRpcResponder(harness, {
         hostId: host.id,

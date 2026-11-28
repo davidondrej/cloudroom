@@ -51,6 +51,8 @@ export const gitBranchSelectionSchema = z.discriminatedUnion("kind", [
 ]);
 export type GitBranchSelection = z.infer<typeof gitBranchSelectionSchema>;
 
+export const PLAIN_NON_GIT_DIRECTORY_REASON = "Path is not a git repository";
+
 export const gitCheckoutRefSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("branch"),

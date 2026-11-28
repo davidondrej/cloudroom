@@ -4,7 +4,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { experimental_ProviderModelPicker as AgentPicker } from "@get-bb/plugin-sdk/app";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { COLORS, ICONS, INTERVALS, Meter, Minutes, Prompt, Tile, timeLeft, useSettings, type Config } from "./parts.js";
+import { COLORS, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, Tile, WeakModel, timeLeft, useSettings, type Config } from "./parts.js";
 
 type Settings = ReturnType<typeof useSettings>;
 type Ready = Settings & { view: NonNullable<Settings["view"]>; config: Config; onClose(): void };
@@ -98,7 +98,12 @@ function Look({ config, save }: Ready) {
   );
 }
 
-const Agent = ({ config, save }: Ready) => <AgentPicker value={config.agent} onChange={(agent) => save({ agent })} allowProviderChange align="start" />;
+const Agent = ({ view, config, save }: Ready) => (
+  <>
+    <AgentPicker value={config.agent} onChange={(agent) => save({ agent })} allowProviderChange align="start" />
+    <WeakModel check={view.modelCheck} onPick={(agent) => save({ agent })} />
+  </>
+);
 
 const Role = (props: Ready) => (
   <Prompt key={props.config.role} value={props.config.role} fallback={props.view.defaults.role} rows={7} max={4096} className={`resize-none rounded-xl ${QUIET_INPUT}`} reset="secondary" onSave={(role) => props.save({ role })} />
@@ -107,16 +112,11 @@ const PingMessage = (props: Ready) => (
   <Prompt key={props.config.prompt} value={props.config.prompt} fallback={props.view.defaults.prompt} rows={2} max={2000} className={`resize-none rounded-xl ${QUIET_INPUT}`} reset="secondary" onSave={(prompt) => props.save({ prompt })} />
 );
 
-const status = ({ view, config }: Ready) => (config.ping ? `Next ping in ${timeLeft(view.nextAt)}` : "The timer is off");
-
 function Footer({ run, busy, view, error, onClose }: Ready) {
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Quiet onClick={() => run("pingNow")} disabled={busy}>
         Ping now
-      </Quiet>
-      <Quiet onClick={() => run("fresh")} disabled={busy || view.threadId === null}>
-        New Director thread
       </Quiet>
       <span className={`min-w-40 flex-1 truncate px-1 text-xs ${error ? "text-destructive" : "text-subtle-foreground"}`}>{error ?? (view.last ? `Last ping: ${view.last.text}` : "")}</span>
       <Quiet onClick={onClose}>Done</Quiet>
@@ -124,7 +124,55 @@ function Footer({ run, busy, view, error, onClose }: Ready) {
   );
 }
 
-const TimerSwitch = ({ config, save }: Ready) => <Switch checked={config.ping} onCheckedChange={(ping) => save({ ping })} aria-label="Wake the Director on a timer" />;
+const EASE = "duration-500 ease-[cubic-bezier(0.2,0.8,0.2,1)]";
+const every = (minutes: number) => (minutes === 1 ? "every minute" : minutes === 60 ? "every hour" : minutes % 60 === 0 ? `every ${minutes / 60} hours` : `every ${minutes} minutes`);
+
+/** While off: a tinted card beside the title with a big switch. Turning it on folds the card away (David, 2026-11-27). */
+function TurnOn({ config, save }: Ready) {
+  const on = config.ping;
+  const tint = config.color || "var(--primary)";
+  return (
+    <div
+      inert={on}
+      aria-hidden={on}
+      className={`flex shrink-0 items-center gap-4 overflow-hidden rounded-xl transition-all ${EASE} ${on ? "h-10 w-0 px-0 opacity-0 max-md:hidden" : "px-6 py-5 opacity-100 max-md:w-full md:ml-8 md:h-[112px] md:w-[470px]"}`}
+      style={{ background: `color-mix(in oklab, ${tint} 16%, transparent)`, boxShadow: `inset 0 0 0 1px color-mix(in oklab, ${tint} 40%, transparent)` }}
+    >
+      <div className="min-w-0 flex-1 md:w-[330px] md:flex-none">
+        <p className="whitespace-nowrap text-[19px] font-semibold text-foreground">Turn on the Director</p>
+        <p className="mt-1 text-[14px] leading-snug text-muted-foreground">It checks your stopped threads {every(config.minutes)} and unblocks the obvious ones.</p>
+      </div>
+      <Switch
+        size="default"
+        checked={on}
+        onCheckedChange={(ping) => save({ ping })}
+        aria-label="Turn on the Director"
+        className="h-7 w-12 data-[state=unchecked]:bg-state-active [&>span]:size-6 [&>span[data-state=checked]]:translate-x-5 [&>span[data-state=unchecked]]:bg-muted-foreground"
+      />
+    </div>
+  );
+}
+
+/** Under the title: "Off", or once on a small neutral switch and the countdown. */
+function Status({ config, save, view }: Ready) {
+  const on = config.ping;
+  return (
+    <DialogDescription className="relative h-6 text-[13px] leading-6 text-muted-foreground">
+      <span aria-hidden={on} className={`absolute inset-0 transition-opacity ${EASE} ${on ? "opacity-0" : ""}`}>
+        Off
+      </span>
+      <span inert={!on} aria-hidden={!on} className={`absolute left-0 top-0 flex h-6 items-center gap-2 whitespace-nowrap transition-[opacity,transform] ${EASE} ${on ? "" : "translate-x-6 opacity-0"}`}>
+        <Switch
+          checked={on}
+          onCheckedChange={(ping) => save({ ping })}
+          aria-label="Wake the Director on a timer"
+          className="data-[state=checked]:border-transparent data-[state=checked]:bg-state-active [&>span[data-state=checked]]:bg-muted-foreground"
+        />
+        <span className="text-subtle-foreground">Next ping in {timeLeft(view.nextAt)}</span>
+      </span>
+    </DialogDescription>
+  );
+}
 
 const section = (label: string, control: ReactNode) => (
   <div className="space-y-2">
@@ -154,37 +202,51 @@ export function DirectorModal({ onClose }: { onClose(): void }) {
         onClose();
       }}
     >
-      <DialogContent hideCloseButton className={`max-w-[min(920px,calc(100vw-2rem))] md:max-h-[calc(100dvh-2rem)] md:overflow-y-auto max-md:pb-[max(1rem,env(safe-area-inset-bottom))] ${SURFACE}`}>
-        <div className="flex items-center gap-3.5 px-8 pb-6 pt-7 max-md:px-4 max-md:pt-2">
+      {/* At any zoom it leaves at least 7% of the window free above and below; the title and buttons stay put and only the middle scrolls. */}
+      <DialogContent hideCloseButton className={`flex max-w-[min(920px,calc(100vw-2rem))] flex-col md:max-h-[calc(100dvh-max(4rem,14dvh))] md:overflow-hidden max-md:pb-[max(1rem,env(safe-area-inset-bottom))] ${SURFACE}`}>
+        <div className="flex shrink-0 items-center gap-3.5 px-8 pb-6 pt-7 max-md:flex-wrap max-md:px-4 max-md:pt-2">
           <Tile icon={config.icon} color={config.color} size={40} />
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 shrink-0">
             <DialogTitle className="text-[19px] font-semibold tracking-[-0.01em] text-foreground">Director</DialogTitle>
-            <DialogDescription className="text-[13px] text-muted-foreground">{status(props)}</DialogDescription>
+            <Status {...props} />
           </div>
-          <TimerSwitch {...props} />
+          <TurnOn {...props} />
         </div>
-        <div className="mx-8 mb-6 flex items-start gap-6 rounded-xl bg-state-hover px-5 py-4 max-md:mx-4">
-          <div className="min-w-0 flex-1">
-            <Meter view={props.view} onSkip={() => props.run("skip")} />
+        {/* While off, the settings stay usable but faint, so it is clear nothing runs. */}
+        <div className={`transition-opacity ${EASE} ${config.ping ? "" : "opacity-25"} md:min-h-0 md:flex-1 md:overflow-y-auto md:pt-1 md:[mask-image:linear-gradient(to_bottom,transparent,black_16px,black_calc(100%-28px),transparent)]`}>
+          <div className="mx-8 mb-6 flex items-start gap-6 rounded-xl bg-state-hover px-5 py-4 max-md:mx-4">
+            <div className="min-w-0 flex-1">
+              <Meter view={props.view} onSkip={() => props.run("skip")} />
+            </div>
+            <label className="flex shrink-0 items-center gap-2.5 text-[13px] font-medium text-muted-foreground">
+              Learning
+              <Switch checked={config.learning} onCheckedChange={(learning) => props.save({ learning })} aria-label="Learn from my corrections" />
+            </label>
           </div>
-          <label className="flex shrink-0 items-center gap-2.5 text-[13px] font-medium text-muted-foreground">
-            Learning
-            <Switch checked={config.learning} onCheckedChange={(learning) => props.save({ learning })} aria-label="Learn from my corrections" />
-          </label>
+          <div className="grid grid-cols-1 gap-x-10 gap-y-5 px-8 pb-6 max-md:px-4 md:grid-cols-2">
+            <div className="space-y-5">
+              {section(
+                "Ping every",
+                <>
+                  <Interval {...props} />
+                  <div className="mt-2.5 flex items-center gap-2 text-[13px] text-muted-foreground">
+                    <span>Unblock up to</span>
+                    <MaxThreads value={config.maxThreads} onSave={(maxThreads) => props.save({ maxThreads })} />
+                    <span>{config.maxThreads === 1 ? "thread" : "threads"}</span>
+                  </div>
+                </>,
+              )}
+              {section("Agent", <Agent {...props} />)}
+              {section("Watches", <Watching {...props} />)}
+              {section("Look", <Look {...props} />)}
+            </div>
+            <div className="space-y-5">
+              {section("Role", <Role {...props} />)}
+              {section("Ping message", <PingMessage {...props} />)}
+            </div>
+          </div>
         </div>
-        <div className="grid grid-cols-1 gap-x-10 gap-y-5 px-8 pb-6 max-md:px-4 md:grid-cols-2">
-          <div className="space-y-5">
-            {section("Ping every", <Interval {...props} />)}
-            {section("Agent", <Agent {...props} />)}
-            {section("Watches", <Watching {...props} />)}
-            {section("Look", <Look {...props} />)}
-          </div>
-          <div className="space-y-5">
-            {section("Role", <Role {...props} />)}
-            {section("Ping message", <PingMessage {...props} />)}
-          </div>
-        </div>
-        <div className="px-8 pb-6 max-md:px-4">
+        <div className="shrink-0 border-t border-border/50 px-8 py-4 max-md:px-4">
           <Footer {...props} />
         </div>
       </DialogContent>

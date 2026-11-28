@@ -29,6 +29,8 @@ interface SentMessage {
   model?: string | null;
   reasoningLevel?: string | null;
   serviceTier?: string | null;
+  /** `first_response` already fired, e.g. on an empty reasoning start; kept only until real output or `turn/completed`. */
+  firstResponseSent?: boolean;
   /** The computer slept during the wait, so a missing reply may not be ours. */
   slept?: boolean;
 }
@@ -64,41 +66,54 @@ export function installFirstResponseTelemetry(
     const sent = current.pending.get(message.id);
     if (!sent) return;
     const types = message.metadata?.eventTypes;
-    if ((!types || types.some((type) => OUTPUT_TYPES.includes(type))) && hasOutputAfter(current.db, message.id, sent.afterSequence)) {
-      current.pending.delete(message.id);
+    const mayHaveOutput = !types || types.some((type) => OUTPUT_TYPES.includes(type));
+    if (!sent.firstResponseSent && mayHaveOutput && hasOutputAfter(current.db, message.id, sent.afterSequence)) {
+      sent.firstResponseSent = true;
       const ms = Date.now() - sent.sentAt;
-      if (ms > MAX_WAIT_MS) return;
-      const startup = sent.execution === "cloud_sandbox" ? current.startupSince(message.id, sent.sentAt) : null;
-      const turn = sent.execution === "local" ? latestTurnExecution(current.db, message.id) : undefined;
-      // Only a workspace created after this message was sent counts toward it.
-      const created = workspaceCreates.get(message.id);
-      workspaceCreates.delete(message.id);
-      current.telemetry.capture({
-        name: "first_response",
-        properties: {
-          execution: sent.execution,
-          is_child_thread: sent.isChildThread,
-          message_source: sent.messageSource,
-          ms,
-          provider: sent.provider,
-          sandbox_woke: sent.execution === "cloud_sandbox" ? current.wokeSince(message.id, sent.sentAt) : null,
-          startup_source: startup?.startup_source ?? null,
-          sandbox_start_ms: startup?.sandbox_start_ms ?? null,
-          model: turn?.model ?? sent.model ?? null,
-          reasoning_level: turn?.reasoning ?? sent.reasoningLevel ?? null,
-          service_tier: sent.serviceTier ?? null,
-          harness_version: sent.provider === "codex" ? startup?.versions?.codex ?? null : sent.provider === "claude-code" ? startup?.versions?.claude ?? null : null,
-          environment_provider: sent.execution === "local" ? environmentProviderOf(current.db, message.id) : null,
-          workspace_create_ms: created !== undefined && created.at >= sent.sentAt ? created.ms : null,
-          seconds_since_first_launch: secondsSinceFirstLaunch(),
-          ...firstAgentTag(current.db, message.id),
-        },
-      });
+      if (ms <= MAX_WAIT_MS) {
+        const startup = sent.execution === "cloud_sandbox" ? current.startupSince(message.id, sent.sentAt) : null;
+        const turn = sent.execution === "local" ? latestTurnExecution(current.db, message.id) : undefined;
+        // Only a workspace created after this message was sent counts toward it.
+        const created = workspaceCreates.get(message.id);
+        workspaceCreates.delete(message.id);
+        current.telemetry.capture({
+          name: "first_response",
+          properties: {
+            execution: sent.execution,
+            is_child_thread: sent.isChildThread,
+            message_source: sent.messageSource,
+            ms,
+            provider: sent.provider,
+            sandbox_woke: sent.execution === "cloud_sandbox" ? current.wokeSince(message.id, sent.sentAt) : null,
+            startup_source: startup?.startup_source ?? null,
+            sandbox_start_ms: startup?.sandbox_start_ms ?? null,
+            model: turn?.model ?? sent.model ?? null,
+            reasoning_level: turn?.reasoning ?? sent.reasoningLevel ?? null,
+            service_tier: sent.serviceTier ?? null,
+            harness_version: sent.provider === "codex" ? startup?.versions?.codex ?? null : sent.provider === "claude-code" ? startup?.versions?.claude ?? null : null,
+            environment_provider: sent.execution === "local" ? environmentProviderOf(current.db, message.id) : null,
+            workspace_create_ms: created !== undefined && created.at >= sent.sentAt ? created.ms : null,
+            seconds_since_first_launch: secondsSinceFirstLaunch(),
+            ...firstAgentTag(current.db, message.id),
+          },
+        });
+      }
+      if (hasSubstantiveOutputAfter(current.db, message.id, sent.afterSequence)) {
+        current.pending.delete(message.id);
+        return;
+      }
+    } else if (sent.firstResponseSent && mayHaveOutput && hasSubstantiveOutputAfter(current.db, message.id, sent.afterSequence)) {
+      current.pending.delete(message.id);
       return;
     }
     if (types?.includes("turn/completed")) {
       current.pending.delete(message.id);
-      if (lastTurnStatus(current.db, message.id, sent.afterSequence) === "completed") captureSilent(current, message.id, sent, "empty");
+      if (
+        lastTurnStatus(current.db, message.id, sent.afterSequence) === "completed" &&
+        !hasSubstantiveOutputAfter(current.db, message.id, sent.afterSequence)
+      ) {
+        captureSilent(current, message.id, sent, "empty");
+      }
     }
   });
   // A message with no reply and no error after 10 minutes is a silent failure. A long gap between sweeps means the
@@ -112,7 +127,7 @@ export function installFirstResponseTelemetry(
       if (slept) sent.slept = true;
       if (now - sent.sentAt < MAX_WAIT_MS) continue;
       current.pending.delete(threadId);
-      if (!sent.slept) captureSilent(current, threadId, sent, "no_reply");
+      if (!sent.slept && !sent.firstResponseSent) captureSilent(current, threadId, sent, "no_reply");
     }
   }, SWEEP_MS);
   sweep.unref();
@@ -237,6 +252,32 @@ function hasOutputAfter(db: DbConnection, threadId: string, afterSequence: numbe
       gt(events.sequence, afterSequence),
       inArray(events.type, OUTPUT_TYPES),
       or(isNull(events.itemKind), ne(events.itemKind, "userMessage")),
+    ))
+    .limit(1)
+    .get() !== undefined;
+}
+
+/** Output beyond an empty reasoning start/close, so an empty thinking block alone does not hide `turn_silent` (`empty`). */
+function hasSubstantiveOutputAfter(db: DbConnection, threadId: string, afterSequence: number): boolean {
+  return db
+    .select({ sequence: events.sequence })
+    .from(events)
+    .where(and(
+      eq(events.threadId, threadId),
+      gt(events.sequence, afterSequence),
+      inArray(events.type, OUTPUT_TYPES),
+      or(isNull(events.itemKind), ne(events.itemKind, "userMessage")),
+      or(
+        ne(events.itemKind, "reasoning"),
+        isNull(events.itemKind),
+        and(
+          eq(events.type, "item/completed"),
+          or(
+            sql`json_array_length(json_extract(${events.data}, '$.item.content')) > 0`,
+            sql`json_array_length(json_extract(${events.data}, '$.item.summary')) > 0`,
+          ),
+        ),
+      ),
     ))
     .limit(1)
     .get() !== undefined;

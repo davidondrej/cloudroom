@@ -14,11 +14,6 @@ import {
   type TerminalFixedPanelTab,
 } from "./tab-model";
 
-export interface MarketplacePluginDetailPanelTab {
-  id: string;
-  kind: "marketplace-plugin-detail";
-}
-
 export interface SecondaryPanelTabReorderRequest {
   activeTabId: string;
   overTabId: string;
@@ -43,7 +38,7 @@ export interface SecondaryPanelRenderableTab {
   onSelect: () => void;
   renderContent: (pane: SecondaryPanelPaneRenderContext) => ReactNode;
   statusLabel: string | null;
-  tab: SecondaryFileFixedPanelTab | MarketplacePluginDetailPanelTab;
+  tab: SecondaryFileFixedPanelTab;
 }
 
 export const isBrowserTab = (tab: FixedPanelTab): tab is BrowserFixedPanelTab =>

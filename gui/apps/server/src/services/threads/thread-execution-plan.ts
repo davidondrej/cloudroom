@@ -1,12 +1,21 @@
-import { getProjectExecutionDefaults, getThread } from "@cloudroom/db";
-import type {
-  CallerExecutionInputSource,
-  PermissionMode,
-  ProjectExecutionDefaults,
-  ReasoningLevel,
-  ResolvedThreadExecutionOptions,
-  ServiceTier,
-  ThreadExecutionSource,
+import {
+  getEnvironment,
+  getProjectExecutionDefaults,
+  getStoredProviderModelCatalog,
+  getThread,
+  type EnvironmentRow,
+} from "@cloudroom/db";
+import {
+  availableModelSchema,
+  providerModelCatalogDependsOnWorkspace,
+  type AvailableModel,
+  type CallerExecutionInputSource,
+  type PermissionMode,
+  type ProjectExecutionDefaults,
+  type ReasoningLevel,
+  type ResolvedThreadExecutionOptions,
+  type ServiceTier,
+  type ThreadExecutionSource,
 } from "@cloudroom/domain";
 import { ApiError } from "../../errors.js";
 import type { AppDeps } from "../../types.js";
@@ -22,7 +31,10 @@ import {
   resolveThreadExecutionPermissionMode,
 } from "./thread-default-policy.js";
 import { getLastExecutionOptions } from "./thread-events.js";
-import { getSupportedReasoningLevelsForProvider } from "./thread-reasoning-policy.js";
+import {
+  getSupportedReasoningLevelsForProvider,
+  reconcileInheritedReasoningLevel,
+} from "./thread-reasoning-policy.js";
 
 interface ExecutionPlanFieldInput<TValue> {
   source: CallerExecutionInputSource;
@@ -214,6 +226,7 @@ function validateProviderReasoningLevel(
   registry: ProviderRegistryService,
   providerId: string,
   reasoningLevel: ReasoningLevel,
+  readKnownModel?: () => AvailableModel | undefined,
 ): void {
   const supportedLevels = getSupportedReasoningLevelsForProvider(
     registry,
@@ -223,6 +236,13 @@ function validateProviderReasoningLevel(
     supportedLevels.length === 0 ||
     supportedLevels.includes(reasoningLevel)
   ) {
+    return;
+  }
+  const modelSupportsLevel =
+    readKnownModel?.()?.supportedReasoningEfforts.some(
+      (effort) => effort.reasoningEffort === reasoningLevel,
+    ) ?? false;
+  if (modelSupportsLevel) {
     return;
   }
 
@@ -251,8 +271,92 @@ function resolveFieldWithDefault<TValue>(
   return resolveRequiredField(candidates) ?? defaultValue;
 }
 
+function findModelInCatalogJson(
+  json: string,
+  modelId: string,
+): AvailableModel | undefined {
+  try {
+    const raw: unknown = JSON.parse(json);
+    if (!Array.isArray(raw)) return undefined;
+    for (const item of raw) {
+      if (
+        typeof item === "object" &&
+        item !== null &&
+        "model" in item &&
+        item.model === modelId
+      ) {
+        const parsed = availableModelSchema.safeParse(item);
+        if (parsed.success) return parsed.data;
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function findModelInStoredCatalog(
+  deps: Pick<AppDeps, "db">,
+  key: { hostId: string; providerId: string; scopeKey: string },
+  modelId: string,
+): AvailableModel | undefined {
+  const row = getStoredProviderModelCatalog(deps.db, key);
+  if (row === null) return undefined;
+  return (
+    findModelInCatalogJson(row.modelsJson, modelId) ??
+    findModelInCatalogJson(row.selectedOnlyModelsJson, modelId)
+  );
+}
+
+type ExistingThreadExecutionPlanDeps = Pick<
+  AppDeps,
+  "db" | "providerRegistry"
+> &
+  Partial<Pick<AppDeps, "lifecycleDedupers">>;
+
+function findKnownProviderModel(
+  deps: ExistingThreadExecutionPlanDeps,
+  args: {
+    getCwd: () => string | null;
+    hostId: string | null;
+    model: string;
+    providerId: string;
+  },
+): AvailableModel | undefined {
+  const registration = deps.providerRegistry.get(args.providerId);
+  if (args.hostId !== null && registration !== null) {
+    const cwd = providerModelCatalogDependsOnWorkspace(
+      registration.info.capabilities.modelCatalogScope,
+    )
+      ? args.getCwd()
+      : null;
+    const catalogStore = deps.lifecycleDedupers?.providerModelCatalogs;
+    const stored =
+      catalogStore !== undefined
+        ? catalogStore.findKnownModel(deps, {
+            cwd,
+            hostId: args.hostId,
+            model: args.model,
+            provider: registration.info,
+          })
+        : findModelInStoredCatalog(
+            deps,
+            {
+              hostId: args.hostId,
+              providerId: args.providerId,
+              scopeKey: cwd ?? "",
+            },
+            args.model,
+          );
+    if (stored !== undefined) return stored;
+  }
+  return registration?.fallbackModels.find(
+    (candidate) => candidate.model === args.model,
+  );
+}
+
 export async function resolveExistingThreadExecutionPlan(
-  deps: Pick<AppDeps, "db" | "providerRegistry">,
+  deps: ExistingThreadExecutionPlanDeps,
   args: ResolveExistingThreadExecutionPlanArgs,
 ): Promise<ExistingThreadExecutionPlan> {
   const lastExecution = getLastExecutionOptions(deps, args.threadId);
@@ -288,11 +392,22 @@ export async function resolveExistingThreadExecutionPlan(
     throw createMissingThreadExecutionModelError(args.threadId);
   }
 
+  let loadedEnvironment: EnvironmentRow | null | undefined;
+  const readEnvironment = (): EnvironmentRow | null => {
+    if (loadedEnvironment === undefined) {
+      loadedEnvironment =
+        thread.environmentId !== null
+          ? getEnvironment(deps.db, thread.environmentId)
+          : null;
+    }
+    return loadedEnvironment;
+  };
+  const hostId =
+    args.hostId === undefined
+      ? (readEnvironment()?.hostId ?? null)
+      : args.hostId;
   const permissionMode = clampPermissionModeToHost(deps, {
-    hostId:
-      args.hostId === undefined
-        ? resolveEnvironmentHostId(deps, thread.environmentId)
-        : args.hostId,
+    hostId,
     permissionMode: resolveThreadExecutionPermissionMode(
       deps.providerRegistry,
       {
@@ -312,9 +427,11 @@ export async function resolveExistingThreadExecutionPlan(
     permissionMode,
   );
 
-  const reasoningLevel = resolveFieldWithDefault<ReasoningLevel>(
+  const explicitReasoningLevel = args.input.reasoningLevel?.value;
+  const fromThreadCreate = args.projectDefaults !== undefined;
+  let reasoningLevel = resolveFieldWithDefault<ReasoningLevel>(
     [
-      args.input.reasoningLevel?.value,
+      explicitReasoningLevel,
       thread.reasoningLevelOverride ?? undefined,
       lastExecution?.reasoningLevel,
       projectExecution?.reasoningLevel,
@@ -323,10 +440,33 @@ export async function resolveExistingThreadExecutionPlan(
   );
   // Core checks a Cloud thread's level against its own catalog, which has levels the Mac's lacks ("none").
   if (thread.executionTarget !== "cloud") {
+    let knownModel: AvailableModel | undefined;
+    let knownModelLoaded = false;
+    const readKnownModel = (): AvailableModel | undefined => {
+      if (!knownModelLoaded) {
+        knownModelLoaded = true;
+        knownModel = findKnownProviderModel(deps, {
+          getCwd: () => readEnvironment()?.path ?? null,
+          hostId,
+          model,
+          providerId: thread.providerId,
+        });
+      }
+      return knownModel;
+    };
+    // Inherited effort can outlive a harness or model switch; reconcile it while keeping explicit and create-time requests strict (#2239, #2692).
+    if (explicitReasoningLevel === undefined && !fromThreadCreate) {
+      reasoningLevel = reconcileInheritedReasoningLevel(deps.providerRegistry, {
+        level: reasoningLevel,
+        model: readKnownModel(),
+        providerId: thread.providerId,
+      });
+    }
     validateProviderReasoningLevel(
       deps.providerRegistry,
       thread.providerId,
       reasoningLevel,
+      fromThreadCreate ? undefined : readKnownModel,
     );
   }
 
@@ -358,7 +498,7 @@ export async function resolveExistingThreadExecutionPlan(
 }
 
 export async function tryResolveExistingThreadExecutionPlan(
-  deps: Pick<AppDeps, "db" | "providerRegistry">,
+  deps: ExistingThreadExecutionPlanDeps,
   args: ResolveExistingThreadExecutionPlanArgs,
 ): Promise<ExistingThreadExecutionPlan | null> {
   try {

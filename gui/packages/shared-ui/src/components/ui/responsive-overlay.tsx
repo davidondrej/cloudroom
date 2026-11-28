@@ -767,7 +767,10 @@ export function PersistentResponsiveDrawerShell({
         style={{
           opacity: open ? 1 : 0,
           pointerEvents: open ? "auto" : "none",
-          transition: backdropTransition,
+          visibility: open ? "visible" : "hidden",
+          transition: open
+            ? `${backdropTransition}, visibility 0s linear 0s`
+            : `${backdropTransition}, visibility 0s linear ${motionDurationMs}ms`,
         }}
         onClick={closeOnBackdropClick ? requestClose : undefined}
         onTouchMove={(event) => event.preventDefault()}

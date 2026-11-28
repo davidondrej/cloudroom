@@ -580,26 +580,38 @@ describe("room-cli thread spawn command output", () => {
           status: 504,
         }),
     );
+    // Still being created at the first read: it is read again, never spawned again.
+    let reads = 0;
     const get = vi.fn(async ({ param }: { param: { id: string } }) =>
       fixtures.makeThread({
         id: param.id,
         projectId: "proj-1",
         providerId: "codex",
-        status: "starting",
+        status: reads++ === 0 ? "pending" : "starting",
       }),
     );
     stubServerApi({ "v1.threads.$post": post, "v1.threads.:id.$get": get });
+    // The "still pending" notice comes right before the next read is timed.
+    const noticed = new Promise<void>((resolve) =>
+      vi.mocked(console.error).mockImplementation(() => resolve()),
+    );
+    vi.useFakeTimers();
 
-    await runCommand(
+    const command = runCommand(
       ["thread", "spawn", "--project", "proj-1", "--prompt", "hello"],
       register,
     );
+    await noticed;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await command;
+    vi.useRealTimers();
 
     const { requestId } = (
       post.mock.calls[0] as unknown as [{ json: { requestId: string } }]
     )[0].json;
     const id = requestThreadId("proj-1", requestId);
     expect(post).toHaveBeenCalledTimes(1);
+    expect(get).toHaveBeenCalledTimes(2);
     expect(get.mock.calls[0]?.[0].param.id).toBe(id);
     expect(collectLogLines(vi.mocked(console.log))).toContain(
       `Thread spawned: ${id}`,

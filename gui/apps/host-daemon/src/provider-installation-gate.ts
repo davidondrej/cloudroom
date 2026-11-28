@@ -28,6 +28,13 @@ export interface ProviderInstallationGate {
     signal?: AbortSignal,
     onFallback?: (error: unknown) => void,
   ): Promise<ProviderInstallationStatus>;
+  /** A status read: shares the probe and a passing answer like run(), but a
+   *  failed probe fails the read instead of answering from an older one. */
+  read(
+    key: string,
+    probe: () => Promise<ProviderInstallationStatus>,
+    signal: AbortSignal,
+  ): Promise<ProviderInstallationStatus>;
 }
 
 interface CreateProviderInstallationGateOptions {
@@ -96,9 +103,9 @@ export function createProviderInstallationGate({
       return newest?.status ?? status;
     }
     answeredByKey.set(key, { attempt, status });
-    const passed =
-      (status.installed || status.minimumSupportedVersion === null) &&
-      !status.versionUnsupported;
+    // A missing CLI is checked again each time: the user may install it in a
+    // terminal and expect Cloudroom to notice (#2670).
+    const passed = status.installed && !status.versionUnsupported;
     if (!passed) {
       settledByKey.delete(key);
     } else if (!interrupted) {
@@ -188,6 +195,21 @@ export function createProviderInstallationGate({
         if (answered !== undefined) {
           onFallback?.(error);
           return answered.status;
+        }
+        throw error;
+      } finally {
+        operation.waiting -= 1;
+      }
+    },
+    async read(key, probe, signal) {
+      const operation = share(key, probe);
+      operation.waiting += 1;
+      try {
+        return await untilAborted(operation.promise, signal);
+      } catch (error) {
+        // Like run(): a read that gives up releases a stalled probe.
+        if (signal.aborted && pendingByKey.get(key) === operation) {
+          pendingByKey.delete(key);
         }
         throw error;
       } finally {

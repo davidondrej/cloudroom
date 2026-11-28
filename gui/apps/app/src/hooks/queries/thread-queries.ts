@@ -11,7 +11,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { COMPACT_VIEWPORT_QUERY } from "@cloudroom/shared-ui/hooks/use-compact-viewport";
 import { getMediaQuerySnapshot } from "@cloudroom/shared-ui/hooks/use-media-query";
-import type { PendingInteraction, ThreadListEntry } from "@cloudroom/domain";
+import {
+  isMentionableHiddenThread,
+  type PendingInteraction,
+  type ThreadListEntry,
+} from "@cloudroom/domain";
 import type {
   PromptHistoryResponse,
   ThreadCountResponse,
@@ -45,7 +49,7 @@ import {
   useThreadListRealtimeSubscription,
 } from "@/hooks/useRealtimeSubscription";
 import {
-  getCachedSidebarNavigationThreads,
+  getCachedSidebarMentionableThreads,
   getCachedThreadListPlaceholder,
   findSidebarNavigationThreadPlaceholder,
 } from "../cache-owners/query-cache";
@@ -97,7 +101,6 @@ import { ARCHIVED_THREADS_PAGE_SIZE } from "./archived-threads-page-size";
 import { ingestThreadDetailBootstrap } from "../cache-owners/thread-detail-cache-owner";
 import {
   RECENT_THREAD_GC_TIME,
-  rememberRecentThread,
   useRememberRecentThread,
 } from "../cache-owners/recent-thread-cache";
 
@@ -274,7 +277,7 @@ function addThreadMentionCandidate(
   if (thread.archivedAt !== null || thread.deletedAt !== null) {
     return;
   }
-  if (thread.visibility === "hidden") {
+  if (thread.visibility === "hidden" && !isMentionableHiddenThread(thread)) {
     return;
   }
   if (!candidatesById.has(thread.id)) {
@@ -298,7 +301,7 @@ function getThreadMentionCandidatePlaceholder(
   queryClient: QueryClient,
 ): ThreadListResponse | undefined {
   const candidatesById = new Map<string, ThreadListItem>();
-  for (const thread of getCachedSidebarNavigationThreads(queryClient)) {
+  for (const thread of getCachedSidebarMentionableThreads(queryClient)) {
     addThreadMentionCandidate(candidatesById, thread);
   }
   for (const { data } of getCachedThreadLists(queryClient, {
@@ -578,7 +581,9 @@ export function useThreadMentionCandidates({
   const enabled = enabledOption ?? true;
   useThreadListRealtimeSubscription({ enabled });
   const { data: sidebarCandidates, isBootstrapPending } =
-    useSidebarNavigationThreadSelection(selectThreadMentionCandidates);
+    useSidebarNavigationThreadSelection(selectThreadMentionCandidates, {
+      includeMentionableHidden: true,
+    });
   const shouldFetch =
     enabled && sidebarCandidates === undefined && !isBootstrapPending;
   const queryKey = shouldFetch
@@ -979,54 +984,24 @@ async function fetchThreadTimeline({
   );
 }
 
-const THREAD_HOVER_PREFETCH_DELAY_MS = 30;
-const THREAD_PREFETCH_BOOTSTRAP_STALE_MS = 10_000;
+const THREAD_HOVER_PREFETCH_DELAY_MS = 60;
 const THREAD_PREFETCH_TIMELINE_STALE_MS = 5_000;
 
-/** Loads a thread's messages into the cache, so opening it shows them at once.
- *  Resolves when they are there; a failed load resolves too. */
+/** Loads a cold thread's messages into the cache, so opening it shows them at once.
+ *  Skips already-cached threads; a failed load resolves too. */
 export async function prefetchThreadTimeline(
   queryClient: QueryClient,
   threadId: string,
 ): Promise<void> {
+  if (!threadId) return;
   const queryKey = threadTimelineQueryKey(threadId);
-  rememberRecentThread(queryClient, threadId);
+  if (queryClient.getQueryData(queryKey) !== undefined) return;
   await queryClient.prefetchQuery({
     queryKey,
     staleTime: THREAD_PREFETCH_TIMELINE_STALE_MS,
     queryFn: ({ signal }) =>
       fetchThreadTimeline({ queryClient, signal, threadId }),
   });
-}
-
-/** Warms both thread metadata (with environment + host) and timeline delta. */
-export async function prefetchThread(
-  queryClient: QueryClient,
-  threadId: string,
-): Promise<void> {
-  if (!threadId) return;
-  rememberRecentThread(queryClient, threadId);
-  await Promise.all([
-    queryClient.prefetchQuery({
-      queryKey: threadDetailBootstrapQueryKey(threadId),
-      staleTime: THREAD_PREFETCH_BOOTSTRAP_STALE_MS,
-      queryFn: async ({ signal }) => {
-        const thread = await sdk.threads.get({
-          include: "environment,host",
-          threadId,
-          signal,
-        });
-        ingestThreadDetailBootstrap({ queryClient, thread });
-        return thread;
-      },
-    }),
-    queryClient.prefetchQuery({
-      queryKey: threadTimelineQueryKey(threadId),
-      staleTime: THREAD_PREFETCH_TIMELINE_STALE_MS,
-      queryFn: ({ signal }) =>
-        fetchThreadTimeline({ queryClient, signal, threadId }),
-    }),
-  ]);
 }
 
 export function usePrefetchThreadOnHover(threadId: string) {
@@ -1045,14 +1020,10 @@ export function usePrefetchThreadOnHover(threadId: string) {
         cancel();
         timerRef.current = window.setTimeout(() => {
           timerRef.current = null;
-          void prefetchThread(queryClient, threadId);
+          void prefetchThreadTimeline(queryClient, threadId);
         }, THREAD_HOVER_PREFETCH_DELAY_MS);
       },
       onPointerLeave: cancel,
-      onPointerDown: () => {
-        cancel();
-        void prefetchThread(queryClient, threadId);
-      },
     }),
     [cancel, queryClient, threadId],
   );

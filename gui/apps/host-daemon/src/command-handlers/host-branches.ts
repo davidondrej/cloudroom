@@ -9,6 +9,7 @@ import {
   fetchRemoteBranches,
   getCheckoutRef,
   getGitCommonDir,
+  inspectGitRepoKind,
   listBranchRefsWithDefaults,
   readDefaultBranchRefs,
   readWorkspaceGitState,
@@ -255,10 +256,10 @@ export async function inspectHostGitSource(
   const gitProcessOptions = userExecutableProcessOptions(
     options?.runtimeManager.getShellEnv() ?? {},
   );
-  const repoKind = await detectGitRepoKind(command.path, gitProcessOptions);
-  if (repoKind === "none") {
+  const repo = await inspectGitRepoKind(command.path, gitProcessOptions);
+  if (repo.kind === "none") {
     return {
-      checkout: { kind: "unknown", reason: "Path is not a git repository" },
+      checkout: { kind: "unknown", reason: repo.reason },
       defaultBranch: null,
       defaultBranchRelation: null,
       isWorktree: false,
@@ -267,6 +268,7 @@ export async function inspectHostGitSource(
       originDefaultBranch: null,
     };
   }
+  const repoKind = repo.kind;
 
   if (command.remoteRefresh === "blocking") {
     await refreshRemoteBranches(command.path, gitProcessOptions, "blocking");

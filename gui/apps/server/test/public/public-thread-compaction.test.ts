@@ -4,7 +4,7 @@ import {
   createStandaloneBuiltinCompactCommandInput,
   turnScope,
 } from "@cloudroom/domain";
-import type { ClientTurnRequestId } from "@cloudroom/domain";
+import type { ClientTurnRequestId, ThreadEvent } from "@cloudroom/domain";
 import { applyTurnCompletedEvent } from "../../src/internal/turn-completed-events.js";
 import { sendNextQueuedMessageIfPresent } from "../../src/services/threads/queued-messages.js";
 import {
@@ -365,7 +365,11 @@ describe("public thread compaction", () => {
     });
   });
 
-  it("tells the follow-up how compaction went once its turn ends", async () => {
+  it.each([
+    ["thread/compacted", { type: "thread/compacted" }],
+    // Codex 0.149 sends only the finished item (#2424).
+    ["a contextCompaction item", { type: "item/completed", item: { type: "contextCompaction", id: "c1" } }],
+  ])("tells the follow-up how compaction went once its turn ends (%s)", async (_, compacted) => {
     await withTestHarness(async (harness) => {
       const providerThreadId = "provider-thread-follow-up";
       const { host, session, thread } = seedCompactableThread(harness, { providerId: "pi", providerThreadId });
@@ -394,7 +398,7 @@ describe("public thread compaction", () => {
         body: JSON.stringify({
           sessionId: session.id,
           eventGroups: groupHostDaemonEvents([
-            createTestDaemonEventEnvelope({ event: { type: "thread/compacted", threadId: thread.id, providerThreadId, scope } }),
+            createTestDaemonEventEnvelope({ event: { ...compacted, threadId: thread.id, providerThreadId, scope } as ThreadEvent }),
             createTestDaemonEventEnvelope({
               event: { type: "turn/completed", threadId: thread.id, providerThreadId, scope, status: "completed" },
             }),

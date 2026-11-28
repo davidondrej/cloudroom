@@ -16,7 +16,6 @@ import {
 import { DETAIL_GRID_CLASS } from "@/components/ui/detail-card.js";
 import { useThreads } from "@/hooks/queries/thread-queries";
 import { ThreadTimelinePane } from "./ThreadTimelinePane";
-import { useOptionalPaneContext } from "./PaneContext";
 import { getCompactPanelPresentation } from "@/components/right-panel/shell/panel-tokens";
 
 type ThreadTimelinePaneProps = Omit<
@@ -108,20 +107,11 @@ function ThreadDetailSecondaryContentBody({
     [hasForks, isMetadataLoading, metadata],
   );
 
-  const isHiddenKeepAlive =
-    (useOptionalPaneContext()?.isHidden ?? false) && !isBoundedPane;
-
   return (
     <div
-      aria-hidden={isHiddenKeepAlive || undefined}
-      inert={isHiddenKeepAlive || undefined}
-      style={isHiddenKeepAlive ? { contentVisibility: "hidden" } : undefined}
       className={cn(
         "flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-clip",
-        !isBoundedPane &&
-          !isHiddenKeepAlive &&
-          "-mx-4 -mb-4 -mt-4 md:-mx-5 md:-mb-5 md:-mt-5",
-        isHiddenKeepAlive && "pointer-events-none invisible absolute inset-0",
+        !isBoundedPane && "-mx-4 -mb-4 -mt-4 md:-mx-5 md:-mb-5 md:-mt-5",
       )}
     >
       <SecondaryPanelLayout

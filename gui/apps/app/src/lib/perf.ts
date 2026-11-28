@@ -215,8 +215,12 @@ export function useThreadOpenTiming(
     }
     const becameActive = !wasActiveRef.current;
     wasActiveRef.current = true;
-    if (!becameActive && pending.current?.threadId === threadId) return;
-    pending.current = startThreadOpen(threadId);
+    if (becameActive || pending.current?.threadId !== threadId) {
+      pending.current = startThreadOpen(threadId);
+    }
+    return () => {
+      wasActiveRef.current = false;
+    };
   }, [active, threadId]);
   useEffect(() => {
     const open = pending.current;

@@ -1,7 +1,12 @@
 import path from "node:path";
 import {
+  DIRECTOR_PLUGIN_ID,
+  isMentionableHiddenThread,
+} from "@cloudroom/domain";
+import {
   countProjectSources,
   findOrCreateProjectByLocalPathSource,
+  getInstalledPlugin,
   getPersonalProject,
   getProject,
   getProjectExecutionDefaults,
@@ -13,6 +18,7 @@ import {
   listPublicProjects,
   listProjectSourcesByProjectIds,
   listThreadSections,
+  listThreadsWithPendingInteractionState,
   listThreadsWithPendingInteractionStateForProjects,
   moveCheckoutEnvironments,
   reorderProject,
@@ -106,7 +112,11 @@ import {
 } from "./branch-list-query.js";
 import { parseFileListLimit } from "./file-list-query.js";
 import { parseSafeRelativeRoutePath } from "./relative-route-path.js";
-import { resolveSkillCatalog } from "../services/skills/skill-catalog.js";
+import {
+  getCommandCatalogRevision,
+  invalidateCommandCatalog,
+  resolveSkillCatalog,
+} from "../services/skills/skill-catalog.js";
 import { resolveWorkspaceProjectSkills } from "../services/skills/workspace-skills.js";
 import { resolveSharedSkills } from "../services/skills/shared-skills.js";
 import {
@@ -317,6 +327,17 @@ function buildSidebarBootstrapResponse(deps: AppDeps) {
       "Personal project response was not built",
     );
   }
+  const mentionableHiddenThreads =
+    getInstalledPlugin(deps.db, DIRECTOR_PLUGIN_ID)?.enabled === false
+      ? []
+      : toThreadListEntryResponses(deps, {
+          threads: listThreadsWithPendingInteractionState(deps.db, {
+            archived: false,
+            hasParent: false,
+            includeHidden: true,
+            originPluginId: DIRECTOR_PLUGIN_ID,
+          }).filter(isMentionableHiddenThread),
+        });
   return {
     sections: listThreadSections(deps.db),
     projects: buildProjectsWithThreadsResponseFromRows(
@@ -324,6 +345,7 @@ function buildSidebarBootstrapResponse(deps: AppDeps) {
       listPublicProjects(deps.db),
     ),
     personalProject: personalProjectResponse,
+    mentionableHiddenThreads,
   };
 }
 
@@ -748,6 +770,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     string,
     { expiresAt: number; promise: Promise<DiscoveredCommandCatalog> }
   >();
+  let cachedCatalogRevision = getCommandCatalogRevision();
 
   get(routes.commands, async (context, query) => {
     const projectId = context.req.param("id");
@@ -756,6 +779,12 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     const registration = deps.providerRegistry.get(query.provider);
     if (registration === null || !providerHasCommandSurface(registration)) {
       return context.json({ commands: [] });
+    }
+
+    const catalogRevision = getCommandCatalogRevision();
+    if (catalogRevision !== cachedCatalogRevision) {
+      commandCatalogCache.clear();
+      cachedCatalogRevision = catalogRevision;
     }
 
     const workspace = resolveProjectCommandWorkspace(deps, {
@@ -769,6 +798,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       workspace.hostId,
       workspace.cwd ?? "",
       deps.providerRegistry.getRegistrationRevision(),
+      catalogRevision,
     ]);
     const now = Date.now();
     const cached = commandCatalogCache.get(cacheKey);
@@ -885,6 +915,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       skillId: payload.skillId,
       workspace,
     });
+    invalidateCommandCatalog();
     commandCatalogCache.clear();
     return context.json({ deletedPath });
   });
@@ -926,6 +957,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       revision: payload.revision,
       workspace,
     });
+    invalidateCommandCatalog();
     commandCatalogCache.clear();
     return context.json(result);
   });

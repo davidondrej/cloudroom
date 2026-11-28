@@ -892,7 +892,9 @@ it("sleeping cloud threads share one awake-list check per app, and a thread woke
     const failing = count("awake");
     await waitFor(() => count("awake") > failing, "another failed awake check");
     await new Promise(resolve => setTimeout(resolve, 1_600));
-    expect(deliveries.mock.calls.some(([id]) => id === threads[2]!.id)).toBe(true);
+    // Active threads keep rechecking on a failed awake check, while idle unwatched sleeping threads do not storm retries.
+    expect(deliveries.mock.calls.some(([id]) => id === threads[1]!.id)).toBe(true);
+    expect(deliveries.mock.calls.some(([id]) => id === threads[2]!.id)).toBe(false);
   } finally {
     service.stop();
     coreServer.close(); websiteServer.close();
@@ -944,7 +946,7 @@ it("a sleeping thread costs no delivery work until it wakes, opening it connects
     const deliveries = vi.spyOn((service as unknown as { delivery: { deliverPending: (id: string) => Promise<void> } }).delivery, "deliverPending");
 
     await new Promise(resolve => setTimeout(resolve, 4_000));
-    expect(deliveries.mock.calls.map(([id]) => id).sort()).toEqual(threads.map(thread => thread.id).sort());
+    expect(deliveries.mock.calls).toEqual([]);
     expect(streams).toEqual([]);
 
     await service.wakeAhead(threads[0]!.id, "thread_view");
@@ -1361,3 +1363,154 @@ it("recovers from Core 404 session not found on a pruned fresh sandbox by starti
     await waitFor(() => labelSwitches.some((l) => l.thread === thread.id && l.session === saved.sessionId), "website label switched to new session");
   } finally { service.stop(); coreServer.close(); websiteServer.close(); await harness.cleanup(); }
 });
+
+it("keeps a running Cloud thread active across repeated stream 502s and bounds awake rechecks", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  let awakeCalls = 0, streamHits = 0, coreUrl = "", targetThread = "";
+
+  const coreServer = createServer((req, res) => {
+    if (req.url?.includes("/stream?")) {
+      streamHits++;
+      res.writeHead(502, { "Content-Type": "text/plain" });
+      res.end("preview: upstream not reachable");
+      return;
+    }
+    res.writeHead(404); res.end();
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
+    if (input.action === "awake") {
+      awakeCalls++;
+      return json({ sandboxes: targetThread ? [{ thread: targetThread, origin: coreUrl, token: "t".repeat(64) }] : [], recheck_ms: 60_000 });
+    }
+    return json({ ok: true });
+  });
+
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const thread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "claude-code", status: "active" });
+    targetThread = thread.id;
+    harness.deps.db.insert(cloudroomThreads).values({
+      threadId: thread.id, coreUrl: `sandbox:${thread.id}`, startRequestId: "start_502", sessionId: "cr_502", model: "claude-fable-5-2", reasoning: "xhigh", cursor: 10,
+    }).run();
+
+    await waitFor(() => streamHits >= 1, "initial 502 stream attempt");
+    const callsAfterFirst = awakeCalls;
+    await new Promise((resolve) => setTimeout(resolve, 3_500));
+    expect(getThread(harness.deps.db, thread.id)?.status).toBe("active");
+    // Cooldown prevents re-hitting /sandboxes every 1.5 s tick while 502s persist.
+    expect(awakeCalls).toBeLessThanOrEqual(callsAfterFirst + 1);
+  } finally { service.stop(); coreServer.close(); websiteServer.close(); await harness.cleanup(); }
+}, 15_000);
+
+it("throttles awake rechecks to once per 10 s when the website awake call itself fails", async () => {
+  const harness = await createTestAppHarness();
+  const service = cloudroom(harness.deps);
+  let awakeCalls = 0;
+
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    res.writeHead(input.action === "awake" ? 500 : 200, { "Content-Type": "application/json" });
+    if (input.action === "awake") { awakeCalls++; res.end(JSON.stringify({ error: "db overloaded" })); return; }
+    res.end(JSON.stringify({ ok: true }));
+  });
+
+  const websiteUrl = await listen(websiteServer);
+  const project = { id: "proj_a", repository: null, folder: "a" };
+  const nowSpy = vi.spyOn(Date, "now");
+  let fakeNow = Date.now();
+  nowSpy.mockImplementation(() => fakeNow);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    service.stop();
+    awakeCalls = 0;
+    service.sandboxes.forget("thr_outage");
+
+    await expect(service.sandboxes.connection("thr_outage", project, false)).rejects.toThrow();
+    expect(awakeCalls).toBe(1);
+
+    // Repeated ticks within 10 s must not call the failing website again.
+    for (let step = 1; step <= 6; step++) {
+      fakeNow += 1_500;
+      await expect(service.sandboxes.connection("thr_outage", project, false)).rejects.toThrow("Waiting to recheck");
+    }
+    expect(awakeCalls).toBe(1);
+
+    // Once 10 s have passed, exactly one more attempt is allowed.
+    fakeNow += 2_000;
+    await expect(service.sandboxes.connection("thr_outage", project, false)).rejects.toThrow();
+    expect(awakeCalls).toBe(2);
+  } finally { nowSpy.mockRestore(); service.stop(); websiteServer.close(); await harness.cleanup(); }
+});
+
+it("restores active status when a sandbox stream reconnects mid-turn after asleep(), while keeping resuming wakes idle", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  let awakeList: string[] = [];
+  let coreUrl = "";
+  const sessionStates = new Map<string, string>();
+  const streams = new Set<import("node:http").ServerResponse>();
+
+  const coreServer = createServer((req, res) => {
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    const sessionMatch = req.url?.match(/^\/v1\/sessions\/([^/?]+)$/);
+    if (req.method === "GET" && sessionMatch) {
+      const sid = sessionMatch[1]!;
+      return json({ session: { session_id: sid, harness: "claude-code", state: sessionStates.get(sid) ?? "idle", native_id: null, current_request: "req_1", last_sequence: 5, queue: [], receipts: {} } });
+    }
+    if (req.url?.includes("/stream?")) {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.flushHeaders();
+      streams.add(res);
+      res.on("close", () => streams.delete(res));
+      return;
+    }
+    return json({}, 404);
+  });
+  const websiteServer = createServer(async (req, res) => {
+    const input = await body(req);
+    const json = (value: unknown, status = 200) => { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(value)); };
+    if (req.url === "/api/desktop/logins") return json({ claude: false, codex: false, pi: false, github: false });
+    if (input.action === "threads") return json({ error: "Invalid sandbox request." }, 400);
+    if (input.action === "awake") {
+      return json({ sandboxes: awakeList.map((thread) => ({ thread, origin: coreUrl, token: "t".repeat(64) })), recheck_ms: 1_000 });
+    }
+    return json({ ok: true });
+  });
+
+  coreUrl = await listen(coreServer);
+  const websiteUrl = await listen(websiteServer);
+  try {
+    await service.configure(null, { id: "11111111-1111-4111-8111-111111111111", email: "sandbox@example.com" }, undefined, websiteUrl, "a".repeat(64));
+    const runningThread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "claude-code", status: "active" });
+    const resumingThread = createThread(harness.deps.db, harness.deps.hub, { executionTarget: "cloud", projectId: project.id, providerId: "claude-code", status: "active" });
+    sessionStates.set("cr_running", "running");
+    sessionStates.set("cr_resuming", "resuming");
+    harness.deps.db.insert(cloudroomThreads).values([
+      { threadId: runningThread.id, coreUrl: `sandbox:${runningThread.id}`, startRequestId: "s1", sessionId: "cr_running", model: "claude-fable-5-2", reasoning: "xhigh", cursor: 5 },
+      { threadId: resumingThread.id, coreUrl: `sandbox:${resumingThread.id}`, startRequestId: "s2", sessionId: "cr_resuming", model: "claude-fable-5-2", reasoning: "xhigh", cursor: 5 },
+    ]).run();
+
+    // Website briefly reports neither awake: asleep() flips both to idle and flags needsStatusSync.
+    await waitFor(() => getThread(harness.deps.db, runningThread.id)?.status === "idle" && getThread(harness.deps.db, resumingThread.id)?.status === "idle", "both marked idle while absent from awake list");
+
+    // Both sandboxes reappear awake and reconnect mid-turn without emitting new state records.
+    awakeList = [runningThread.id, resumingThread.id];
+    await waitFor(() => getThread(harness.deps.db, runningThread.id)?.status === "active", "running thread restored to active on reconnect");
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(getThread(harness.deps.db, resumingThread.id)?.status).toBe("idle");
+  } finally {
+    for (const res of streams) res.end();
+    service.stop(); coreServer.close(); websiteServer.close(); await harness.cleanup();
+  }
+}, 15_000);

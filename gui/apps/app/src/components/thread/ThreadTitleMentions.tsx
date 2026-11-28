@@ -92,6 +92,7 @@ export interface ThreadTitleMentionNavigationSource {
     name: string;
     threads: readonly ThreadListEntry[];
   };
+  mentionableHiddenThreads?: readonly ThreadListEntry[];
 }
 
 export function buildThreadTitleMentionResources(
@@ -141,6 +142,9 @@ export function buildThreadTitleMentionResources(
     for (const thread of project.threads) addThread(thread);
   }
   for (const thread of navigation.personalProject.threads) addThread(thread);
+  for (const thread of navigation.mentionableHiddenThreads ?? []) {
+    addThread(thread);
+  }
   if (threadById.size !== previous.threadById.size) threadsChanged = true;
 
   const next: ThreadTitleMentionResources = {

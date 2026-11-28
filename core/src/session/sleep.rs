@@ -91,7 +91,7 @@ impl Session {
     }
 
     /// Started in its parent's sandbox: still true once detached, as when its archived parent kept it open (#603).
-    fn shared_child(&self) -> bool {
+    pub(super) fn shared_child(&self) -> bool {
         self.parent_session.is_some()
             || self
                 .receipts

@@ -225,6 +225,8 @@ function loadBaseImage(src: string): Promise<HTMLImageElement> {
 
 const STANDALONE_DISPLAY_MODE_QUERY = "(display-mode: standalone)";
 
+const renderedHrefCache = new Map<string, Promise<string>>();
+
 async function createFaviconHref({
   badge,
   baseHref,
@@ -234,26 +236,38 @@ async function createFaviconHref({
     return baseHref;
   }
 
-  const image = await loadBaseImage(baseHref);
-  const canvas = document.createElement("canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("Canvas 2D context unavailable");
-  context.drawImage(image, 0, 0);
+  const cacheKey = `${badge}:${colorPreference}:${baseHref}`;
+  const cached = renderedHrefCache.get(cacheKey);
+  if (cached) return cached;
 
-  if (colorPreference !== "default") {
-    context.globalCompositeOperation = "source-in";
-    context.fillStyle = FAVICON_COLOR_VALUES[colorPreference];
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    context.globalCompositeOperation = "source-over";
-  }
+  const pending = (async () => {
+    const image = await loadBaseImage(baseHref);
+    const canvas = document.createElement("canvas");
+    canvas.width = image.naturalWidth;
+    canvas.height = image.naturalHeight;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas 2D context unavailable");
+    context.drawImage(image, 0, 0);
 
-  if (badge === "unread") {
-    drawUnreadBadge(context, canvas.width, canvas.height);
-  }
+    if (colorPreference !== "default") {
+      context.globalCompositeOperation = "source-in";
+      context.fillStyle = FAVICON_COLOR_VALUES[colorPreference];
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.globalCompositeOperation = "source-over";
+    }
 
-  return canvas.toDataURL("image/png");
+    if (badge === "unread") {
+      drawUnreadBadge(context, canvas.width, canvas.height);
+    }
+
+    return canvas.toDataURL("image/png");
+  })();
+
+  renderedHrefCache.set(cacheKey, pending);
+  pending.catch(() => {
+    renderedHrefCache.delete(cacheKey);
+  });
+  return pending;
 }
 
 function getUnreadBadgeDot(width: number, height: number): UnreadBadgeDot {
@@ -300,7 +314,7 @@ async function applyFaviconState(state: FaviconRenderState): Promise<void> {
   if (token !== applyToken) return;
   for (const { href, size } of links) {
     const link = getFaviconLink(size);
-    if (link) link.href = href;
+    if (link && link.getAttribute("href") !== href) link.href = href;
   }
 }
 

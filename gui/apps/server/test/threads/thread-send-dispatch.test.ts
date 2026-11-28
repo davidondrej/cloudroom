@@ -952,6 +952,43 @@ describe("startup queue waits", () => {
     });
   });
 
+  it("tells a running parent nothing when a child's detach is undone while its notice is prepared (#2281)", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedProviderThreadFixture({
+        harness,
+        status: "active",
+        value: 2281,
+      });
+      seedTurnStarted(harness.deps, {
+        environmentId: environment.id,
+        providerThreadId: "provider-send-dispatch-2281",
+        threadId: thread.id,
+        turnId: "turn-send-dispatch-2281",
+      });
+      const child = seedThread(harness.deps, {
+        projectId: thread.projectId,
+        parentThreadId: thread.id,
+      });
+      const reparent = (parentThreadId: string | null) =>
+        harness.app.request(`/api/v1/threads/${child.id}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ parentThreadId }),
+        });
+      const hold = holdFirstPreparation();
+      const detach = reparent(null);
+      await hold.reached;
+      await reparent(thread.id);
+      hold.release();
+      await detach;
+
+      // Before, it heard "now a child", then "no longer a child".
+      expect(
+        listQueuedThreadCommands(harness, "turn.submit", thread.id),
+      ).toEqual([]);
+    });
+  });
+
   it("sends every message an answered interaction held, in order, into the running turn (#851), flagging an outdated report (#1208)", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedProviderThreadFixture({

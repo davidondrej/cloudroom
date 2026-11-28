@@ -166,7 +166,7 @@ ends the pull requests Claude Code opens with `Built with [Cloudroom](https://cl
 in place of Claude's own line ([ADR](../../docs/adr/20261117-113618-built-with-cloudroom-pr-footer.md)).
 The hook needs Git 2.54 or newer; older Git ignores it. When it removes a line,
 it prints one line to stderr naming the setting below. In Cloud it only touches
-real repositories: the session's own (any worktree or submodule), `/repos/<name>`,
+real repositories: the session's own (any worktree or submodule), `/repos/<owner>/<name>`,
 and `/code/<name>` in a Personal thread. Test fixture repos in `/tmp` or nested in
 a project keep their trailers. Local still touches every repository, and Cloud
 OpenClaw sessions always strip, even with the setting off. Use
@@ -917,7 +917,7 @@ click. Revealed groups stay visible through activity and sort-order changes.
 **Manually** is unchanged. Toggle it with `bb settings experiment
 sidebarProgressiveDisclosure <true|false>`.
 
-The `timelineWindowing` experiment is off by default. When enabled, long
+The `timelineWindowing` experiment is on by default. When enabled, long
 timelines and large expanded timeline details retain stable height-preserving
 wrappers while mounting only rows near their active scrollport. Toggle it with
 `bb settings experiment timelineWindowing <true|false>`.

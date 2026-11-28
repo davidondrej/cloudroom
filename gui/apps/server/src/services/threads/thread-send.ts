@@ -111,6 +111,8 @@ interface SendThreadMessageArgs {
   /** Hears once whether the host started the new turn (null) or refused it. */
   onStartSettled?: (error: Error | null) => void;
   payload: SendThreadMessagePayload;
+  /** Pre-resolved execution tuple from the dispatch checkpoint, keeping caller `payload` sources intact. */
+  resolvedExecution?: ResolvedThreadExecutionOptions;
   thread: Thread;
   trigger: SendThreadMessageTrigger;
 }
@@ -656,9 +658,11 @@ async function sendThreadMessageWithoutContextClear(
       thread,
     });
   }
-  const execution = await buildExecutionOptions(deps, payload, {
-    threadId: thread.id,
-  });
+  const execution =
+    args.resolvedExecution ??
+    (await buildExecutionOptions(deps, payload, {
+      threadId: thread.id,
+    }));
   // No hook pass here. User messages are decided ONCE, at the dispatch
   // checkpoint in `attemptDispatch`, before they reach this function. The two
   // other callers bypass the checkpoint deliberately: a manual compaction turn

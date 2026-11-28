@@ -1,4 +1,8 @@
-import { updateHost, upsertProjectExecutionDefaults } from "@cloudroom/db";
+import {
+  setThreadExecutionOverride,
+  updateHost,
+  upsertProjectExecutionDefaults,
+} from "@cloudroom/db";
 import type { PermissionMode } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,6 +12,8 @@ import {
   tryResolveExistingThreadExecutionPlan,
 } from "../../../src/services/threads/thread-execution-plan.js";
 import { resolveProjectExecutionDefaultsForCreate } from "../../../src/services/threads/project-execution-defaults.js";
+import { availableModelFixture } from "../../helpers/available-models.js";
+import { registerProviderHostRpcResponder } from "../../helpers/host-rpc.js";
 import {
   seedEnvironment,
   seedHostSession,
@@ -272,6 +278,97 @@ describe("machine permission ceiling", () => {
       });
 
       expect(plan.resolvedExecution.permissionMode).toBe("full");
+    });
+  });
+
+  it("reconciles inherited effort after a switch to Grok while rejecting explicit unsupported levels (#2692)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-grok-effort",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "acp-grok",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: environment.id,
+        model: "claude-opus-4-8",
+        reasoningLevel: "xhigh",
+        providerThreadId: "claude-prev",
+        threadId: thread.id,
+      });
+      setThreadExecutionOverride(harness.db, {
+        threadId: thread.id,
+        modelOverride: "grok-4.5",
+        reasoningLevelOverride: null,
+      });
+
+      const plan = await resolveExistingThreadExecutionPlan(harness.deps, {
+        executionSource: "client/turn/requested",
+        input: {},
+        threadId: thread.id,
+      });
+      expect(plan.resolvedExecution.reasoningLevel).toBe("high");
+
+      // Warm in-memory catalog on an ephemeral host (including selectedOnlyModels) is reused without SQLite.
+      updateHost(harness.db, harness.hub, host.id, { type: "ephemeral" });
+      harness.deps.lifecycleDedupers.providerModelCatalogs.forgetHost(
+        harness.deps,
+        host.id,
+      );
+      registerProviderHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        modelsByProviderId: {
+          "acp-grok": {
+            models: [],
+            selectedOnlyModels: [
+              availableModelFixture({
+                model: "grok-4.5",
+                reasoningLevels: ["low", "medium"],
+                defaultReasoningLevel: "medium",
+              }),
+            ],
+          },
+        },
+      });
+      await harness.deps.lifecycleDedupers.providerModelCatalogs.read(
+        harness.deps,
+        {
+          cwd: null,
+          hostId: host.id,
+          provider: harness.deps.providerRegistry.get("acp-grok")!.info,
+          access: { kind: "picker" },
+        },
+      );
+      const modelClamped = await resolveExistingThreadExecutionPlan(
+        harness.deps,
+        {
+          executionSource: "client/turn/requested",
+          input: {},
+          threadId: thread.id,
+        },
+      );
+      expect(modelClamped.resolvedExecution.reasoningLevel).toBe("medium");
+
+      await expect(
+        resolveExistingThreadExecutionPlan(harness.deps, {
+          executionSource: "client/turn/requested",
+          input: { reasoningLevel: { source: "explicit", value: "xhigh" } },
+          threadId: thread.id,
+        }),
+      ).rejects.toMatchObject({
+        status: 400,
+        body: { code: "invalid_request" },
+      });
     });
   });
 });

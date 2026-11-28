@@ -20,6 +20,7 @@ import {
   getThreadReportRun,
   linkRunThread,
   recoverFailedRun,
+  settleSkippedRun,
   setAutomationEnabled,
   THREAD_ARCHIVED_ERROR,
   setReviewed,
@@ -1183,11 +1184,18 @@ export function createAutomationService(args: {
         actions: input.actions,
       });
       // A failed run's thread that came back to report did the run's work, so the run gets no retry, unless it
-      // reports that it failed (#1443).
+      // reports that it failed (#1443). A skipped agent run, such as a plan limit's that a retry resumed, takes its
+      // report's outcome, so Review shows it (#2763).
       if (
-        run.status === "failed" &&
-        input.outcome !== "failed" &&
-        recoverFailedRun(db, run.id, Date.now())
+        (run.status === "failed" &&
+          input.outcome !== "failed" &&
+          recoverFailedRun(db, run.id, Date.now())) ||
+        (run.status === "skipped" &&
+          settleSkippedRun(
+            db,
+            run,
+            input.outcome === "failed" ? "failed" : "succeeded",
+          ))
       )
         publishAutomationChange(bb, automation.projectId, [
           "automations-changed",

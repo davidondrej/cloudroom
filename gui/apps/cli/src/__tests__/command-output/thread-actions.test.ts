@@ -492,9 +492,13 @@ describe("room-cli thread action command output", () => {
 
     await runCommand(["thread", "compact", "thread-compact"], register);
     await runCommand(
-      ["thread", "compact", "thread-compact", "--no-then"],
+      ["thread", "compact", "thread-compact", "--no-then", "--json"],
       register,
     );
+    expect(JSON.parse(collectLogLines(vi.mocked(console.log)).at(-1) ?? "")).toMatchObject({
+      ok: true,
+      note: expect.stringContaining("compacts now, or once its running turn ends"),
+    });
 
     expect(post).toHaveBeenNthCalledWith(1, {
       param: { id: "thread-compact" },

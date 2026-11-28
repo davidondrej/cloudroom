@@ -1,11 +1,7 @@
 import { Link, useLocation } from "react-router";
 import type { ReactNode } from "react";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
-import {
-  SETTINGS_PLUGINS_ROUTE_PATH,
-  getPluginsRoutePath,
-  isSettingsPluginsRoutePath,
-} from "@/lib/route-paths";
+import { getPluginsRoutePath, isPluginsRoutePath } from "@/lib/route-paths";
 import { pluginMarketplaceAuthorKey } from "./plugin-marketplace-author";
 
 export function pluginAuthorPageSearch(
@@ -34,10 +30,12 @@ export function PluginAuthorLink({
   return (
     <Link
       to={{
-        pathname: isSettingsPluginsRoutePath(location.pathname)
-          ? SETTINGS_PLUGINS_ROUTE_PATH
-          : getPluginsRoutePath(),
-        search: pluginAuthorPageSearch(location.search, authorKey),
+        pathname: getPluginsRoutePath(),
+        // From the Plugins page, the way back keeps the list's search.
+        search: pluginAuthorPageSearch(
+          isPluginsRoutePath(location.pathname) ? location.search : "",
+          authorKey,
+        ),
       }}
       className={className}
       onClick={(event) => event.stopPropagation()}

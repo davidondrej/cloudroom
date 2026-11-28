@@ -932,6 +932,21 @@ function LoopBadges({
   );
 }
 
+export type FixLoopTarget = {
+  key: string;
+  id: string;
+  name: string;
+  cloud: boolean;
+  projectId: string | null;
+  reason: string;
+};
+
+type PausedCardActions = FailurePause & {
+  onResume: () => void;
+  onFix?: () => void;
+  fixing?: boolean;
+};
+
 function LoopCard({
   name,
   cloud,
@@ -963,8 +978,8 @@ function LoopCard({
   actions?: ReactNode;
   toggle: ReactNode;
   onOpen: () => void;
-  /** Its own failures paused it: the card shows only its name, why, and the one button that fixes it. */
-  paused?: FailurePause & { onResume: () => void };
+  /** Its own failures paused it: the card shows its name, full-width error, and Resume / Fix (or Reconnect). */
+  paused?: PausedCardActions;
 }) {
   if (paused) {
     return (
@@ -1044,8 +1059,8 @@ function LoopCard({
   );
 }
 
-/** A paused loop: name, why it stopped, and one button. A loop Cloud refused for an agent's login gets Reconnect, which
- *  fixes every loop waiting on it; Resume can't. No agent, schedule, runs, or retry time (David, 2026-11-09). */
+/** A paused loop (Design 1, David 2026-11-27): name, full-width 2-line error, and footer actions. A loop Cloud refused
+ *  for an agent's login keeps Reconnect; every other paused loop shows quiet Resume and lime Fix. */
 function PausedLoopCard({
   name,
   cloud,
@@ -1055,7 +1070,7 @@ function PausedLoopCard({
 }: {
   name: string;
   cloud: boolean;
-  paused: FailurePause & { onResume: () => void };
+  paused: PausedCardActions;
   actions?: ReactNode;
   onOpen: () => void;
 }) {
@@ -1064,7 +1079,9 @@ function PausedLoopCard({
   // The line under the name: a device code to enter, why the last Reconnect failed, or why the loop paused.
   const line = waiting && code ? `Enter code ${code} on OpenAI's page` : error ?? (login ? cloudLoginTitle(login) : paused.reason);
   const button =
-    "relative flex h-[26px] shrink-0 items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15 disabled:opacity-60";
+    "relative flex h-[26px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-primary/35 px-2.5 text-xs font-medium text-primary hover:border-primary/70 hover:bg-primary/15 disabled:cursor-default disabled:opacity-60";
+  const quietButton =
+    "relative flex h-[26px] shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-foreground/15 px-2.5 text-xs font-medium text-muted-foreground hover:border-foreground/30 hover:bg-state-hover hover:text-foreground disabled:cursor-default disabled:opacity-60";
   return (
     <div
       data-loop-card=""
@@ -1084,13 +1101,13 @@ function PausedLoopCard({
           </span>
         ) : null}
       </div>
-      <div className="mt-2.5 flex min-w-0 items-center gap-2.5">
-        <p
-          className={cn("min-w-0 flex-1 truncate text-[12.5px] font-medium", waiting && code ? "text-foreground" : "text-destructive-text")}
-          title={error ?? paused.reason}
-        >
-          {line}
-        </p>
+      <p
+        className={cn("mt-1.5 line-clamp-2 text-[12.5px] font-medium leading-snug", waiting && code ? "text-foreground" : "text-destructive-text")}
+        title={error ?? paused.reason}
+      >
+        {line}
+      </p>
+      <div className="mt-auto flex items-center justify-end gap-2 pt-3">
         {login ? (
           <button type="button" disabled={waiting} onClick={() => reconnect(login)} className={button}>
             {waiting ? (
@@ -1103,10 +1120,17 @@ function PausedLoopCard({
             )}
           </button>
         ) : (
-          <button type="button" onClick={paused.onResume} className={button}>
-            <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
-            Resume
-          </button>
+          <>
+            <button type="button" onClick={paused.onResume} className={paused.onFix ? quietButton : button}>
+              <Icon name="Play" className="size-2.5 fill-current" aria-hidden />
+              Resume
+            </button>
+            {paused.onFix ? (
+              <button type="button" disabled={paused.fixing} onClick={paused.onFix} className={button}>
+                {paused.fixing ? "Starting…" : "Fix"}
+              </button>
+            ) : null}
+          </>
         )}
       </div>
     </div>
@@ -1124,6 +1148,8 @@ export function OverviewRow({
   runs = [],
   report = null,
   paused,
+  onFix,
+  fixing = false,
   onNavigate,
   onEnabledChange,
 }: {
@@ -1137,6 +1163,8 @@ export function OverviewRow({
   runs?: readonly RunTick[];
   report?: string | null;
   paused?: FailurePause | null;
+  onFix?: () => void;
+  fixing?: boolean;
   onNavigate: (route: AutomationDetailRoute) => void;
   onEnabledChange: (
     enabled: boolean,
@@ -1165,7 +1193,11 @@ export function OverviewRow({
       cloud={false}
       paused={
         paused
-          ? { ...paused, onResume: () => setEnabled(true) }
+          ? {
+              ...paused,
+              onResume: () => setEnabled(true),
+              ...(onFix ? { onFix, fixing } : {}),
+            }
           : undefined
       }
       agent={
@@ -1221,6 +1253,8 @@ export function CloudAutomationRow({
   runs = [],
   report = null,
   paused,
+  onFix,
+  fixing = false,
   actions,
 }: {
   automation: CloudAutomation;
@@ -1232,6 +1266,8 @@ export function CloudAutomationRow({
   runs?: readonly RunTick[];
   report?: string | null;
   paused?: FailurePause | null;
+  onFix?: () => void;
+  fixing?: boolean;
   actions: CloudAutomationActions;
 }) {
   const nextRunAt =
@@ -1242,7 +1278,11 @@ export function CloudAutomationRow({
       cloud
       paused={
         paused
-          ? { ...paused, onResume: () => actions.onEnabledChange(automation, true) }
+          ? {
+              ...paused,
+              onResume: () => actions.onEnabledChange(automation, true),
+              ...(onFix ? { onFix, fixing } : {}),
+            }
           : undefined
       }
       agent={
@@ -1543,6 +1583,8 @@ export function AutomationOverviewView({
   onOpenDetail,
   onEnabledChange,
   onPriorityChange,
+  onFixLoop,
+  fixingKey = null,
   onCreateViaChat,
   activeMode,
   onModeChange,
@@ -1567,6 +1609,8 @@ export function AutomationOverviewView({
     route: AutomationDetailRoute,
     priority: LoopPriority,
   ) => Promise<void>;
+  onFixLoop?: (target: FixLoopTarget) => void;
+  fixingKey?: string | null;
   onCreateViaChat: (prompt?: string) => void;
   activeMode: AutomationCollectionMode;
   onModeChange: (mode: AutomationCollectionMode) => void;
@@ -1871,15 +1915,20 @@ export function AutomationOverviewView({
       automation,
       project,
       scriptAgents,
-    }: OverviewEntry) =>
-      "problem" in automation ? (
-        <AutomationProblemRow
-          key={automation.id}
-          automation={automation}
-          project={project}
-          onNavigate={onOpenDetail}
-        />
-      ) : (
+    }: OverviewEntry) => {
+      if ("problem" in automation) {
+        return (
+          <AutomationProblemRow
+            key={automation.id}
+            automation={automation}
+            project={project}
+            onNavigate={onOpenDetail}
+          />
+        );
+      }
+      const pause = localPause(automation);
+      const fixKey = `local:${automation.id}`;
+      return (
         <OverviewRow
           key={automation.id}
           automation={automation}
@@ -1889,7 +1938,21 @@ export function AutomationOverviewView({
           needsYou={needsYou.get(automation.id) ?? 0}
           runs={history.get(automation.id)}
           report={reports.get(automation.id) ?? null}
-          paused={localPause(automation)}
+          paused={pause}
+          {...(pause && onFixLoop
+            ? {
+                onFix: () =>
+                  onFixLoop({
+                    key: fixKey,
+                    id: automation.id,
+                    name: automation.name,
+                    cloud: false,
+                    projectId: automation.projectId,
+                    reason: pause.reason,
+                  }),
+                fixing: fixingKey === fixKey,
+              }
+            : {})}
           repo={repoTag(project.id, project.name)}
           leading={
             <LoopPriorityMenu
@@ -1913,6 +1976,7 @@ export function AutomationOverviewView({
           onEnabledChange={onEnabledChange}
         />
       );
+    };
     const localItem = (entry: OverviewEntry): ListItem => ({
       name: entry.automation.name,
       nextRunAt:
@@ -1927,36 +1991,54 @@ export function AutomationOverviewView({
       }),
       node: renderEntry(entry),
     });
-    const cloudItem = (automation: CloudAutomation): ListItem => ({
-      name: automation.name,
-      nextRunAt: cloudNextRunAt(automation),
-      rank: cloudLifecycleSortRank(automation),
-      priority: cloudPriority(automation),
-      node: cloud ? (
-        <CloudAutomationRow
-          key={automation.id}
-          automation={automation}
-          providers={providers}
-          now={now}
-          needsYou={needsYou.get(cloudKey(automation)) ?? 0}
-          runs={history.get(cloudKey(automation))}
-          report={reports.get(cloudKey(automation)) ?? null}
-          paused={cloudPause(automation)}
-          repo={repoTag(automation.project_id)}
-          leading={
-            <LoopPriorityMenu
-              priority={cloudPriority(automation)}
-              name={automation.name}
-              onChange={(priority) => setCloudPriority(automation, priority)}
-            />
-          }
-          actions={{
-            ...cloud.actions,
-            onOpen: (a) => setOpenCloudId(a.id),
-          }}
-        />
-      ) : null,
-    });
+    const cloudItem = (automation: CloudAutomation): ListItem => {
+      const pause = cloudPause(automation);
+      const fixKey = `cloud:${automation.id}`;
+      return {
+        name: automation.name,
+        nextRunAt: cloudNextRunAt(automation),
+        rank: cloudLifecycleSortRank(automation),
+        priority: cloudPriority(automation),
+        node: cloud ? (
+          <CloudAutomationRow
+            key={automation.id}
+            automation={automation}
+            providers={providers}
+            now={now}
+            needsYou={needsYou.get(cloudKey(automation)) ?? 0}
+            runs={history.get(cloudKey(automation))}
+            report={reports.get(cloudKey(automation)) ?? null}
+            paused={pause}
+            {...(pause && onFixLoop
+              ? {
+                  onFix: () =>
+                    onFixLoop({
+                      key: fixKey,
+                      id: automation.id,
+                      name: automation.name,
+                      cloud: true,
+                      projectId: automation.project_id ?? null,
+                      reason: pause.reason,
+                    }),
+                  fixing: fixingKey === fixKey,
+                }
+              : {})}
+            repo={repoTag(automation.project_id)}
+            leading={
+              <LoopPriorityMenu
+                priority={cloudPriority(automation)}
+                name={automation.name}
+                onChange={(priority) => setCloudPriority(automation, priority)}
+              />
+            }
+            actions={{
+              ...cloud.actions,
+              onOpen: (a) => setOpenCloudId(a.id),
+            }}
+          />
+        ) : null,
+      };
+    };
     const grid = (items: readonly ListItem[]) => (
       <div className="grid grid-cols-1 gap-2.5 @xl:grid-cols-2">
         {items.map((item) => item.node)}
@@ -2326,6 +2408,24 @@ export function AutomationOverviewView({
           priority={cloudPriority(openCloud)}
           onPriorityChange={(priority) => setCloudPriority(openCloud, priority)}
           actions={cloud.actions}
+          {...(cloudPause(openCloud) && onFixLoop
+            ? {
+                onFix: () => {
+                  const pause = cloudPause(openCloud);
+                  if (!pause) return;
+                  setOpenCloudId(null);
+                  onFixLoop({
+                    key: `cloud:${openCloud.id}`,
+                    id: openCloud.id,
+                    name: openCloud.name,
+                    cloud: true,
+                    projectId: openCloud.project_id ?? null,
+                    reason: pause.reason,
+                  });
+                },
+                fixing: fixingKey === `cloud:${openCloud.id}`,
+              }
+            : {})}
           onClose={() => setOpenCloudId(null)}
         />
       ) : null}

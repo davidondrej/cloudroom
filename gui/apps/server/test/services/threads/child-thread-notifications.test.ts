@@ -82,20 +82,33 @@ describe("child thread notifications", () => {
 
   it("keeps a provider's HTML error page out of a failed outcome (#2601)", () => {
     const page = `<!DOCTYPE html><html><head><title>Just a moment...</title><style>${"x".repeat(2_000)}</style></head><body></body></html>`;
+    // Codex cuts the page at ~1,000 bytes and adds "...": no </html>.
+    const clipped = `${page.slice(0, 1_000)}...`;
+    const item = (id: string, failureReason: string) => ({
+      activeWorkflowCount: 0,
+      childThread: testThread({ id, title: null }),
+      failureReason,
+      terminalOutput: null,
+      turnStatus: "failed" as const,
+    });
     const message = renderBatchMessage({
       items: [
-        {
-          activeWorkflowCount: 0,
-          childThread: testThread({ id: "thr_child", title: null }),
-          failureReason: `unexpected status 403 Forbidden: ${page}, request id: req_1`,
-          terminalOutput: null,
-          turnStatus: "failed",
-        },
+        item(
+          "thr_child",
+          `unexpected status 403 Forbidden: ${page}, request id: req_1`,
+        ),
+        item(
+          "thr_clipped",
+          `unexpected status 403 Forbidden: ${clipped}, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: ray_2, request id: req_2`,
+        ),
       ],
     });
 
     expect(message).toContain(
       'Error: unexpected status 403 Forbidden: [HTML page "Just a moment..." omitted], request id: req_1',
+    );
+    expect(message).toContain(
+      'Error: unexpected status 403 Forbidden: [HTML page "Just a moment..." omitted], url: https://chatgpt.com/backend-api/codex/responses, cf-ray: ray_2, request id: req_2',
     );
   });
 

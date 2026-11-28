@@ -324,14 +324,16 @@ export default async function plugin(room: BbPluginApi) {
   // Cloud keeps its own Antigravity login, so no account here runs or limits a Cloud Antigravity thread.
   const cloudAgy = (thread: { providerId: string; executionTarget?: string } | null) =>
     thread?.providerId === "acp-antigravity" && thread.executionTarget === "cloud";
-  let thisComputer: Promise<string | null> | undefined;
+  // This computer is the host the server saved in its own host-id file, never a guess from connected hosts. A failed
+  // read keeps the last id read; before any, every host is another machine and runs on its own login (#2758).
+  let thisComputer = "";
   const onAnotherMachine = async (hostId: string | undefined) => {
-    thisComputer ??= room.sdk.system.config().then(
-      (config) => config.primaryHostId ?? null,
-      () => null,
-    );
-    const id = await thisComputer;
-    return !!hostId && id !== null && hostId !== id;
+    // Only a read id is ever written, so a failed or empty read never undoes one.
+    const read = await fs
+      .readFile(path.join(room.server.experimental_dataDir, "host-id"), "utf8")
+      .then((id) => id.trim(), () => "");
+    if (read) thisComputer = read;
+    return !!hostId && hostId !== thisComputer;
   };
   // When each limit was noted and each running turn began, since this start. They tell a limit that has lifted.
   const limitedAt = new Map<string, number>();
@@ -1754,21 +1756,28 @@ export default async function plugin(room: BbPluginApi) {
   room.providers.experimental_contributeEnv(
     "claude-code",
     async (context: { threadId?: string; hostId?: string }) => {
-      // Another machine runs on its own login unless it gets an account's one-year token below (#531).
-      const [remote, threadId] = await Promise.all([
-        onAnotherMachine(context.hostId),
-        newTurn(context.threadId),
-      ]);
-      noteOwnLogin(threadId, remote);
+      const threadId = await newTurn(context.threadId);
       await refreshMac();
       const id = current("claude-code");
       noteThreadAccount(threadId, "claude-code", id);
       const account = accounts.find((entry) => entry.id === id);
-      if (!account) return [];
-      const reason = `Cloudroom account ${account.email ?? account.id}`;
-      if (account.profile) {
-        // The account's folder exists only on this computer.
-        if (remote) return [];
+      const reason = `Cloudroom account ${account?.email ?? account?.id}`;
+      // An account's one-year token works on any machine, so it never waits for host-id (#2758).
+      const secret =
+        account && !account.profile
+          ? await readSecret(account.id).catch(() => null)
+          : null;
+      if (secret) {
+        noteOwnLogin(threadId, false);
+        return [
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", value: secret.accessToken, reason },
+          { name: "ANTHROPIC_API_KEY", value: "", reason },
+        ];
+      }
+      // Another machine runs on its own login: the account's folder exists only on this computer (#531).
+      const remote = await onAnotherMachine(context.hostId);
+      noteOwnLogin(threadId, remote);
+      if (account?.profile && !remote) {
         const profile = profilePath(account.profile);
         await prepareProfile(profile).catch((error: unknown) =>
           room.log.warn(
@@ -1788,13 +1797,7 @@ export default async function plugin(room: BbPluginApi) {
           { name: "ANTHROPIC_API_KEY", value: "", reason },
         ];
       }
-      const secret = await readSecret(account.id).catch(() => null);
-      if (!secret) return [];
-      noteOwnLogin(threadId, false);
-      return [
-        { name: "CLAUDE_CODE_OAUTH_TOKEN", value: secret.accessToken, reason },
-        { name: "ANTHROPIC_API_KEY", value: "", reason },
-      ];
+      return [];
     },
   );
 

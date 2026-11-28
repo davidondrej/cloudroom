@@ -324,28 +324,33 @@ fn notifies(c: &Session) -> bool {
     (c.receipts.values()).any(|r| r.command == "start" && r.input["notify"] == true)
 }
 
+/// Whether a notice steered into `p`'s turn (steer receipt `s`) reached its agent or still may. A steer settles before
+/// any queued copy (#1579): the agent may still get it after its turn ended, or in a turn whose prompt Core marked
+/// unknown but that runs. One that didn't complete, or whose agent is gone, falls back to the queue; an agent's exit
+/// or a Core restart settles a pending one as `unknown_after_restart` (`unknown` if its own call fails first).
+pub(super) fn steered(p: &Session, s: &Receipt) -> bool {
+    s.state == "completed" || (s.state == "accepted" && p.handle.is_some())
+}
+
 /// Whether the parent has the notice for child `c`'s turn: delivered, or still being steered into the turn it targets,
 /// or none is owed since a newer turn's report covers it (`supersede`).
 fn notified(p: &Session, c: &Session, r: &Receipt) -> bool {
     let (steer, queued) = notice_ids(&c.session_id, &r.request_id);
     let legacy = legacy_notice_id(&c.session_id, &r.request_id);
-    // A steer whose turn ends first may still reach the agent, so it settles before any queued copy (#1579). Only one
-    // that failed, or whose agent was lost (its turn ended unknown, or no agent runs), falls back to the queue.
-    let lost = |s: &Receipt| {
-        let target = s.input["target_request_id"].as_str();
-        p.handle.is_none()
-            || target
-                .and_then(|t| p.receipts.get(t))
-                .is_some_and(|t| t.state.starts_with("unknown"))
-    };
-    let steered = |s: &Receipt| s.state == "completed" || (s.state == "accepted" && !lost(s));
+    let sent = |steer: &str| p.receipts.get(steer).is_some_and(|s| steered(p, s));
     c.reported.contains(&r.request_id)
         || p.receipts.contains_key(&queued)
         || p.receipts.contains_key(&legacy)
-        || p.receipts.get(&steer).is_some_and(steered)
-        || p.receipts
-            .get(&format!("{legacy}_steer"))
-            .is_some_and(steered)
+        || sent(&steer)
+        || sent(&format!("{legacy}_steer"))
+}
+
+/// A notice for one of child `c`'s turns still being steered into `p`: its watcher stays, even once `c` closes, so one
+/// that fails still falls back to the queue (#1579).
+fn steering(p: &Session, c: &Session) -> bool {
+    (c.receipts.keys()).any(|r| {
+        (p.receipts.get(&notice_ids(&c.session_id, r).0)).is_some_and(|s| s.state == "accepted")
+    })
 }
 
 /// Waits for a change, or until `due` (ms) when a held report falls due. False once nothing will change again.
@@ -455,7 +460,7 @@ pub struct ForkOptions {
 }
 
 /// The session a side chat was forked from.
-fn fork_of(session: &Session) -> Option<&str> {
+pub(super) fn fork_of(session: &Session) -> Option<&str> {
     let start = session.receipts.values().find(|r| r.command == "start")?;
     start.input["fork"]["session"].as_str()
 }
@@ -1161,14 +1166,20 @@ impl Manager {
     }
 
     /// Resumes parent notices for spawned children after a restart. Turns the restart cut off are
-    /// not reported: the parent stopped too, and the app decides what runs next.
+    /// not reported: the parent stopped too, and the app decides what runs next. One whose notice was already being
+    /// delivered ended before it, so that notice still falls back to the queue (#1579).
     pub(super) fn watch_children(self: &Arc<Self>, local: &Local) {
         for child in local.sessions.values() {
             if notifies(child) {
+                let parent = (child.parent_session.as_ref()).and_then(|p| local.sessions.get(p));
                 let cut = child
                     .receipts
                     .values()
                     .filter(|r| matches!(r.state.as_str(), "unknown" | "unknown_after_restart"))
+                    .filter(|r| {
+                        let steer = notice_ids(&child.session_id, &r.request_id).0;
+                        !parent.is_some_and(|p| p.receipts.contains_key(&steer))
+                    })
                     .map(|r| r.request_id.clone())
                     .collect();
                 self.watch_child(local, child.session_id.clone(), cut);
@@ -1246,9 +1257,12 @@ impl Manager {
                                 .map(|(_, text)| text.clone()),
                             title(c),
                             p.current_request.clone().filter(|_| steer),
-                            report_key(c, r),
+                            // One whose steer fell through repeats only that steer's reply, so it still queues (#1579).
+                            report_key(c, r).or_else(|| (!steer).then(|| json!(c.told_reply))),
                         )),
-                        None if c.close_request.is_some() || c.state == SessionState::Closed => {
+                        None if (c.close_request.is_some() || c.state == SessionState::Closed)
+                            && !steering(p, c) =>
+                        {
                             return;
                         }
                         None => None,

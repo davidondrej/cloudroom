@@ -139,7 +139,6 @@ function renderPage(
     <MemoryRouter initialEntries={[initialEntry]}>
       <PluginAuthorPage
         authorKey="12:bb-community:github:patlee"
-        selectedPluginId={null}
         onInstall={() => undefined}
         onOpenPlugin={onOpenPlugin}
       />
@@ -244,7 +243,7 @@ describe("PluginAuthorPage", () => {
     await waitFor(() => expect(cardOrder()).toEqual(["Open Beta details"]));
     const beta = screen.getByRole("button", { name: "Open Beta details" });
     fireEvent.click(beta);
-    expect(onOpenPlugin).toHaveBeenCalledWith("Beta", beta);
+    expect(onOpenPlugin).toHaveBeenCalledWith("Beta", beta, "bb-community");
     expect(screen.getByTestId("location").textContent).toContain("query=Beta");
   });
 

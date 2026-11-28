@@ -1,5 +1,9 @@
 import { fuzzyMatchText } from "@cloudroom/fuzzy-match";
-import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
+import {
+  isMentionableHiddenThread,
+  PERSONAL_PROJECT_ID,
+  type ThreadListEntry,
+} from "@cloudroom/domain";
 import type { PromptMentionSuggestion } from "@cloudroom/client-core";
 import {
   compareCodepoint,
@@ -58,7 +62,10 @@ function canSuggestThread(
   thread: ThreadListEntry,
   args: BuildThreadMentionSuggestionsArgs,
 ): boolean {
-  return thread.id !== args.currentThreadId && thread.visibility !== "hidden";
+  return (
+    thread.id !== args.currentThreadId &&
+    (thread.visibility !== "hidden" || isMentionableHiddenThread(thread))
+  );
 }
 
 function shouldShowProjectName(
@@ -135,7 +142,8 @@ function getThreadRelationRank(
   }
   if (
     context.currentProjectId !== undefined &&
-    thread.projectId === context.currentProjectId
+    (thread.projectId === context.currentProjectId ||
+      isMentionableHiddenThread(thread))
   ) {
     return THREAD_RELATION_RANK.sameProject;
   }

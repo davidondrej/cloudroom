@@ -286,6 +286,7 @@ export interface CreateThreadInput {
   providerId: string;
   title?: string | null;
   titleFallback?: string | null;
+  pinned?: boolean;
   sectionId?: string | null;
   status?: ThreadStatus;
   parentThreadId?: string | null;
@@ -310,6 +311,12 @@ export function createThread(
   const originKind = input.originKind ?? null;
   const thread = db.transaction(
     (tx) => {
+      const pinSortKey = input.pinned
+        ? createOrderKeyBetween({
+            previousKey: null,
+            nextKey: getFirstPinnedThread(tx)?.pinSortKey ?? null,
+          })
+        : null;
       const createdThread = tx
         .insert(threads)
         .values({
@@ -320,6 +327,8 @@ export function createThread(
           providerId: input.providerId,
           title: input.title ?? null,
           titleFallback: input.titleFallback ?? null,
+          pinnedAt: input.pinned ? now : null,
+          pinSortKey,
           sectionId: input.sectionId ?? null,
           status: input.status ?? "starting",
           parentThreadId:
@@ -496,13 +505,23 @@ export interface ReorderPinnedThreadInvalidNeighborOrder {
   kind: "invalid_neighbor_order";
 }
 
+/** The target or a neighbor is pinned under a pinned parent, so it is not a top-level pin. */
+export interface ReorderPinnedThreadGroupedPin {
+  kind: "grouped_pin";
+  threadId: string;
+  parentThreadId: string;
+  /** The top-level pinned ancestor, the one that can be reordered. */
+  rootThreadId: string;
+}
+
 export type ReorderPinnedThreadResult =
   | ReorderPinnedThreadSuccess
   | ReorderPinnedThreadUnchanged
   | ReorderPinnedThreadNotFound
   | ReorderPinnedThreadNotPinned
   | ReorderPinnedThreadStaleNeighbor
-  | ReorderPinnedThreadInvalidNeighborOrder;
+  | ReorderPinnedThreadInvalidNeighborOrder
+  | ReorderPinnedThreadGroupedPin;
 
 function pinnedThreadWhere() {
   return nonDeletedThreads(
@@ -1700,6 +1719,37 @@ export function reorderPinnedThread({
       }
 
       const currentThreads = listActiveVisiblePinnedThreadRoots(tx);
+      const rootIds = new Set(currentThreads.map((thread) => thread.id));
+      const getLivePin = (id: string) =>
+        tx
+          .select()
+          .from(threads)
+          .where(liveThreads(pinnedThreadWhere(), eq(threads.id, id)))
+          .get();
+      const groupedPin = [threadId, previousThreadId, nextThreadId]
+        .filter((id): id is string => id !== null && !rootIds.has(id))
+        .map(getLivePin)
+        .find((thread) => thread?.parentThreadId != null);
+      if (groupedPin?.parentThreadId != null) {
+        // Walk up to the top-level pin; a grouped pin's parent may be grouped too.
+        let rootThreadId = groupedPin.parentThreadId;
+        const seen = new Set<string>();
+        while (!rootIds.has(rootThreadId) && !seen.has(rootThreadId)) {
+          seen.add(rootThreadId);
+          const parentId = getLivePin(rootThreadId)?.parentThreadId;
+          if (!parentId) break;
+          rootThreadId = parentId;
+        }
+        // No reachable top-level pin (e.g. a parent loop): fall through to stale_neighbor.
+        if (rootIds.has(rootThreadId)) {
+          return {
+            kind: "grouped_pin",
+            threadId: groupedPin.id,
+            parentThreadId: groupedPin.parentThreadId,
+            rootThreadId,
+          };
+        }
+      }
       const currentIndex = currentThreads.findIndex(
         (thread) => thread.id === threadId,
       );

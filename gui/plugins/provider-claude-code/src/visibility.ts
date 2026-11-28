@@ -552,10 +552,7 @@ function describeParsedClaudeRawEvent(
             case "thinking":
               return {
                 kind: "sdk/stream_event:content_block_start:thinking",
-                coverage:
-                  event.thinking && event.thinking.length > 0
-                    ? "normalized"
-                    : "noise",
+                coverage: "normalized",
               };
             case "text":
               return {

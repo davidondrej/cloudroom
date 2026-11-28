@@ -82,6 +82,7 @@ import {
   listInstallableMachineIds,
   readGlobalCliSkillStatus,
 } from "../services/skills/global-skill-install.js";
+import { invalidateCommandCatalog } from "../services/skills/skill-catalog.js";
 import { DEFAULT_APP_KEYBINDINGS } from "../services/system/app-keybindings.js";
 import { resolvePrimaryHostId } from "../services/hosts/primary-host.js";
 import {
@@ -422,9 +423,11 @@ export function registerSystemRoutes(
     ),
   );
 
-  post(routes.installCliSkills, async (context, body) =>
-    context.json(await installGlobalCliSkills(deps, { hostIds: body.hostIds })),
-  );
+  post(routes.installCliSkills, async (context, body) => {
+    const result = await installGlobalCliSkills(deps, { hostIds: body.hostIds });
+    invalidateCommandCatalog();
+    return context.json(result);
+  });
 
   get(routes.environmentProviders, async (context, query) => {
     const project =

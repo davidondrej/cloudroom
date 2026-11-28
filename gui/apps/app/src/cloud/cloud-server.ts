@@ -875,6 +875,7 @@ class CloudServer {
       sections: [],
       projects: [...projects.values()],
       personalProject: personal,
+      mentionableHiddenThreads: [],
     };
   }
 

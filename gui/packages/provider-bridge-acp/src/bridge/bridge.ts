@@ -241,6 +241,11 @@ const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
 /** An agent's own words for a session it no longer has (#889). */
 const LOST_SESSION_MESSAGE =
   /^(?:Internal error: )?Session (?:\S+ )?not found/i;
+/** OpenCode's own words (v2.x, then 1.x, which ACP prefixes with "Internal error: ") for a chat it can't compact any smaller; every later prompt fails the same way (#2780). */
+const OPENCODE_COMPACTION_LIMIT_MESSAGE =
+  /^(?:Internal error: )?(?:The compaction request cannot be reduced further without losing the latest exchange or checkpoint|Conversation history too large to compact - exceeds model context limit|Session too large to compact - context exceeds model limit even after stripping media)(?::|$)/;
+const COMPACTION_LIMIT_HINT =
+  "This chat is too long for the agent to compact, so resending fails the same way. The chat is kept: start a new thread to continue (a child's parent can start a replacement child). ";
 
 interface BridgeNotification {
   jsonrpc: "2.0";
@@ -2629,7 +2634,9 @@ function runPrompts(
               ? `${message}. The agent lost its connection; your next message restarts it and reloads this conversation.`
               : session.sessionLost
                 ? `${message}. The agent lost this session; your next message restarts it.`
-                : message,
+                : session.dialect.id === "opencode" && OPENCODE_COMPACTION_LIMIT_MESSAGE.test(message)
+                  ? `${COMPACTION_LIMIT_HINT}${message}`
+                  : message,
             agentErrorHttpStatus(data),
           );
         }

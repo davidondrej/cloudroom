@@ -1,8 +1,11 @@
-import { useCallback, useLayoutEffect, useRef } from "react";
+import { useCallback, useContext, useLayoutEffect, useRef } from "react";
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
+import { DIRECTOR_PLUGIN_ID } from "@cloudroom/domain";
+import { QueryClientContext } from "@tanstack/react-query";
 import { useStore } from "jotai";
 import { setPluginEnabled } from "@/hooks/queries/plugin-settings-queries";
+import { sidebarNavigationQueryKey } from "@/hooks/queries/query-keys";
 import { maximizedPaneIdAtom, splitLayoutAtom } from "@/lib/split-layout/atoms";
 import {
   findPane,
@@ -17,6 +20,7 @@ import {
 import { focusedPaneRoute } from "@/views/thread-detail/splitThreadNavigation";
 
 export function useSetPluginEnabled() {
+  const queryClient = useContext(QueryClientContext);
   const store = useStore();
   const location = useLocation();
   const navigate = useNavigate();
@@ -28,6 +32,11 @@ export function useSetPluginEnabled() {
   return useCallback(
     async (pluginId: string, enabled: boolean, onNavigate?: () => void) => {
       await setPluginEnabled(fetch, pluginId, enabled);
+      if (pluginId === DIRECTOR_PLUGIN_ID) {
+        void queryClient?.invalidateQueries({
+          queryKey: sidebarNavigationQueryKey(),
+        });
+      }
       if (enabled) return;
       const current = store.get(splitLayoutAtom);
       let next = current;
@@ -69,6 +78,6 @@ export function useSetPluginEnabled() {
         }
       });
     },
-    [navigate, store],
+    [navigate, queryClient, store],
   );
 }

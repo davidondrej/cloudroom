@@ -1,4 +1,4 @@
-import { and, eq, getTableColumns, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, gt, inArray, isNull, like, or, sql } from "drizzle-orm";
 import { cloudroomCommands, cloudroomThreads, statusTransitionNeedsAttention, threads, threadPluginMetadata, type DbQueryConnection } from "@cloudroom/db";
 import type { ProjectCopyProgress, TeleportLocalStep } from "@cloudroom/domain";
 import { cloudTurnsElsewhere, emitPluginThreadStatusEntered } from "../plugins/plugin-thread-events.js";
@@ -134,6 +134,22 @@ export function openBindings(db: DbQueryConnection) {
     sending: sql<number>`exists (select 1 from ${cloudroomCommands} where ${cloudroomCommands.threadId} = ${cloudroomThreads.threadId} and ${cloudroomCommands.state} = 'sending')`,
   }).from(cloudroomThreads).innerJoin(threads, eq(threads.id, cloudroomThreads.threadId))
     .where(and(isNull(threads.archivedAt), isNull(threads.deletedAt))).all();
+}
+
+export function recentSandboxProject(db: DbQueryConnection, sinceMs: number): string | undefined {
+  return db
+    .select({ projectId: threads.projectId })
+    .from(cloudroomThreads)
+    .innerJoin(threads, eq(threads.id, cloudroomThreads.threadId))
+    .where(and(
+      like(cloudroomThreads.coreUrl, `${SANDBOX_PREFIX}%`),
+      isNull(threads.archivedAt),
+      isNull(threads.deletedAt),
+      gt(threads.createdAt, sinceMs),
+    ))
+    .orderBy(desc(threads.createdAt))
+    .limit(1)
+    .get()?.projectId;
 }
 
 export function openBinding(db: DbQueryConnection, threadId: string): OpenBinding | null {

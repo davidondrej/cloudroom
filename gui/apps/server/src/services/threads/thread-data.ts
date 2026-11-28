@@ -172,12 +172,17 @@ export function getLastThreadOutput(
   turnId?: string,
   includeEmpty = false,
 ): string | null {
-  const row = getLatestThreadOutputEventRow(db, {
-    threadId,
-    includeEmpty,
-    ...(turnId === undefined ? {} : { turnId }),
-  });
+  return threadOutputText(
+    getLatestThreadOutputEventRow(db, {
+      threadId,
+      includeEmpty,
+      ...(turnId === undefined ? {} : { turnId }),
+    }),
+  );
+}
 
+/** The text of a row `getLatestThreadOutputEventRow` returned. */
+export function threadOutputText(row: StoredEventRow | null): string | null {
   if (!row) return null;
 
   const eventRow = parseStoredEventRow(row);

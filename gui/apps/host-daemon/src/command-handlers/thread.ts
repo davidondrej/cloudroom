@@ -18,6 +18,7 @@ import {
   CommandDispatchError,
   ExpectedCommandDispatchError,
   getErrorCode,
+  probeProviderInstallationStatus,
   resolveRuntimeBridgeLaunch,
   type CommandDispatchOptions,
   type CommandOf,
@@ -135,26 +136,12 @@ async function requireSupportedProviderCliForThreadStart({
         bridgeLaunch: command.bridgeLaunch,
         requirement,
       }),
-      async () => {
-        const bridgeLaunch = await resolveRuntimeBridgeLaunch(
-          command.bridgeLaunch,
-          options,
-        );
-        const probe = () =>
-          options.providerInstallationStatus({
-            providerId: command.providerId,
-            bridgeLaunch,
-            ...(requirement !== undefined ? { requirement } : {}),
-          });
-        // A busy machine can make one probe miss the bridge's 30 s request
-        // timeout. Ask once more before failing the start (#2251).
-        return probe().catch((error: unknown) => {
-          if ((error as { code?: unknown } | null)?.code !== "rpc_timeout") {
-            throw error;
-          }
-          return probe();
-        });
-      },
+      () =>
+        probeProviderInstallationStatus(options, {
+          providerId: command.providerId,
+          bridgeLaunch: command.bridgeLaunch,
+          requirement,
+        }),
       signal,
       (error) => {
         options.logger.warn(

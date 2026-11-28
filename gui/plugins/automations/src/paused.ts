@@ -67,7 +67,7 @@ let reading: Promise<CloudRead> | null = null;
 // Bumped by forgetCloud, so a read that started before a change never caches the old answer.
 let generation = 0;
 
-/** One read of the account's Cloud loops serves the paused label, the loop icon, and the Scan card. A failed read keeps the last answer. */
+/** One read of the account's Cloud loops serves the paused label, the purpose cards' loop names, and the Scan card. A failed read keeps the last answer. */
 async function readCloud(
   cloudroom: Pick<BbPluginApi["sdk"]["cloudroom"], "automations">,
   now: number,

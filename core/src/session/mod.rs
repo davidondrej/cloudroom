@@ -145,6 +145,10 @@ pub struct Session {
     pub prompts: BTreeMap<String, prompt::PromptState>,
     pub storage_paused: bool,
     pub queue_paused: bool,
+    /// The pause is a thread above's Stop (`thread stop`, relayed or not), never the user's: that thread's next
+    /// `tell` lifts it. A user's Stop while paused makes it the user's until a resume.
+    #[serde(default)]
+    pub agent_paused: bool,
     #[serde(default)]
     pub compacting: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

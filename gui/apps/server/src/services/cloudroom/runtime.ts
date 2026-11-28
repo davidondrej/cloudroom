@@ -64,6 +64,8 @@ export interface ThreadState {
   streamError?: string;
   connectionIssues?: Partial<Record<ConnectionPhase, ConnectionIssue>>;
   sleptAtCheck?: number;
+  /** True when local status was forced `idle` (via asleep/readHistory) past records, so next connect syncs Core's state. */
+  needsStatusSync?: boolean;
   /** Threads whose running turn this app saw cut off when their sandbox stopped, with the lookups made since. */
   cutOffTries?: number;
   delivery?: Promise<void>;
@@ -400,6 +402,15 @@ export class CloudRuntime implements SyncHost {
   /** Cloud threads stamped with another account stay locked until that account signs in again (docs/scopes/sandboxes.md). */
   async otherAccountThread(saved: Binding): Promise<boolean> {
     return Boolean(saved.accountId) && saved.accountId !== (await this.savedConnection())?.account?.id;
+  }
+
+  /** The only API keys the sandbox a thread runs in gets (ADR 0342): null for every key and for threads without a
+   *  sandbox, like a VM's, and undefined when the website has no row for it or doesn't confirm one. `saved`: its
+   *  binding, if this app's copy is gone. A sandbox with a list gets nothing from this Mac at its agent's request, and
+   *  reaches no thread outside its tree (ADR 0286). */
+  async keyList(threadId: string, saved?: Binding): Promise<string[] | null | undefined> {
+    const sandbox = sandboxThread((binding(this.host.db, threadId) ?? saved)?.coreUrl ?? "");
+    return sandbox ? this.sandboxes.loopSecrets(sandbox, true) : null;
   }
 
   /** Capture the signed-in account once; check the entire family before changing any thread. */

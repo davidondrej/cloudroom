@@ -53,7 +53,7 @@ bin() {
 cache=$(sed -n 's/.*"cache_dir":"\([^"]*\)".*/\1/p' /etc/cloudroom/storage.json 2>/dev/null)
 [ -n "$cache" ] && bin "$cache/npm/_cacache"
 for c in ~/.npm/_cacache ~/.cache/pip ~/.cache/uv ~/.cache/yarn ~/.cache/pnpm ~/.cache/go-build ~/.cache/node-gyp ~/.local/share/pnpm/store ~/.bun/install/cache; do bin "$c"; done
-for repo in /code/*/ /repos/*/; do
+for repo in /code/*/ /repos/*/ /repos/*/*/; do
   [ -e "$repo.git" ] || continue
   git -C "$repo" ls-files -z --others --ignored --exclude-standard --directory 2>/dev/null | while IFS= read -r -d '' path; do
     case "$path" in */) ;; *) continue ;; esac

@@ -26,7 +26,10 @@ import {
   type QueuedThreadMessageRow,
 } from "@cloudroom/db";
 import { and, eq, sql } from "drizzle-orm";
-import { queuedMessageSystemNoticeSchema } from "@cloudroom/domain";
+import {
+  queuedMessageSystemNoticeSchema,
+  type QueuedMessageSystemNotice,
+} from "@cloudroom/domain";
 import type {
   ClientTurnRequestId,
   QueuedMessageWaitingOn,
@@ -62,6 +65,7 @@ import {
   deliverQueuedParentNotice,
   isChildInteractionSettled,
 } from "./child-thread-notifications.js";
+import { isUndoneQueuedOwnershipNotice } from "./thread-ownership.js";
 import {
   createQueuedMessageClaimLostError,
   createQueuedMessageNotDeliveredError,
@@ -70,7 +74,10 @@ import {
   QUEUED_MESSAGE_CLAIM_LOST_CODE,
   settleQueueRowDispatched,
 } from "./queue-waits.js";
-import { recordQueuedMessageDrainFailure } from "./queue-drain-failure.js";
+import {
+  recordQueuedMessageDrainFailure,
+  tellSendersOfArchivedThreadQueue,
+} from "./queue-drain-failure.js";
 import { failureHold } from "./turn-failed.js";
 import {
   captureUserMessageSentTelemetry,
@@ -437,22 +444,27 @@ async function sendClaimedQueuedMessage(
 
 /**
  * Drops a claimed child needs-attention notice whose interaction settled
- * while it waited, so the automatic drain doesn't wake the parent for nothing.
+ * while it waited, or an ownership notice whose change was undone (#2281), so
+ * the automatic drain doesn't wake the parent for nothing.
  * The caller moves on to the next row itself, which keeps the order (#2452).
  */
 function dropSettledChildNotice(
   deps: LoggedPendingInteractionWorkSessionDeps,
   claimed: ClaimedQueuedThreadMessageRow,
 ): boolean {
-  let interactionId: string | undefined;
+  let notice: QueuedMessageSystemNotice;
   try {
-    interactionId = queuedMessageSystemNoticeSchema.parse(
+    notice = queuedMessageSystemNoticeSchema.parse(
       JSON.parse(claimed.systemNotice ?? "null"),
-    ).interactionId;
+    );
   } catch {
     return false; // Ordinary rows and unreadable notices go the usual way.
   }
-  if (!isChildInteractionSettled(deps.db, interactionId)) return false;
+  if (
+    !isChildInteractionSettled(deps.db, notice.interactionId) &&
+    !isUndoneQueuedOwnershipNotice(claimed, notice)
+  )
+    return false;
   const dropped = deps.db.transaction(
     (tx) => deleteClaimedQueuedThreadMessageInTransaction(tx, claimed),
     { behavior: "immediate" },
@@ -792,6 +804,7 @@ export async function sendNextQueuedMessageIfPresent(
   } catch (error) {
     releaseClaim(deps, nextQueuedMessage);
     const currentThread = getThread(deps.db, args.threadId);
+    if (currentThread?.archivedAt) tellSendersOfArchivedThreadQueue(deps, currentThread);
     if (
       !isQueuedMessageAutoSendCandidate(currentThread) ||
       isQueuedMessageClaimLostError(error) ||

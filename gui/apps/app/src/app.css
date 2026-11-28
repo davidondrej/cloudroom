@@ -1223,8 +1223,8 @@
   border-radius: 0 !important;
 }
 
-/* Cloud icon color (Settings > Appearance > Cloud icon): Crisp white by
- * default (crisp dark ink in light mode), or Electric lime. */
+/* Cloud icon color (Settings > Appearance > Cloud icon): Electric lime by
+ * default, or Crisp white (crisp dark ink in light mode). */
 :root[data-cloud-icon="crisp-white"] {
   --cloud-icon: #111111;
   --cloud-icon-sidebar: rgb(17 17 17 / 0.88);

@@ -83,7 +83,6 @@ it.each([
     pluginId: "accounts",
     dataDir,
     sdk: {
-      system: { config: async () => ({ primaryHostId: "h" }) as never },
       threads: {
         get: async ({ threadId }: { threadId: string }) =>
           makeThreadResponse({
@@ -95,6 +94,7 @@ it.each([
       },
     },
   });
+  await fs.writeFile(path.join(dataDir, "host-id"), "h\n");
   // A has a one-year token; on another machine it also has a folder, except in the token row.
   const secrets = path.join(dataDir, "plugins", "accounts", "secrets");
   await fs.mkdir(secrets, { recursive: true });
@@ -188,10 +188,8 @@ while [ $# -gt 0 ]; do [ "$1" = -s ] && s="$2"; shift; done
       const { bb, harness } = createFakePluginHost({
         pluginId: "accounts",
         dataDir,
-        sdk: {
-          system: { config: async () => ({ primaryHostId: "h" }) as never },
-        },
       });
+      await fs.writeFile(path.join(dataDir, "host-id"), "h");
       await bb.storage.kv.set("accounts:v1", [
         { ...account("a"), profile: "pa" },
       ]);
@@ -214,6 +212,69 @@ while [ $# -gt 0 ]; do [ "$1" = -s ] && s="$2"; shift; done
   },
 );
 
+// This computer is the server's host-id file, never the only connected host: until it reads, another machine gets
+// no folder that exists only here; a failed read keeps a known id; a one-year token never waits for it (#2758).
+it("an SSH host keeps its own login while this computer is unknown", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "accounts-test-"));
+  dirs.push(dataDir);
+  // The server's fallback would name the only connected host, the SSH one.
+  const { bb, harness } = createFakePluginHost({
+    pluginId: "accounts",
+    dataDir,
+    sdk: { system: { config: async () => ({ primaryHostId: "m" }) as never } },
+  });
+  const secrets = path.join(dataDir, "plugins", "accounts", "secrets");
+  await fs.mkdir(secrets, { recursive: true });
+  await fs.writeFile(
+    path.join(secrets, "b.json"),
+    JSON.stringify({ accessToken: "fake", refreshToken: "", expiresAt: null }),
+  );
+  await bb.storage.kv.set("accounts:v1", [
+    { ...account("a"), profile: "pa" },
+    account("b"),
+  ]);
+  await bb.storage.kv.set("order:v1", { "claude-code": ["a", "b"] });
+  await plugin(bb);
+  // Reads of host-id wait for the test while any are queued; otherwise the real file (never written) is missing.
+  const pending: ((id: string | Error) => void)[] = [];
+  const queued: Promise<string>[] = [];
+  let hostIdReads = 0;
+  const readFile = fs.readFile;
+  vi.spyOn(fs, "readFile").mockImplementation(((file: string, ...rest: []) => {
+    if (!String(file).endsWith("host-id")) return readFile(file, ...rest);
+    hostIdReads++;
+    return queued.shift() ?? readFile(file, ...rest);
+  }) as typeof fs.readFile);
+  const queueRead = () =>
+    queued.push(
+      new Promise<string>((resolve, reject) =>
+        pending.push((id) => (typeof id === "string" ? resolve(id) : reject(id))),
+      ),
+    );
+  const env = async (hostId: string, name: string) =>
+    (await harness.resolveProviderEnv("claude-code", { projectId: "p", hostId }))
+      .some((entry) => entry.name === name && entry.value !== "");
+  const folder = (hostId: string) => env(hostId, "CLAUDE_CONFIG_DIR");
+  expect(await folder("m")).toBe(false);
+  expect(await folder("h")).toBe(false);
+  // A failed read that started first lands right after a read that found this computer.
+  queueRead();
+  queueRead();
+  const turns = [folder("h"), folder("h")];
+  await vi.waitFor(() => expect(queued).toHaveLength(0));
+  pending[1]!("h");
+  pending[0]!(new Error("EIO"));
+  await Promise.all(turns);
+  expect(await folder("m")).toBe(false);
+  expect(await folder("h")).toBe(true);
+  // A one-year token never waits for host-id.
+  await harness.callRpc("accounts.use", { provider: "claude-code", id: "b" });
+  const reads = hostIdReads;
+  expect(await env("m", "CLAUDE_CODE_OAUTH_TOKEN")).toBe(true);
+  expect(hostIdReads).toBe(reads);
+  vi.restoreAllMocks();
+});
+
 // Usage lived only in memory, so a restart emptied every account that isn't in use: those are not checked again.
 it("accounts not in use keep their usage bars and reset times across a restart", async () => {
   const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "accounts-test-"));
@@ -221,7 +282,6 @@ it("accounts not in use keep their usage bars and reset times across a restart",
   const { bb, harness } = createFakePluginHost({
     pluginId: "accounts",
     dataDir,
-    sdk: { system: { config: async () => ({ primaryHostId: "h" }) as never } },
   });
   const home = path.join(dataDir, "plugins", "accounts");
   await fs.mkdir(path.join(home, "secrets"), { recursive: true });
@@ -415,7 +475,6 @@ it.each(["added", "local"])("reconciles %s Claude warnings on Reload", async (lo
         get: async () =>
           makeThreadResponse({ providerId: "claude-code", executionTarget: "cloud" }),
       },
-      system: { config: async () => ({ primaryHostId: "here" }) as never },
       cloudroom: {
         claudeAuth: async (input) => {
           sent.push(input?.plan);

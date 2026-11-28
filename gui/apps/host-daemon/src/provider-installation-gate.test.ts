@@ -102,7 +102,7 @@ describe("createProviderInstallationGate", () => {
     expect(probe).toHaveBeenCalledTimes(2);
   });
 
-  it("remembers a not-installed status from a bridge with no minimum version", async () => {
+  it("never remembers a not-installed status, even from a bridge with no minimum version", async () => {
     const gate = createProviderInstallationGate({ ttlMs: 1_000, now: () => 0 });
     const notInstalled = status({
       executableName: "claude",
@@ -119,7 +119,7 @@ describe("createProviderInstallationGate", () => {
     await expect(gate.run("claude", probe)).resolves.toEqual(notInstalled);
     await expect(gate.run("claude", probe)).resolves.toEqual(notInstalled);
 
-    expect(probe).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledTimes(2);
   });
 
   it("shares one in-flight probe between concurrent callers", async () => {

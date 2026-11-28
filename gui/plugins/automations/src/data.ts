@@ -1146,6 +1146,34 @@ export function recoverFailedRun(db: Db, runId: string, now: number): boolean {
   })();
 }
 
+/** A skipped agent run whose thread came back and reported, such as a plan limit's that its retry resumed (#2763),
+ *  takes the report's outcome, and so does its loop's last status while it is the newest run. A script run keeps its
+ *  own result: a thread it started reports as that thread's Review item. True when the run changed. */
+export function settleSkippedRun(
+  db: Db,
+  run: AutomationRunRow,
+  status: "succeeded" | "failed",
+): boolean {
+  if (run.runMode !== "agent") return false;
+  return db.transaction(() => {
+    const settled = db
+      .prepare(
+        `UPDATE automation_runs SET status = ?, skip_reason = NULL WHERE id = ? AND status = 'skipped'`,
+      )
+      .run(status, run.id);
+    if (settled.changes !== 1) return false;
+    if (
+      listAutomationRuns(db, { automationId: run.automationId, limit: 1 })[0]
+        ?.id === run.id
+    )
+      db.prepare(`UPDATE automations SET last_run_status = ? WHERE id = ?`).run(
+        status,
+        run.automationId,
+      );
+    return true;
+  })();
+}
+
 export function createManualRun(
   db: Db,
   args: {

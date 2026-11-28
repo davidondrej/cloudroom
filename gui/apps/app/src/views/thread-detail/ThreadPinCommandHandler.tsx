@@ -39,10 +39,17 @@ export function useNewThreadPinCommand(isCreating: boolean) {
   );
 
   return useCallback(
-    (threadId: string, pin = false) => {
-      if (!pinRequestedRef.current && !pin) return;
+    (
+      threadId: string,
+      pin = false,
+      alreadyPinned = false,
+    ): Promise<void> => {
+      const requested = pinRequestedRef.current || pin;
       pinRequestedRef.current = false;
-      pinThread({ id: threadId });
+      if (!requested || alreadyPinned) return Promise.resolve();
+      return new Promise<void>((resolve) => {
+        pinThread({ id: threadId, onOptimisticApplied: resolve });
+      });
     },
     [pinThread],
   );

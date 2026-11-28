@@ -1,6 +1,7 @@
 import {
   getQueuedThreadMessage,
   getThread,
+  listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
   setQueuedThreadMessageWaitingOn,
 } from "@cloudroom/db";
@@ -27,6 +28,8 @@ type QueueDrainFailureDeps = LoggedPendingInteractionWorkSessionDeps;
 
 /** Failed rows whose sender was already told, so a repeat failure is quiet. */
 const sendersToldOfFailedRow = new Set<string>();
+/** Archived-queue rows whose sender was told (#1852), apart from failures. */
+const sendersToldOfArchivedRow = new Set<string>();
 
 /**
  * Tells us a queued message failed or a system notice was dropped, so the
@@ -208,4 +211,80 @@ async function tellSenderOfFailedQueuedMessage(
       "Could not tell a sender its queued message failed",
     );
   }
+}
+
+/**
+ * An archived thread's queue never sends on its own, so each agent with a
+ * message waiting there is told once, naming the thread (#1852). The rows stay
+ * for an unarchive. A tick later, so a sender archived in the same cascade is
+ * skipped; a drain the archive interrupted calls this again once its row is
+ * back. A row counts as told only once its notice went. Its own record, so a
+ * later drain failure still gets the #2662 notice.
+ */
+export function tellSendersOfArchivedThreadQueue(
+  deps: QueueDrainFailureDeps,
+  recipient: Thread,
+): void {
+  setImmediate(() => {
+    const idsBySender = new Map<string, string[]>();
+    let archivedAt: number | null | undefined;
+    try {
+      // An archive undone before this tick tells nobody; a later archive is new.
+      archivedAt = getThread(deps.db, recipient.id)?.archivedAt;
+      if (!archivedAt) return;
+      for (const row of listQueuedThreadMessages(deps.db, recipient.id)) {
+        // A failed row already got its #2662 notice and never auto-sends.
+        if (!row.senderThreadId || row.failureReason !== null) continue;
+        const key = `${row.id}:${archivedAt}`;
+        if (sendersToldOfArchivedRow.has(key)) continue;
+        sendersToldOfArchivedRow.add(key);
+        idsBySender.set(row.senderThreadId, [
+          ...(idsBySender.get(row.senderThreadId) ?? []),
+          row.id,
+        ]);
+      }
+    } catch {
+      return; // A closed database (shutdown) must not throw outside any caller.
+    }
+    for (const [senderThreadId, ids] of idsBySender) {
+      void queueParentSystemMessage(deps, {
+        parentThreadId: senderThreadId,
+        input: buildParentSystemInputFromSegments({
+          segments: [
+            { kind: "text", text: "[system]\n\n" },
+            {
+              kind: "mention",
+              mention: buildParentSystemThreadMention({ thread: recipient }),
+            },
+            {
+              kind: "text",
+              text:
+                ` was archived, so your queued messages there were not sent: ${ids.join(", ")}. ` +
+                `They stay in its queue and send only if it is unarchived. ` +
+                `Inspect with \`room-cli thread queue list ${recipient.id}\`.`,
+            },
+          ],
+        }),
+        systemMessageKind: "unlabeled",
+        systemMessageSubject: {
+          kind: "thread",
+          threadId: recipient.id,
+          threadName: parentSystemThreadLabel(recipient),
+        },
+      })
+        .then((told) => {
+          if (!told)
+            for (const id of ids)
+              sendersToldOfArchivedRow.delete(`${id}:${archivedAt}`);
+        })
+        .catch((error: unknown) => {
+          for (const id of ids)
+            sendersToldOfArchivedRow.delete(`${id}:${archivedAt}`);
+          deps.logger.warn(
+            { err: error, threadId: recipient.id, senderThreadId },
+            "Could not tell a sender its queued message's thread was archived",
+          );
+        });
+    }
+  });
 }

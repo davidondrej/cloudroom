@@ -8,9 +8,9 @@ import { checkPreviewsNow, helperRunning, macAccess, previewStatus, previewsSetU
 import { movedRepos, refreshProjectRemote } from "./project-copy.js";
 import { HOSTED_WEBSITE, publicError, type Capabilities, type CloudroomAccount, type Storage } from "./protocol.js";
 import type { CloudRuntime } from "./runtime.js";
-import { sandboxThread, type SandboxTrigger } from "./sandboxes.js";
+import { type SandboxTrigger } from "./sandboxes.js";
 import { reportMacHelperDown, reportMacHelperProblem } from "./setup-telemetry.js";
-import { bindings } from "./store.js";
+import { bindings, recentSandboxProject } from "./store.js";
 import { syncStatus } from "./sync.js";
 import { clearUnsentMinutes, markMinutesSent, unsentMinutes } from "./time-in-app.js";
 
@@ -49,12 +49,7 @@ export class CloudStatusPreviews {
 
   /** The project of the newest cloud thread from the last 7 days, if any. */
   private recentCloudProject(): string | undefined {
-    const recent = bindings(this.rt.host.db)
-      .filter((saved) => sandboxThread(saved.coreUrl))
-      .map((saved) => this.rt.host.getThread(saved.threadId))
-      .filter((thread) => thread && !thread.archivedAt && !thread.deletedAt)
-      .sort((a, b) => b!.createdAt - a!.createdAt)[0];
-    return recent && Date.now() - recent.createdAt < 7 * 86_400_000 ? recent.projectId : undefined;
+    return recentSandboxProject(this.rt.host.db, Date.now() - 7 * 86_400_000);
   }
 
   async warmRecentProject(): Promise<void> {

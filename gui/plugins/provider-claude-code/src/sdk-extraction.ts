@@ -154,6 +154,20 @@ export function extractStreamTextDelta(
     : undefined;
 }
 
+export function extractStreamThinkingStart(
+  message: ClaudeStreamEventMessage,
+): { contentIndex: number } | undefined {
+  const parsed = streamEventSchema.safeParse(message.event);
+  if (
+    !parsed.success ||
+    parsed.data.type !== "content_block_start" ||
+    parsed.data.content_block.type !== "thinking"
+  ) {
+    return undefined;
+  }
+  return { contentIndex: parsed.data.index };
+}
+
 export function extractStreamThinkingDelta(
   message: ClaudeStreamEventMessage,
 ): ClaudeStreamDelta | undefined {

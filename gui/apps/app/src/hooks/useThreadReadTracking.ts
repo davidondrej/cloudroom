@@ -1,4 +1,9 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import type { Thread } from "@cloudroom/domain";
 import { isThreadRead, type ThreadReadState } from "@cloudroom/client-core";
 import {
@@ -27,6 +32,7 @@ interface ReadTrackingSnapshot {
   isRead: boolean | null;
   latestAttentionAt: number | null;
   threadId: string | null;
+  visibilityRevision: number;
 }
 
 export function useThreadReadTracking({
@@ -35,11 +41,16 @@ export function useThreadReadTracking({
   thread,
 }: UseThreadReadTrackingParams) {
   const failedReadKeysRef = useRef<Set<string>>(new Set());
+  const abortedReadKeysRef = useRef<Set<string>>(new Set());
   const pendingReadControllersRef = useRef<Map<string, AbortController>>(
     new Map(),
   );
   const suppressedManualUnreadKeysRef = useRef<Set<string>>(new Set());
   const previousSnapshotRef = useRef<ReadTrackingSnapshot | null>(null);
+  const markReadMutateAsyncRef = useRef(markThreadRead.mutateAsync);
+  useLayoutEffect(() => {
+    markReadMutateAsyncRef.current = markThreadRead.mutateAsync;
+  }, [markThreadRead.mutateAsync]);
   const visibilityRevision = useDocumentVisibilityRevision();
   // A hook, not a plain call: the React Compiler caches a plain call's result from the first render.
   const isDocumentVisible = useSyncExternalStore(
@@ -51,12 +62,26 @@ export function useThreadReadTracking({
 
   useEffect(() => {
     const controllers = pendingReadControllersRef.current;
+    const suppressed = suppressedManualUnreadKeysRef.current;
     return () => {
       for (const controller of controllers.values()) controller.abort();
+      controllers.clear();
+      previousSnapshotRef.current = null;
+      suppressed.clear();
     };
   }, []);
 
   useEffect(() => {
+    if (!active) {
+      for (const controller of pendingReadControllersRef.current.values()) {
+        controller.abort();
+      }
+      pendingReadControllersRef.current.clear();
+      previousSnapshotRef.current = null;
+      suppressedManualUnreadKeysRef.current.clear();
+      return;
+    }
+
     const previousSnapshot = previousSnapshotRef.current;
     const threadIsRead = thread ? isThreadRead(thread) : null;
     const currentSnapshot: ReadTrackingSnapshot = {
@@ -64,6 +89,7 @@ export function useThreadReadTracking({
       isRead: threadIsRead,
       latestAttentionAt: thread?.latestAttentionAt ?? null,
       threadId: thread?.id ?? null,
+      visibilityRevision,
     };
     previousSnapshotRef.current = currentSnapshot;
 
@@ -92,6 +118,7 @@ export function useThreadReadTracking({
 
     if (threadIsRead) {
       failedReadKeysRef.current.delete(marker);
+      abortedReadKeysRef.current.delete(marker);
       suppressedManualUnreadKeysRef.current.delete(marker);
       return;
     }
@@ -99,13 +126,20 @@ export function useThreadReadTracking({
     const becameVisible =
       previousSnapshot?.threadId === thread.id &&
       previousSnapshot.isVisible === false;
-    const isRetry = failedReadKeysRef.current.has(marker);
+    const visibilityChanged =
+      previousSnapshot !== null &&
+      previousSnapshot.visibilityRevision !== visibilityRevision;
+    const hadFailedRead = failedReadKeysRef.current.has(marker);
+    const isAbortedRetry = abortedReadKeysRef.current.has(marker);
+    const isRetry =
+      isAbortedRetry || (hadFailedRead && (becameVisible || visibilityChanged));
     const becameManuallyUnread =
       previousSnapshot?.threadId === thread.id &&
       previousSnapshot.latestAttentionAt === thread.latestAttentionAt &&
       previousSnapshot.isVisible &&
       previousSnapshot.isRead === true &&
-      !isRetry;
+      !hadFailedRead &&
+      !isAbortedRetry;
 
     if (becameManuallyUnread) {
       suppressedManualUnreadKeysRef.current.add(marker);
@@ -126,17 +160,22 @@ export function useThreadReadTracking({
     }
 
     failedReadKeysRef.current.delete(marker);
+    abortedReadKeysRef.current.delete(marker);
     const controller = new AbortController();
     pendingReadControllersRef.current.set(marker, controller);
-    void markThreadRead
-      .mutateAsync({ signal: controller.signal, threadId: thread.id })
+    void markReadMutateAsyncRef
+      .current({ signal: controller.signal, threadId: thread.id })
       .catch(() => {
-        failedReadKeysRef.current.add(marker);
+        if (controller.signal.aborted) {
+          abortedReadKeysRef.current.add(marker);
+        } else {
+          failedReadKeysRef.current.add(marker);
+        }
       })
       .finally(() => {
         if (pendingReadControllersRef.current.get(marker) === controller) {
           pendingReadControllersRef.current.delete(marker);
         }
       });
-  }, [isVisible, markThreadRead, thread, visibilityRevision]);
+  }, [active, isVisible, thread, visibilityRevision]);
 }

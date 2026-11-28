@@ -304,6 +304,8 @@ export const installedPlugins = sqliteTable("plugins", {
   removedAt: integer("removed_at"),
   installedAt: integer("installed_at").notNull(),
   updatedAt: integer("updated_at").notNull(),
+  /** Last time the user changed this plugin: install, update, on/off, or a setting. Null on older rows: use installedAt. */
+  changedAt: integer("changed_at"),
 });
 
 export const pluginArtifacts = sqliteTable(

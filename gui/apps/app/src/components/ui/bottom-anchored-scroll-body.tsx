@@ -502,6 +502,10 @@ export function BottomAnchoredScrollBody({
     scrollContentHeight: number | null;
   }>({ scrollAreaClientHeight: null, scrollContentHeight: null });
   const scrollAnchorRowsRef = useRef<NodeListOf<HTMLElement> | null>(null);
+  const preservedHiddenScrollRef = useRef<{
+    atBottom: boolean;
+    scrollTop: number;
+  } | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const initialScrollRestoreRowId = useMemo(() => {
     if (scrollAnchorThreadId === undefined) return null;
@@ -1061,11 +1065,29 @@ export function BottomAnchoredScrollBody({
   useLayoutEffect(() => {
     const scrollArea = scrollAreaRef.current;
     if (!scrollArea) return;
+    const preserved = preservedHiddenScrollRef.current;
+    preservedHiddenScrollRef.current = null;
+    if (preserved !== null) {
+      const maxScrollOffset = refreshMaxScrollOffset(scrollArea);
+      if (preserved.atBottom) {
+        scrollArea.scrollTop = maxScrollOffset;
+      } else if (
+        pendingScrollRestoreRef.current?.lastAppliedScrollTop == null
+      ) {
+        scrollArea.scrollTop = Math.min(maxScrollOffset, preserved.scrollTop);
+      }
+    }
 
     return () => {
       flushScrollAnchorCapture(scrollArea);
+      preservedHiddenScrollRef.current = {
+        atBottom:
+          shouldStickToBottomRef.current ||
+          isScrolledNearBottom(maxScrollOffsetRef.current, scrollArea.scrollTop),
+        scrollTop: scrollArea.scrollTop,
+      };
     };
-  }, [flushScrollAnchorCapture]);
+  }, [flushScrollAnchorCapture, refreshMaxScrollOffset]);
 
   useEffect(() => {
     const scrollArea = scrollAreaRef.current;
@@ -1117,6 +1139,11 @@ export function BottomAnchoredScrollBody({
 
     return () => {
       resizeObserver?.disconnect();
+      resizeObserverHasDeliveredRef.current = false;
+      observedScrollGeometryRef.current = {
+        scrollAreaClientHeight: null,
+        scrollContentHeight: null,
+      };
       scrollArea.removeEventListener("scroll", handleScrollEvent);
       scrollArea.removeEventListener("wheel", markWheelScrollIntent);
       scrollArea.removeEventListener("touchstart", markTouchStartScrollIntent);

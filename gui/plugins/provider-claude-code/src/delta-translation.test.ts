@@ -1140,6 +1140,63 @@ describe("claude streaming", () => {
     ]);
   });
 
+  it("opens reasoning on empty content_block_start, deduplicates repeats, and closes it if thinking stays empty", () => {
+    const harness = createClaudeDeltaHarness();
+
+    const startEvents = harness.translate({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "" },
+      },
+      session_id: "sess-1",
+    });
+    const started = startEvents.find(
+      (event) =>
+        event.type === "item/started" && event.item.type === "reasoning",
+    );
+    expect(started).toMatchObject({
+      type: "item/started",
+      item: { type: "reasoning", summary: [], content: [] },
+    });
+
+    // Duplicate start on the same open block must not orphan the first item.
+    const dupEvents = harness.translate({
+      type: "stream_event",
+      event: {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "" },
+      },
+      session_id: "sess-1",
+    });
+    expect(dupEvents).toEqual([]);
+
+    const assistantEvents = harness.translate({
+      type: "assistant",
+      message: {
+        id: "msg-empty-thinking",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "" },
+          { type: "text", text: "Done." },
+        ],
+      },
+      session_id: "sess-1",
+    });
+    expect(assistantEvents).toContainEqual(
+      expect.objectContaining({
+        type: "item/completed",
+        item: expect.objectContaining({
+          type: "reasoning",
+          id: started?.type === "item/started" ? started.item.id : "",
+          content: [],
+        }),
+      }),
+    );
+  });
+
   it("streams thinking and finalizes it on the assistant message", () => {
     const harness = createClaudeDeltaHarness();
 

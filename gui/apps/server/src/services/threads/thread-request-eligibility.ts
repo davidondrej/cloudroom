@@ -8,6 +8,7 @@ import {
   assertUsableHostId,
   requireConnectedPrimaryHostId,
 } from "../hosts/primary-host.js";
+import type { CheckoutInspectionCache } from "../environments/provider-availability.js";
 import { requireSourceForHost } from "./thread-create-helpers.js";
 
 type ThreadRequestEnvironment = EnvironmentArgs;
@@ -26,6 +27,7 @@ type ReuseThreadRequestEnvironment = Extract<
 >;
 interface ResolveStableThreadRequestEnvironmentArgs {
   allowUnmanagedPersonalProjectReuseEnvironmentId?: string;
+  checkoutInspectionCache?: CheckoutInspectionCache;
   environment: ThreadRequestEnvironment;
   projectId: string;
 }
@@ -114,6 +116,7 @@ function resolveHostThreadRequestEnvironment(
   deps: ThreadRequestEnvironmentDeps,
   environment: HostThreadRequestEnvironment,
   projectId: string,
+  checkoutInspectionCache?: CheckoutInspectionCache,
 ):
   | ResolvedHostThreadRequestEnvironment
   | ResolvedPersonalThreadRequestEnvironment {
@@ -143,7 +146,12 @@ function resolveHostThreadRequestEnvironment(
     };
   }
 
-  const localSource = requireSourceForHost(deps, projectId, hostId);
+  const localSource = requireSourceForHost(
+    deps,
+    projectId,
+    hostId,
+    checkoutInspectionCache,
+  );
 
   return {
     hostId,
@@ -203,6 +211,7 @@ export function resolveStableThreadRequestEnvironment(
         deps,
         args.environment,
         args.projectId,
+        args.checkoutInspectionCache,
       );
     case "reuse":
       return resolveReuseThreadRequestEnvironment(

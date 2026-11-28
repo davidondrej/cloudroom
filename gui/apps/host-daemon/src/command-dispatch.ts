@@ -20,6 +20,7 @@ import type { AgentRuntimeBridgeLaunch } from "@cloudroom/agent-runtime";
 import semver from "semver";
 import {
   ExpectedCommandDispatchError,
+  probeProviderInstallationStatus,
   resolveRuntimeBridgeLaunch,
   type CommandOf,
   type CommandDispatchOptions,
@@ -156,7 +157,13 @@ import {
   listAgentTree,
   stopThreadProcesses,
 } from "./thread-processes.js";
-import { providerInstallationGateKey } from "./provider-installation-gate.js";
+import {
+  providerInstallationGateKey,
+  untilAborted,
+} from "./provider-installation-gate.js";
+
+// Covers one probe plus its rpc_timeout retry (#2251).
+const PROVIDER_STATUS_READ_TIMEOUT_MS = 60_000;
 
 type CommandHandlerMap = {
   [TType in HostDaemonSettledCommandType]: (
@@ -318,6 +325,14 @@ async function runProviderInstallationOnHost(
         !status.needsUpdate &&
         !status.versionUnsupported
       ) {
+        // The CLI changed without us: drop answers about the old one.
+        await options.runtimeManager.invalidateProviderMaintenanceRuntime({
+          key: providerInstallationGateKey({
+            providerId: command.providerId,
+            bridgeLaunch: command.bridgeLaunch,
+          }),
+          status,
+        });
         return {
           events: [
             {
@@ -405,6 +420,9 @@ async function runProviderInstallationOnHost(
               status: verifiedStatus,
             },
       );
+    } else {
+      // A failed run may still have changed the CLI: check it again.
+      options.runtimeManager.providerInstallationGate.clear();
     }
     return { events };
   } catch (error) {
@@ -798,18 +816,24 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
       options.providerUsage(args),
     ),
   "provider.installation.status": async (command, options) => {
-    const bridgeLaunch = await resolveRuntimeBridgeLaunch(
-      command.bridgeLaunch,
-      options,
+    const probe = () => probeProviderInstallationStatus(options, command);
+    // Every app window and CLI read shares the thread-start gate: one probe
+    // at a time and an installed answer reused (#2670). A failed probe fails
+    // the read; the server decides what to report. Its key has no cwd.
+    if (command.cwd !== undefined) return probe();
+    // Like a thread start: refresh the shell env first, so a PATH change
+    // clears the cache, and bound the wait, so retries can't run forever.
+    const signal = AbortSignal.timeout(PROVIDER_STATUS_READ_TIMEOUT_MS);
+    await untilAborted(options.refreshShellEnv(), signal);
+    return options.runtimeManager.providerInstallationGate.read(
+      providerInstallationGateKey({
+        providerId: command.providerId,
+        bridgeLaunch: command.bridgeLaunch,
+        requirement: command.requirement,
+      }),
+      probe,
+      signal,
     );
-    return options.providerInstallationStatus({
-      providerId: command.providerId,
-      ...(command.cwd !== undefined ? { cwd: command.cwd } : {}),
-      ...(command.requirement !== undefined
-        ? { requirement: command.requirement }
-        : {}),
-      bridgeLaunch,
-    });
   },
   "provider.installation.run": runProviderInstallationOnHost,
   "workspace.status": (command, options) =>

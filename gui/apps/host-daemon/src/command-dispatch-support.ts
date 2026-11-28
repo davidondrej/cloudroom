@@ -185,6 +185,45 @@ export async function resolveRuntimeBridgeLaunch(
   };
 }
 
+/** Asks provider/installation/status. A busy machine can make one probe miss
+ *  the bridge's 30 s request timeout, so it asks once more (#2251). Thread
+ *  starts and status reads share this probe through the gate (#2670). */
+export async function probeProviderInstallationStatus(
+  options: Pick<
+    CommandDispatchOptions,
+    | "dataDir"
+    | "fetchPluginHostArtifact"
+    | "logger"
+    | "providerInstallationStatus"
+  >,
+  args: {
+    providerId: string;
+    bridgeLaunch: HostDaemonBridgeLaunch;
+    cwd?: string | undefined;
+    requirement?: "thread_rewind" | undefined;
+  },
+): Promise<ProviderInstallationStatus> {
+  const bridgeLaunch = await resolveRuntimeBridgeLaunch(
+    args.bridgeLaunch,
+    options,
+  );
+  const probe = () =>
+    options.providerInstallationStatus({
+      providerId: args.providerId,
+      bridgeLaunch,
+      ...(args.cwd !== undefined ? { cwd: args.cwd } : {}),
+      ...(args.requirement !== undefined
+        ? { requirement: args.requirement }
+        : {}),
+    });
+  return probe().catch((error: unknown) => {
+    if ((error as { code?: unknown } | null)?.code !== "rpc_timeout") {
+      throw error;
+    }
+    return probe();
+  });
+}
+
 export function getErrorCode(error: unknown): string {
   if (error instanceof CommandDispatchError) {
     return error.code;

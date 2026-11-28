@@ -32,6 +32,7 @@ import {
   releaseFailedThreadRuntimeThenArchive,
   requestActiveRuntimeThreadStopIfNeeded,
 } from "./thread-lifecycle.js";
+import { tellSendersOfArchivedThreadQueue } from "./queue-drain-failure.js";
 import { archiveThreadAndReleaseChildren } from "./thread-ownership.js";
 import { requireThreadHostCommandEnvironment } from "./thread-command-environment.js";
 import { scheduleArchivedThreadProcessStop } from "./thread-commands.js";
@@ -128,6 +129,7 @@ function archiveThreadWithLifecycleEffects(
     emitPluginThreadArchived(archivedThread);
     return archivedThread;
   }
+  tellSendersOfArchivedThreadQueue(deps, archivedThread);
   if (args.environment !== null && archivedThread.status === "error") {
     releaseFailedThreadRuntimeThenArchive(
       deps,

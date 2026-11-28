@@ -6,6 +6,7 @@ import {
   listEvents,
   listQueuedThreadMessages,
   setQueuedThreadMessageFailureReason,
+  unarchiveThread,
 } from "@cloudroom/db";
 import type { PluginHookName } from "@get-bb/plugin-sdk";
 import { describe, expect, it, vi } from "vitest";
@@ -15,6 +16,7 @@ import {
   type PluginHookRegistration,
 } from "../../src/services/plugins/plugin-hook-registry.js";
 import { noteDispatchRequeued } from "../../src/services/threads/dispatch-hooks.js";
+import { archiveThreadAndChildren } from "../../src/services/threads/thread-archive.js";
 import { recordQueuedMessageDrainFailure } from "../../src/services/threads/queue-drain-failure.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
 import { toThreadQueuedMessage } from "../../src/services/threads/thread-queued-messages.js";
@@ -458,6 +460,80 @@ describe("recordQueuedMessageDrainFailure", () => {
       await vi.waitFor(() => expect(notices()).toHaveLength(1));
       await new Promise((resolve) => setTimeout(resolve, 100));
       expect(notices()).toHaveLength(1);
+    });
+  });
+
+  it("tells an agent sender once when its queued message's thread is archived, apart from failures (#1852)", async () => {
+    await withTestHarness(async (harness) => {
+      const { thread } = seedQueuedRow(harness, {
+        hostConnected: true,
+        hostName: "M4",
+      });
+      const sender = seedThread(harness.deps, {
+        environmentId: thread.environmentId,
+        projectId: thread.projectId,
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: thread.environmentId,
+        providerThreadId: "provider-sender",
+        threadId: sender.id,
+      });
+      const rows = ["Run the build", "Then the tests"].map((text) =>
+        seedQueuedMessage(harness.deps, {
+          content: textInput(text),
+          senderThreadId: sender.id,
+          threadId: thread.id,
+        }),
+      );
+      // A row that already failed got its #2662 notice and is left out.
+      const failed = seedQueuedMessage(harness.deps, {
+        content: textInput("Already failed"),
+        senderThreadId: sender.id,
+        threadId: thread.id,
+      });
+      setQueuedThreadMessageFailureReason(harness.db, harness.deps.hub, {
+        id: failed.id,
+        threadId: failed.threadId,
+        failureReason: "Rejected",
+      });
+      const notices = () =>
+        [
+          ...listQueuedThreadMessages(harness.db, sender.id).map(
+            (r) => r.content,
+          ),
+          ...listEvents(harness.db, { threadId: sender.id }).map((e) => e.data),
+        ].filter((text) =>
+          text.includes(
+            `was archived, so your queued messages there were not sent: ${rows[0]!.id}, ${rows[1]!.id}.`,
+          ),
+        );
+
+      archiveThreadAndChildren(harness.deps, { parentThread: thread });
+      await vi.waitFor(() => expect(notices()).toHaveLength(1));
+      // The messages stay for an unarchive.
+      expect(listQueuedThreadMessages(harness.db, thread.id)).toHaveLength(4);
+
+      // A later failure still gets its own #2662 notice.
+      unarchiveThread(harness.db, harness.hub, thread.id);
+      recordQueuedMessageDrainFailure(harness.deps, {
+        error: new ApiError(409, "invalid_request", "Rejected"),
+        row: rows[0]!,
+        thread,
+      });
+      await vi.waitFor(() =>
+        expect(
+          [
+            ...listQueuedThreadMessages(harness.db, sender.id).map(
+              (r) => r.content,
+            ),
+            ...listEvents(harness.db, { threadId: sender.id }).map(
+              (e) => e.data,
+            ),
+          ].filter((text) =>
+            text.includes(`queue send ${thread.id} ${rows[0]!.id}`),
+          ),
+        ).toHaveLength(1),
+      );
     });
   });
 });

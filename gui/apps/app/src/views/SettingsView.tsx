@@ -1,4 +1,5 @@
 import { AutoDeleteSettingsSection } from "@/components/settings/AutoDeleteSettingsSection";
+import { ThreadAccessSettingsSection } from "@/components/settings/ThreadAccessSettingsSection";
 import { CloudEnvironmentSettingsSection } from "@/components/settings/CloudEnvironmentSettingsSection";
 import { DefaultsSettingsSection } from "@/components/settings/DefaultsSettingsSection";
 import { MachineEnvironmentSettings } from "@/components/settings/MachineEnvironmentSettings";
@@ -86,7 +87,6 @@ import {
 import { PluginsOverview } from "@/components/plugin/PluginsOverview";
 import { PluginDetailPaneView } from "@/views/ToolsView";
 import { SETTINGS_PLUGIN_ROUTE_PATH } from "@/lib/route-paths";
-import { PluginSettingsPage } from "@/components/plugin/PluginSettings";
 import { PluginSettingsSections } from "@/components/plugin/PluginSettingsSections";
 import { FileOpenersSettingsSection } from "@/components/settings/FileOpenersSettingsSection";
 import { VoiceInputSettingsSection } from "@/components/settings/VoiceInputSettingsSection";
@@ -132,7 +132,6 @@ import { useRewriteLocalhostLinksPreference } from "@/lib/localhost-link-rewrite
 import { useRichTextEditingPreference } from "@/lib/rich-text-editing-preference";
 import {
   SETTINGS_ROUTE_PATH,
-  getPluginDetailRoutePath,
   getRootComposeRoutePath,
 } from "@/lib/route-paths";
 import { useNavigateToThreadAfterCreatePreference } from "@/lib/root-compose-create-preference";
@@ -1325,53 +1324,53 @@ export function ExperimentsSettingsSection({
 
 const SETTINGS_CONTENT_ID = "settings-content";
 
-export function SettingsPluginsContent() {
-  const location = useLocation();
-  const navigate = useNavigate();
+/** An installed plugin's one page: switch, settings, release and capabilities. */
+function SettingsPluginPage({
+  pluginId,
+  inFlow,
+}: {
+  pluginId: string;
+  /** Flows inside a Settings tab instead of scrolling on its own. */
+  inFlow?: boolean;
+}) {
   const systemConfigQuery = useSystemConfig();
   const updateGeneralSettingsMutation = useUpdateGeneralSettings();
+  return (
+    <PluginDetailPaneView
+      key={pluginId}
+      pluginId={pluginId}
+      inFlow={inFlow}
+      settings={
+        <ProviderTurnDisplaySection
+          disabled={
+            systemConfigQuery.data === undefined ||
+            updateGeneralSettingsMutation.isPending
+          }
+          generalSettings={
+            systemConfigQuery.data?.generalSettings ?? defaultAppSettings
+          }
+          onGeneralSettingsChange={(next) =>
+            updateGeneralSettingsMutation.mutateAsync(next)
+          }
+          pluginId={pluginId}
+        />
+      }
+    />
+  );
+}
+
+export function SettingsPluginsContent() {
+  const location = useLocation();
   const pluginId =
     matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)?.params.pluginId ??
     null;
-  const pluginAuthorKey = new URLSearchParams(location.search).get("author");
   return (
-    <div
-      className={cn(
-        "flex min-h-0 flex-1 flex-col",
-        pluginAuthorKey !== null && "pt-4 md:pt-5",
-      )}
-    >
+    <div className="flex min-h-0 flex-1 flex-col">
       <PluginsOverview
-        mode={pluginAuthorKey === null ? "installed" : "browse"}
+        mode="installed"
         selectedPluginId={pluginId}
-        onOpenPlugin={(nextPluginId) =>
-          navigate(
-            getPluginDetailRoutePath({
-              pluginId: nextPluginId,
-              view: "installed",
-            }),
-          )
-        }
         renderDetail={(shownPluginId) => (
-          <PluginDetailPaneView
-            key={shownPluginId}
-            pluginId={shownPluginId}
-            settings={
-              <ProviderTurnDisplaySection
-                disabled={
-                  systemConfigQuery.data === undefined ||
-                  updateGeneralSettingsMutation.isPending
-                }
-                generalSettings={
-                  systemConfigQuery.data?.generalSettings ?? defaultAppSettings
-                }
-                onGeneralSettingsChange={(next) =>
-                  updateGeneralSettingsMutation.mutateAsync(next)
-                }
-                pluginId={shownPluginId}
-              />
-            }
-          />
+          <SettingsPluginPage pluginId={shownPluginId} />
         )}
       />
     </div>
@@ -1439,27 +1438,15 @@ export function SettingsView() {
 
   let content: ReactNode = null;
   if (activePluginId !== null) {
-    content = (
-      <PluginSettingsPage pluginId={activePluginId}>
-        <ProviderTurnDisplaySection
-          disabled={
-            systemConfigQuery.data === undefined ||
-            updateGeneralSettingsMutation.isPending
-          }
-          generalSettings={generalSettings}
-          onGeneralSettingsChange={(next) =>
-            updateGeneralSettingsMutation.mutateAsync(next)
-          }
-          pluginId={activePluginId}
-        />
-      </PluginSettingsPage>
-    );
+    content = <SettingsPluginPage pluginId={activePluginId} inFlow />;
   } else if (activeSection === "defaults") {
     content = <DefaultsSettingsSection />;
   } else if (activeSection === "cloud-environment") {
     content = <CloudEnvironmentSettingsSection />;
   } else if (activeSection === "auto-delete") {
     content = <AutoDeleteSettingsSection />;
+  } else if (activeSection === "thread-access") {
+    content = <ThreadAccessSettingsSection />;
   } else if (activeSection === "providers") {
     content = (
       <ProvidersSettingsSection

@@ -21,7 +21,7 @@ import {
 import type { PromptInput, ReasoningLevel, Thread, ThreadChangeKind, ThreadEventTurnStatus, ThreadEventType } from "@cloudroom/domain";
 import { z } from "zod";
 import { ApiError } from "../../errors.js";
-import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
+import type { AppDeps, LoggedPendingInteractionWorkSessionDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { createKeyedLock } from "../lib/async-deduper.js";
 import { cloudTurnsElsewhere, emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import { pruneThreadEventHistory } from "../system/event-pruning.js";
@@ -45,6 +45,7 @@ import { inferThreadMetadata, queueThreadTitle } from "../threads/thread-metadat
 import { assertValidParentThread, isParentNotifiableChildThread } from "../threads/thread-parent.js";
 import { buildThreadStatusChangeMetadata } from "../threads/thread-runtime-display.js";
 import { deriveTitleFallback, shouldGenerateThreadTitle } from "../threads/title-generation.js";
+import { threadMessages, type ThreadMessage } from "../threads/thread-transcript.js";
 import { cloudPromptLimit, hashedRequestId } from "./protocol.js";
 import { binding, type Command } from "./store.js";
 
@@ -59,6 +60,8 @@ export interface HostHooks {
   /** `failureReason`: Core's error on a failed turn's receipt (#2513). */
   childTurnEnded?: (child: Thread & { parentThreadId: string }, status: ThreadEventTurnStatus, failureReason?: string, turnId?: string) => void;
   moveRequest?: (threadId: string, project: string) => void;
+  /** A Cloud child's `thread tell --parent` for its parent on this computer, sent like a Local child's tell. */
+  childTold?: (parent: Thread, childId: string, text: string, queue: boolean) => Promise<unknown>;
 }
 
 export { createKeyedLock };
@@ -128,6 +131,32 @@ export class CloudHostBridge {
 
   hasCompletedRootTurn(threadId: string): boolean {
     return Boolean(findLastCompletedRootStoredTurn(this.deps.db, { threadId }));
+  }
+
+  /** A thread's user messages and agent replies from its last `limit` events, for another thread's agent (ADR 0286). */
+  recentMessages(threadId: string, limit: number): { messages: ThreadMessage[]; cut: boolean } {
+    const last = this.deps.db.select({ sequence: max(events.sequence) }).from(events).where(eq(events.threadId, threadId)).get()?.sequence ?? 0;
+    const after = Math.max(0, last - limit);
+    return { messages: threadMessages(this.deps.db, threadId, after ? { after } : {}), cut: after > 0 };
+  }
+
+  /** The visible Local threads whose title holds `search`, newest first. */
+  localThreads(search: string, archived: boolean, limit: number) {
+    const words = `%${search.toLowerCase().replace(/[\\%_]/g, "\\$&")}%`;
+    return this.deps.db.select({ id: threads.id, title: threads.title, titleFallback: threads.titleFallback, status: threads.status, parent: threads.parentThreadId, archivedAt: threads.archivedAt })
+      .from(threads)
+      .where(and(eq(threads.executionTarget, "local"), eq(threads.visibility, "visible"), isNull(threads.deletedAt), archived ? undefined : isNull(threads.archivedAt),
+        sql`lower(coalesce(${threads.title}, ${threads.titleFallback}, '')) like ${words} escape '\\'`))
+      .orderBy(desc(threads.updatedAt)).limit(limit).all();
+  }
+
+  /** A Cloud agent's message to a Local thread, labeled with its sender like any agent message (ADR 0286). */
+  async tellLocal(target: Thread, text: string, senderThreadId: string): Promise<string> {
+    const { acceptThreadSendRequest } = await import("../threads/thread-send-request.js");
+    const sent = await acceptThreadSendRequest(this.deps as LoggedPendingInteractionWorkSessionDeps, {
+      thread: target, payload: { input: [{ type: "text", text, mentions: [] }], mode: "queue-if-active", senderThreadId },
+    });
+    return sent.delivery;
   }
 
   lastCloudUpdatedAt(): number | null {

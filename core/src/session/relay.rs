@@ -4,7 +4,7 @@
 //! takes it, and stays awake for it.
 use super::{
     Local, Manager, Session, SessionState,
-    children::{NOTICE_REPLY_CHARS, changed_or_due, notice, notice_ids, untold},
+    children::{NOTICE_REPLY_CHARS, changed_or_due, notice, notice_ids, steered, untold},
     history::ApiError,
     thread::{
         Failure, NO_PARENT, archive_under, compact_note, deliver, fail, random_key, record, retire,
@@ -52,9 +52,10 @@ fn unconfirmed(why: &str) -> String {
         "Could not confirm your parent got it ({why}). It may have, so sending it again without its request ID may deliver it twice."
     )
 }
-/// The website's answer for a thread that moved to the Mac (web/lib/mobile.ts, `threadCore`).
-const MOVED: &str = "This thread moved to the Mac.";
-const PARENT_MOVED: &str = "Not delivered: your parent moved to the user's Mac, and Cloud children can't message a Local parent yet. The app can still forward your completed-turn reply to your current Local parent while it is open.";
+/// The website's answer to a tell for this thread's parent when it runs on the user's computer: moved there, or never
+/// in Cloud (web/lib/mobile.ts, `subagent`).
+const PARENT_ON_COMPUTER: &str = "Not delivered: your parent runs on the user's computer, which this message can't reach. It still gets your reply when this turn ends.";
+const FOR_APP_NOTE: &str = "Queued: your parent runs on the user's computer, so the user's Cloudroom app delivers this while it is open, or when it next opens. Don't send it again. An app that hasn't updated yet never delivers it; your parent still gets your reply when this turn ends.";
 const STARTING: &str = "This child is still starting in its own sandbox.";
 /// A relayed `tell --mode queue` ends its request ID with this: the website passes on only the ID and text, and an
 /// older Core ignores it and steers, as before (#1517).
@@ -210,15 +211,20 @@ pub(super) async fn command(
     // website name that thread as the sender, since this caller's session ID means nothing in another sandbox
     // (#177). The app passes on its other commands, and what the website doesn't link, as before: it knows a child
     // the user moved under this caller, or one an older Core had the app start.
-    let (shared, mine, up) = {
+    let (shared, mine, up, own) = {
         let local = m.local.lock().unwrap();
         let session = local.sessions.get(caller);
         let mine = session.is_some_and(|s| s.child_states.contains_key(id));
         let up = to_parent || session.and_then(|s| s.parent_thread()) == Some(id);
+        // The sandbox's own thread: not a child started in it (still one once detached) or a side chat, for which
+        // the website answers as that thread.
+        let own =
+            session.is_some_and(|s| !s.shared_child() && super::children::fork_of(s).is_none());
         (
             session.is_some_and(|s| s.parent_session.is_some()),
             mine,
             up,
+            own,
         )
     };
     let other = shared && !mine;
@@ -285,7 +291,7 @@ pub(super) async fn command(
         Err(ApiError::Status(404, _)) if id == "parent" => {
             return Err(fail(StatusCode::CONFLICT, NO_PARENT));
         }
-        Err(ApiError::Status(503, ref message)) if id == "parent" && message == DISK_FULL => {
+        Err(ApiError::Status(503, ref message)) if up && message == DISK_FULL => {
             return Err(fail(
                 StatusCode::CONFLICT,
                 "Not delivered: your parent's cloud disk is full or can't be measured, so its work is paused. The user can free space in your parent's thread with Clear caches & builds; send it again after that.",
@@ -294,22 +300,25 @@ pub(super) async fn command(
         // The parent may have it already: only a resend under this request ID is safe (thread.rs `resend`). Only
         // the website's own "parent busy" 503 means the parent refused it.
         Err(ApiError::Status(status, ref message))
-            if id == "parent" && status >= 500 && !(status == 503 && message == PARENT_BUSY) =>
+            if up && status >= 500 && !(status == 503 && message == PARENT_BUSY) =>
         {
             return Err(fail(
                 StatusCode::BAD_GATEWAY,
                 &unconfirmed(&format!("HTTP {status}")),
             ));
         }
-        Err(ApiError::Network(_)) if id == "parent" => {
+        Err(ApiError::Network(_)) if up => {
             return Err(fail(StatusCode::BAD_GATEWAY, &unconfirmed("network error")));
         }
-        // Its parent moved to the Mac (#1015): the website refuses that closed Cloud session and never wakes it, and
-        // nothing here reaches a Local parent yet. The same 410, in words the agent can act on.
+        // Its parent runs on the user's computer (#247, #1015), which nothing in Cloud reaches: the message waits in
+        // this thread's own records, which the app follows, and the app sends it to the parent it knows. Only for the
+        // sandbox's own thread: the website answered for it, and another session's parent isn't its parent.
         Err(ApiError::Status(410, message))
-            if action == "tell" && up && !other && message == MOVED =>
+            if action == "tell" && own && message == PARENT_ON_COMPUTER =>
         {
-            return Err(fail(StatusCode::GONE, PARENT_MOVED));
+            let data = json!({"text":text,"queue":request.ends_with(QUEUE)});
+            let _ = record(m, caller, "parent_tell", data)?;
+            return Ok(Json(json!({"id":id,"state":"queued","note":FOR_APP_NOTE})));
         }
         answer => answer.map_err(|error| website_failure(error, "reach the child"))?,
     };
@@ -318,7 +327,10 @@ pub(super) async fn command(
         "stop" => "stopped",
         _ => "archived",
     };
-    if !other && id != "parent" {
+    // Only its own subagent reports back, so only that counts as a child at work: never its parent, nor another
+    // thread the website says isn't under it (`own`).
+    let own = answer.as_object_mut().and_then(|a| a.remove("own")) != Some(json!(false));
+    if !other && !up && own {
         // An archive its child's Core took names the reports it may still send (#1000); a queued one names none.
         let late = answer["late"].take();
         note_child(m, caller, id, state, &late);
@@ -458,8 +470,15 @@ async fn receive(
     };
     let owner = from.as_deref().and_then(|child| starter(&m, child));
     // A report from a child no session here has named yet, while a start is still unnamed, may be that start's:
-    // it waits, so it can't land on the wrong session.
-    if input.action == "report" && owner.is_none() && unnamed_start(&m.local.lock().unwrap()) {
+    // it waits, so it can't land on the wrong session. One a session here already knows never waits.
+    let unnamed = |local: &Local| {
+        let knows = |s: &Session| {
+            let known = |c: &String| s.started.contains(c) || s.child_states.contains_key(c);
+            from.as_ref().is_some_and(known)
+        };
+        unnamed_start(local) && !local.sessions.values().any(knows)
+    };
+    if input.action == "report" && owner.is_none() && unnamed(&m.local.lock().unwrap()) {
         return Err(fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "This child's start isn't recorded yet. Retry shortly.",
@@ -562,12 +581,23 @@ async fn receive(
         let refused = super::Error::Conflict("storage unsafe; new execution is blocked");
         return Err(session_failure(refused));
     }
-    if input.action == "tell" && from.is_none() {
-        revive(&m, &id, &request, None);
+    // Its own child's report restarts a lost agent too, as its parent's tell does: it waits for that child.
+    let report = input.action == "report";
+    if report || from.is_none() {
+        revive(&m, &id, &request, None, !report);
     }
-    let answer = deliver(&m, &id, &request, prompt, true, None, queue).await?;
-    // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
+    let answer = deliver(&m, &id, &request, prompt.clone(), true, None, queue).await?;
     let steering = m.receipt(&id, &format!("{request}_steer"));
+    // A report follows the rule for a child in this sandbox (children.rs `steered`): a steer that did not reach the
+    // agent and no longer can falls back to the queue, so the parent always hears of the turn.
+    let lost = |s: &super::Receipt| {
+        let local = m.local.lock().unwrap();
+        local.sessions.get(&id).is_some_and(|p| !steered(p, s))
+    };
+    if report && m.receipt(&id, &request).is_none() && steering.as_ref().is_some_and(lost) {
+        return deliver(&m, &id, &request, prompt, true, None, true).await;
+    }
+    // A steer not yet confirmed may still fail; the sender retries, and a failed steer is then queued instead.
     if m.receipt(&id, &request).is_none() && steering.is_some_and(|s| s.state == "accepted") {
         return Err(fail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -1228,6 +1258,90 @@ mod tests {
             settle_starts(&local, "a", Duration::from_secs(60)),
         );
         assert!(quick.await.unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tell for a parent on the user's computer (#247, #1015) waits in the sandbox thread's own records for the app.
+    /// A child started in that sandbox and a side chat hear the website's refusal: their parent isn't the thread's.
+    #[tokio::test]
+    async fn a_tell_for_a_parent_on_the_users_computer_waits_for_the_app() {
+        let site = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", site.local_addr().unwrap());
+        let gone = || async { (StatusCode::GONE, Json(json!({"error":PARENT_ON_COMPUTER}))) };
+        tokio::spawn(
+            async move { axum::serve(site, Router::new().route("/relay", post(gone))).await },
+        );
+        let dir =
+            std::env::temp_dir().join(format!("cloudroom-parent-tell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::Config {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            token: String::new(),
+            state_dir: dir.clone(),
+            repository: dir.clone(),
+            api_url: Some(url),
+            store: "test".into(),
+            instance: None,
+            account_home: dir.clone(),
+            default_harness: crate::runtime::Kind::Codex,
+            harnesses: Default::default(),
+            storage: None,
+            rpc_timeout: Duration::from_secs(30),
+            diagnostic_upload: Duration::from_secs(1),
+            previous_exit_wait: Duration::ZERO,
+        };
+        let m = Manager::open(config).unwrap();
+        for (id, input) in [
+            ("own", json!({})),
+            ("kid", json!({"parent_session":"own"})),
+            ("side", json!({"fork":{"session":"own"}})),
+        ] {
+            let start =
+                json!({"request_id":"s","command":"start","state":"completed","input":input});
+            m.local
+                .lock()
+                .unwrap()
+                .append(id, "receipt", start, None)
+                .unwrap();
+        }
+        let told = |id: &'static str| {
+            let m = m.clone();
+            async move {
+                let records = m.records(id, 0).await.unwrap().into_iter();
+                records
+                    .filter(|r| r.kind == "parent_tell")
+                    .map(|r| r.data)
+                    .collect::<Vec<_>>()
+            }
+        };
+        let answer = command(
+            &m,
+            "own",
+            "parent",
+            "tell",
+            Some("halfway"),
+            true,
+            Some("t1_queue"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            (answer.0["state"].as_str(), answer.0["note"].as_str()),
+            (Some("queued"), Some(FOR_APP_NOTE))
+        );
+        assert_eq!(told("own").await, [json!({"text":"halfway","queue":true})]);
+        for id in ["kid", "side"] {
+            let refused = command(&m, id, "parent", "tell", Some("halfway"), true, None)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.0, refused.1.0["error"].as_str()),
+                (StatusCode::GONE, Some(PARENT_ON_COMPUTER)),
+                "{id}"
+            );
+            assert!(told(id).await.is_empty(), "{id}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

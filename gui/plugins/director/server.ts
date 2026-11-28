@@ -1,22 +1,27 @@
 import { PERSONAL_PROJECT_ID, reasoningLevelSchema, serviceTierSchema } from "@cloudroom/domain";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { KEEP_LEARNING, askFirst, learnedSchema, lessonsFor, lessonsText, type Learned } from "./src/learn.js";
-import { RECENT_MS, pickThread } from "./src/pick.js";
-import { DEFAULT_PING, DEFAULT_ROLE, INTRO, pingText, roleChange, titleOf } from "./src/prompt.js";
+import { KEEP_LEARNING, LEARNING_MODE, askFirst, learnedSchema, lessonsFor, lessonsText, type Learned } from "./src/learn.js";
+import { HOMES, checkModel, modelCheckSchema, type Listed } from "./src/models.js";
+import { RECENT_MS, pickThreads } from "./src/pick.js";
+import { DEFAULT_PING, DEFAULT_ROLE, INTRO, WELCOME_ONLY, WELCOME_THEN, pingText, roleChange, titleOf, welcome } from "./src/prompt.js";
 
 /** The app refetches when this fires. */
 export const CHANGED = "changed";
 /** How often the timer looks at the clock. */
-const TICK_MS = 30_000;
+const TICK_MS = 5_000;
 /** The website is asked for the lessons at most this often; a change made on this computer comes back with its own answer. */
 const SYNC_MS = 10 * 60_000;
 /** The first ping comes soon after the timer is turned on, so the user sees it work. */
 const FIRST_PING_MS = 60_000;
+/** A harness's model list is read again at most this often. */
+const MODELS_MS = 10 * 60_000;
 
 export const configSchema = z.object({
   ping: z.boolean(),
-  minutes: z.number().int().min(5).max(24 * 60),
+  minutes: z.number().int().min(1).max(24 * 60),
+  /** Max stopped threads the Director can check and unblock in one ping (learning mode stays at 1). */
+  maxThreads: z.number().int().min(1).max(20),
   /** The Director's role, added to its system prompt. */
   role: z.string().min(1).max(4096),
   /** What each ping asks. */
@@ -43,6 +48,7 @@ export const DEFAULTS: Config = {
   // Off until the user turns the timer on (David, 2026-11-22).
   ping: false,
   minutes: 60,
+  maxThreads: 5,
   role: DEFAULT_ROLE,
   prompt: DEFAULT_PING,
   agent: { providerId: "claude-code", model: "claude-opus-5-5", reasoningLevel: "high" },
@@ -64,6 +70,9 @@ const stateSchema = z.object({
   last: z.object({ at: z.number(), text: z.string() }).nullable(),
   /** The thread the Director was last handed. `open`: it proposed and waits for the user's answer. */
   subject: z.object({ threadId: z.string(), title: z.string(), project: z.string(), at: z.number(), open: z.boolean() }).nullable().default(null),
+  /** The Director turn that already counted an answer, or that a ping started: known by the Director's
+   *  `latestAttentionAt`, which changes only when a turn ends. At most one answer counts per turn. */
+  spentTurn: z.number().nullable().default(null),
 });
 type State = z.infer<typeof stateSchema>;
 /** The website's answer, kept so a ping needs no network. It belongs to one account. */
@@ -82,6 +91,8 @@ const viewSchema = z.object({
   learned: learnedSchema.nullable(),
   /** It proposed something and waits for the user's answer. */
   waiting: z.boolean(),
+  /** Whether its model is strong enough, or null until its harness's model list is read. */
+  modelCheck: modelCheckSchema.nullable(),
 });
 
 export const directorRpc = defineRpcContract({
@@ -90,8 +101,6 @@ export const directorRpc = defineRpcContract({
   /** The Director's thread, started first if there is none. */
   open: { input: z.null(), output: z.object({ threadId: z.string() }) },
   pingNow: { input: z.null(), output: viewSchema },
-  /** Archive the Director's thread; the next ping or open starts a new one. */
-  fresh: { input: z.null(), output: viewSchema },
   /** Delete one lesson. */
   forget: { input: z.object({ id: z.string().min(1).max(16) }), output: viewSchema },
   /** Stop waiting for an answer to the open proposal; nothing is counted. */
@@ -121,7 +130,7 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
   }
   let config = configSchema.catch(DEFAULTS).parse({ ...DEFAULTS, ...stored });
   let state: State = stateSchema
-    .catch({ threadId: null, role: null, seen: {}, nextAt: Date.now() + FIRST_PING_MS, last: null, subject: null })
+    .catch({ threadId: null, role: null, seen: {}, nextAt: Date.now() + FIRST_PING_MS, last: null, subject: null, spentTurn: null })
     .parse(await kv.get<unknown>("state"));
 
   async function setState(change: Partial<State>): Promise<void> {
@@ -132,7 +141,9 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
 
   // What the Director learned lives with the Cloudroom account (docs/scopes/director.md#learning).
   let saved = savedSchema.nullable().catch(null).parse((await kv.get<unknown>("learned")) ?? null);
-  const account = async () => (await room.sdk.cloudroom.status().catch(() => null))?.account?.id ?? null;
+  /** The signed-in account as last seen, so the Director's instructions (built synchronously) can follow it. */
+  let signedIn: string | null = null;
+  const account = async () => (signedIn = (await room.sdk.cloudroom.status().catch(() => null))?.account?.id ?? null);
   async function keep(answer: unknown, owner: string): Promise<Learned> {
     saved = { ...learnedSchema.parse(answer), account: owner, at: Date.now() };
     await kv.set("learned", saved);
@@ -163,12 +174,21 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
     return keep(await room.sdk.cloudroom.director({ action: "teach", event, ...(lesson ? { lesson } : {}) }), owner);
   }
 
-  // Only the Director's own thread gets the role.
+  /** The learning part of the Director's instructions: the dry run until this account's meter is full, then "save my
+   *  corrections". Nothing with learning off or nobody signed in. Another account's copy counts as untaught. */
+  function learningRules(): string {
+    if (!config.learning || signedIn === null) return "";
+    const mine = saved?.account === signedIn ? saved : null;
+    return mine !== null && mine.reviewed >= mine.goal ? KEEP_LEARNING : LEARNING_MODE;
+  }
+  // Only the Director's own thread gets the role and the learning rules.
   room.agents.configure(({ pluginMetadata }) => ({
     tools: [],
     skills: [],
-    ...(pluginMetadata.role === "director" ? { instructions: config.role } : {}),
+    ...(pluginMetadata.role === "director" ? { instructions: config.role + learningRules() } : {}),
   }));
+  // Know the account and its meter before the first Director turn.
+  void learned();
 
   /** The Director's thread, or null when it is gone or runs on another harness than the settings say. */
   async function director() {
@@ -177,6 +197,8 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
     const live = thread !== null && thread.archivedAt === null && thread.deletedAt === null;
     return live && thread.providerId === config.agent.providerId ? thread : null;
   }
+  /** Names the Director's current turn: when its previous turn ended. */
+  const currentTurn = async () => (await director())?.latestAttentionAt ?? null;
 
   /** Starting, pinging and replacing the Director's thread run one at a time, so there is never a second, lost thread. */
   let turn: Promise<unknown> = Promise.resolve();
@@ -198,6 +220,8 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
       return live.id;
     }
     if (state.threadId !== null) await room.sdk.threads.archive({ threadId: state.threadId }).catch(() => {});
+    // Its instructions are fixed at start, so they need this account's meter.
+    await learned();
     const spawned = await room.sdk.threads.spawn({
       projectId: PERSONAL_PROJECT_ID,
       executionTarget: "local",
@@ -224,8 +248,52 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
   /** Every project, the Personal one included. */
   const projects = () => room.sdk.projects.list({ includePersonal: true });
 
+  /** Each harness's model list, read in the background; the app is told when one arrives. */
+  const lists = new Map<string, { at: number; models: readonly Listed[] }>();
+  const listing = new Set<string>();
+  function modelList(providerId: string): readonly Listed[] | undefined {
+    const known = lists.get(providerId);
+    if ((known === undefined || Date.now() - known.at > MODELS_MS) && !listing.has(providerId)) {
+      listing.add(providerId);
+      room.sdk.system
+        .executionOptions({ providerId, signal: AbortSignal.timeout(30_000) })
+        .then(({ models }) => models, () => known?.models ?? [])
+        .then((models) => {
+          lists.set(providerId, { at: Date.now(), models });
+          room.realtime.publish(CHANGED, { at: Date.now() });
+        })
+        .finally(() => listing.delete(providerId));
+    }
+    return known?.models;
+  }
+  /** Waits for the Director's own harness, so a model is never called weak before its name is known. */
+  function modelCheck() {
+    const ids = [...new Set([...HOMES, config.agent.providerId])];
+    const read = new Map(ids.flatMap((id) => {
+      const models = modelList(id);
+      return models === undefined ? [] : [[id, models] as const];
+    }));
+    return read.has(config.agent.providerId) ? checkModel(config.agent, read) : null;
+  }
+
+  /** The Director explains how it works the first time on this computer, or while it is at 0 / 50 (David, 2026-11-27).
+   *  Once per Director thread: `welcomed` is the thread that last explained itself. */
+  let welcomed = z.string().nullable().catch(null).parse((await kv.get<unknown>("welcomed")) ?? null);
+  async function welcomeText(threadId: string | null): Promise<string | null> {
+    if (threadId !== null && threadId === welcomed) return null;
+    const known = await learned();
+    if (welcomed !== null && known?.reviewed !== 0) return null;
+    const ids = config.projectIds;
+    const watching = ids === null ? "all projects" : (await projects()).filter(({ id }) => ids.includes(id)).map(({ name }) => name).join(", ") || "no projects";
+    return welcome({ ping: config.ping, minutes: config.minutes, maxThreads: config.maxThreads, watching, goal: known?.goal ?? null });
+  }
+  async function markWelcomed(threadId: string): Promise<void> {
+    welcomed = threadId;
+    await kv.set("welcomed", threadId);
+  }
+
   let pinging = false;
-  /** One ping: pick one thread that stopped since the Director last looked, and hand it over. No pick, no model turn. */
+  /** One ping: pick stopped threads since the Director last looked (1 while learning, up to maxThreads otherwise), and hand them over. No pick, no model turn. */
   async function ping(): Promise<void> {
     if (pinging) return;
     pinging = true;
@@ -244,13 +312,26 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
         const rows = await room.sdk.threads.list({ archived: false, hasParent: false, sort: "updated", limit: 300 });
         // Stops older than the window can't be picked again, so their marks go.
         const seen = Object.fromEntries(Object.entries(state.seen).filter(([, at]) => now - at <= RECENT_MS));
-        const pick = pickThread(rows, { now, seen, projectIds: config.projectIds, watchLoops: config.watchLoops });
-        if (pick === null) return done("Nothing new", { seen });
-        const project = (await projects()).find(({ id }) => id === pick.projectId)?.name ?? "a project";
-        const lessons = known === null ? "" : lessonsText(lessonsFor(known.lessons, { id: pick.id, project })) + (teaching ? askFirst(known.reviewed + 1, known.goal) : KEEP_LEARNING);
-        await say(pingText(config.prompt, pick, project, now) + lessons);
-        const subject = { threadId: pick.id, title: titleOf(pick), project, at: now, open: teaching };
-        return done(`${teaching ? "Asked you about" : "Checked"} "${titleOf(pick)}"`, { subject, seen: { ...seen, [pick.id]: pick.latestAttentionAt } });
+        const limit = teaching ? 1 : config.maxThreads;
+        const picks = pickThreads(rows, { now, seen, projectIds: config.projectIds, watchLoops: config.watchLoops }, limit);
+        if (picks.length === 0) return done("Nothing new", { seen });
+        const projectById = new Map((await projects()).map(({ id, name }) => [id, name]));
+        const targets = picks.map((row) => ({ row, project: projectById.get(row.projectId) ?? "a project" }));
+        const lessons =
+          known === null
+            ? ""
+            : lessonsText(lessonsFor(known.lessons, targets.map(({ row, project }) => ({ id: row.id, project })))) +
+              (teaching ? askFirst(known.reviewed + 1, known.goal) : KEEP_LEARNING);
+        const intro = await welcomeText(live?.id ?? null);
+        const sent = await say((intro === null ? "" : intro + WELCOME_THEN) + pingText(config.prompt, targets, now) + lessons);
+        if (intro !== null) await markWelcomed(sent);
+        const first = targets[0]!;
+        const subject = targets.length === 1 ? { threadId: first.row.id, title: titleOf(first.row), project: first.project, at: now, open: teaching } : null;
+        // The turn this ping starts can't count an answer: the user has not answered yet.
+        const spentTurn = live?.latestAttentionAt ?? (await currentTurn());
+        const nextSeen = { ...seen, ...Object.fromEntries(picks.map((row) => [row.id, row.latestAttentionAt])) };
+        const summary = targets.length === 1 ? `${teaching ? "Asked you about" : "Checked"} "${titleOf(first.row)}"` : `Checked ${targets.length} threads`;
+        return done(summary, { subject, spentTurn, seen: nextSeen });
       });
     } catch (error) {
       room.log.warn(`Director ping failed: ${message(error)}`);
@@ -272,6 +353,7 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
       defaults: { role: DEFAULT_ROLE, prompt: DEFAULT_PING },
       learned: known,
       waiting: waiting(known, live),
+      modelCheck: modelCheck(),
     };
   }
 
@@ -285,17 +367,37 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
       // Turning the timer on pings soon. A shorter interval applies now, not after the old one runs out.
       await setState({ nextAt: turnedOn ? Date.now() + FIRST_PING_MS : Math.min(state.nextAt, sooner) });
   }
-  const open = () => inTurn(async () => ({ threadId: (await director())?.id ?? (await say(INTRO)) }));
+  const open = () =>
+    inTurn(async () => {
+      const live = await director();
+      // A first-time user gets the explanation even in an existing thread, unless the Director is busy.
+      const intro = live === null || live.status === "idle" || live.status === "error" ? await welcomeText(live?.id ?? null) : null;
+      if (intro === null) return { threadId: live?.id ?? (await say(INTRO)) };
+      const threadId = await say(intro + WELCOME_ONLY);
+      await markWelcomed(threadId);
+      return { threadId };
+    });
   const fresh = () =>
     inTurn(async () => {
       if (state.threadId !== null) await room.sdk.threads.archive({ threadId: state.threadId }).catch(() => {});
       await setState({ threadId: null, subject: null });
     });
   const count = (lessons: unknown[]) => `${lessons.length} lesson${lessons.length === 1 ? "" : "s"}`;
+  const taught = (known: Learned) => `${Math.min(known.reviewed, known.goal)} of ${known.goal} turns taught`;
+  /** The thread an answer is about: the one named with --thread, checked to exist, or else the one a waiting ping named.
+   *  Its project is looked up, never taken from the caller. */
+  async function about(id: string | undefined): Promise<{ id: string; title: string; project: string | null } | null> {
+    const subject = state.subject;
+    if (subject !== null && (id === subject.threadId || (id === undefined && subject.open))) return { id: subject.threadId, title: subject.title, project: subject.project };
+    if (id === undefined) return null;
+    const thread = await room.sdk.threads.get({ threadId: id }).catch(() => null);
+    if (thread === null || thread.deletedAt !== null) throw new Error(`No thread ${id}.`);
+    return { id: thread.id, title: titleOf(thread), project: (await projects()).find((project) => project.id === thread.projectId)?.name ?? null };
+  }
   /** The Director records the user's answer to its proposal, or a correction given at any time. Runs one at a time with
-   *  pings, so the thread it names is the one the last ping handed over. */
-  const learn = (step: string, args: string[]) => inTurn(() => answer(step, args));
-  async function answer(step: string, args: string[]): Promise<string> {
+   *  pings. From the Director's own thread, at most one answer counts per turn; the user in a terminal is not limited. */
+  const learn = (step: string, args: string[], fromDirector: boolean) => inTurn(() => answer(step, args, fromDirector));
+  async function answer(step: string, args: string[], fromDirector: boolean): Promise<string> {
     const subject = state.subject;
     if (step === "forget") {
       await teach("forget", { id: args[0] ?? "" });
@@ -305,23 +407,36 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
       if (subject?.open) await setState({ subject: { ...subject, open: false } });
       return "Skipped. Nothing was counted.";
     }
+    if (step !== "approve" && step !== "correct") throw new Error("Use approve, correct, skip or forget.");
+    // An answer counts whether a ping or the user's own chat message led to the proposal (ADR 20261127-221722), once
+    // per Director turn, and only until the meter is full.
+    const thread = await about(flag(args, "thread")?.replace(/^@thread:/, ""));
+    const before = await learned(), full = before !== null && before.reviewed >= before.goal;
+    const turn = fromDirector ? await currentTurn() : null;
+    const counts = !full && (!fromDirector || (turn !== null && turn !== state.spentTurn));
+    // Answering a waiting ping's proposal closes it; an answer about another thread leaves it waiting.
+    const close = async () => {
+      const answered = subject?.open && thread?.id === subject.threadId ? { subject: { ...subject, open: false } } : {};
+      await setState({ ...answered, ...(counts && turn !== null ? { spentTurn: turn } : {}) });
+    };
     if (step === "approve") {
-      if (!subject?.open) throw new Error("No proposal is waiting for an answer, so there is nothing to approve.");
+      if (full) return `Nothing to count: ${taught(before)}.`;
+      if (!counts) throw new Error("Only one answer counts per turn, and none before the user answers. Wait for the user's answer.");
       const known = await teach("approved");
-      await setState({ subject: { ...subject, open: false } });
-      return `Counted: ${known.reviewed} of ${known.goal} turns taught.`;
+      await close();
+      return `Counted: ${taught(known)}.`;
     }
-    if (step !== "correct") throw new Error("Use approve, correct, skip or forget.");
     const scope = flag(args, "scope") ?? "thread", words = flag(args, "words");
     if (scope !== "general" && scope !== "project" && scope !== "thread") throw new Error("--scope is thread, project or general.");
     if (!words?.trim()) throw new Error('Give the user\'s exact words: --words "<their words>".');
-    // The place comes from the thread the ping named, never from the caller.
-    const target = scope === "general" ? null : scope === "project" ? subject?.project : subject?.threadId;
-    if (target === undefined) throw new Error("No ping named a thread yet, so only --scope general can be saved.");
-    const known = await teach(subject?.open ? "corrected" : "lesson", { scope, target, words, meaning: flag(args, "meaning") ?? "" });
-    if (subject?.open) await setState({ subject: { ...subject, open: false } });
-    const place = scope === "general" ? "for every thread" : scope === "project" ? `for project "${subject?.project}"` : `for thread "${subject?.title}"`;
-    return `Saved ${place}. ${count(known.lessons)}, ${known.reviewed} of ${known.goal} turns taught.`;
+    const target = scope === "general" ? null : scope === "project" ? thread?.project : thread?.id;
+    if (target === undefined) throw new Error("Name the thread this is about: --thread <id>. Or use --scope general.");
+    if (target === null && scope !== "general") throw new Error(`Thread ${thread?.id} has no project. Use --scope thread.`);
+    // Past the count, or after full: the lesson is saved, no turn is counted.
+    const known = await teach(counts ? "corrected" : "lesson", { scope, target, words, meaning: flag(args, "meaning") ?? "" });
+    await close();
+    const place = scope === "general" ? "for every thread" : scope === "project" ? `for project "${target}"` : `for thread "${thread?.title}"`;
+    return `Saved ${place}. ${count(known.lessons)}, ${taught(known)}.`;
   }
 
   room.rpc.register(directorRpc, {
@@ -335,16 +450,12 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
       await ping();
       return view();
     },
-    async fresh() {
-      await fresh();
-      return view();
-    },
     async forget({ id }) {
       await teach("forget", { id });
       return view();
     },
     async skip() {
-      await learn("skip", []);
+      await learn("skip", [], false);
       return view();
     },
   });
@@ -355,6 +466,7 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
   const SETTINGS: Record<string, (value: string) => Partial<Config>> = {
     ping: (value) => ({ ping: onOff(value) as boolean }),
     minutes: (value) => ({ minutes: Number(value) }),
+    threads: (value) => ({ maxThreads: Number(value) }),
     // A model belongs to one harness, so a new harness needs its model too.
     provider: (value) => {
       const [providerId = "", model = ""] = value.split(/\s+/);
@@ -378,11 +490,11 @@ export default async function directorPlugin(room: BbPluginApi): Promise<void> {
   room-cli director open                       Print the Director's thread ID, starting it if needed
   room-cli director new                        Archive its thread; the next ping starts a new one
   room-cli director lessons [--json]           Show what it learned from you
-  room-cli director learn approve|skip         Answer its proposal (the Director runs these for you)
-  room-cli director learn correct --scope thread|project|general --words <your words> [--meaning <its reading>]
+  room-cli director learn approve|skip [--thread <id>]   Answer its proposal (the Director runs these for you)
+  room-cli director learn correct --thread <id> --scope thread|project|general --words <your words> [--meaning <its reading>]
   room-cli director learn forget <lesson-id>   Delete one lesson
 Settings:
-  ping on|off · minutes 5-1440 · provider <id> <model> · model <id> · effort <level> · tier default|fast|ultrafast
+  ping on|off · minutes 1-1440 · threads 1-20 · provider <id> <model> · model <id> · effort <level> · tier default|fast|ultrafast
   projects all|<id,id> · loops on|off · learning on|off · icon <name or emoji> · color <CSS color|default>
   role <text|default> · prompt <text|default>
 `;
@@ -404,7 +516,7 @@ Settings:
         const { config: settings, threadId, nextAt, last, learned: known } = await view();
         if (argv.includes("--json")) return { exitCode: 0, stdout: `${JSON.stringify({ ...settings, threadId, nextAt, last, learned: known }, null, 2)}\n` };
         const { agent, role, prompt, ...plain } = settings;
-        const lines = Object.entries({ ...plain, provider: agent.providerId, model: agent.model, effort: agent.reasoningLevel, tier: agent.serviceTier ?? "default", projects: plain.projectIds?.join(",") ?? "all", loops: plain.watchLoops }).filter(([name]) => name !== "projectIds" && name !== "watchLoops");
+        const lines = Object.entries({ ...plain, threads: plain.maxThreads, provider: agent.providerId, model: agent.model, effort: agent.reasoningLevel, tier: agent.serviceTier ?? "default", projects: plain.projectIds?.join(",") ?? "all", loops: plain.watchLoops }).filter(([name]) => name !== "maxThreads" && name !== "projectIds" && name !== "watchLoops");
         const text = [...lines.map(([name, value]) => `${name}: ${typeof value === "boolean" ? (value ? "on" : "off") : value || "default"}`), `role: ${role === DEFAULT_ROLE ? "default" : "custom"}`, `prompt: ${prompt === DEFAULT_PING ? "default" : prompt}`, `thread: ${threadId ?? "none"}`, `last ping: ${last?.text ?? "none"}`, `taught: ${known ? `${Math.min(known.reviewed, known.goal)} of ${known.goal} turns, ${count(known.lessons)}` : settings.learning ? "sign in to Cloudroom to teach it" : "off"}`];
         return { exitCode: 0, stdout: `${text.join("\n")}\n` };
       };
@@ -415,12 +527,12 @@ Settings:
         if (argv.includes("--json")) return { exitCode: 0, stdout: `${JSON.stringify(known, null, 2)}\n` };
         if (known === null) return { exitCode: 0, stdout: config.learning ? "Sign in to Cloudroom to teach the Director.\n" : "Learning is off.\n" };
         const lines = known.lessons.map((lesson) => `${lesson.id}  ${lesson.scope}${lesson.target ? ` ${lesson.target}` : ""}  "${lesson.words}"`);
-        return { exitCode: 0, stdout: `${Math.min(known.reviewed, known.goal)} of ${known.goal} turns taught, ${known.approved} right first time\n${lines.join("\n") || "No lessons yet."}\n` };
+        return { exitCode: 0, stdout: `${taught(known)}, ${known.approved} right first time\n${lines.join("\n") || "No lessons yet."}\n` };
       }
       if (command === "learn") {
         // Another agent's thread never teaches the Director: only its own thread, or the user in a terminal.
         if (context.threadId && context.threadId !== state.threadId) return { exitCode: 1, stderr: "Only the Director's own thread can teach it.\n" };
-        return learn(key, rest).then((stdout) => ({ exitCode: 0, stdout: `${stdout}\n` }), (error: unknown) => ({ exitCode: 1, stderr: `${message(error)}\n` }));
+        return learn(key, rest, Boolean(context.threadId)).then((stdout) => ({ exitCode: 0, stdout: `${stdout}\n` }), (error: unknown) => ({ exitCode: 1, stderr: `${message(error)}\n` }));
       }
       // Its own thread reads other threads' logs, so a prompt injection there must not rewrite its settings.
       if (command === "set" && context.threadId && context.threadId === state.threadId) return { exitCode: 1, stderr: "The Director can't change its own settings. Ask the user to.\n" };

@@ -47,6 +47,16 @@ function subscribe(listener: () => void): () => void {
   return () => listeners.delete(listener);
 }
 
-export function useLoopThreadLabel(threadId: string): string | null {
-  return useSyncExternalStore(subscribe, () => labels.get(threadId) ?? null);
+export type LoopLine = [verb: string, names: string];
+const NO_LOOPS: LoopLine[] = [];
+
+/** The thread's loops as [verb, names] lines: "Started by loop: A. Woken by loops: B, C" gives two. A line without
+ *  ": " is skipped, never garbled. */
+export function useLoopLines(threadId: string): LoopLine[] {
+  const label = useSyncExternalStore(subscribe, () => labels.get(threadId) ?? null);
+  if (!label) return NO_LOOPS;
+  return label.split(/\. (?=Woken by loops?: )/).flatMap((part): LoopLine[] => {
+    const at = part.indexOf(": ");
+    return at > 0 ? [[part.slice(0, at), part.slice(at + 2)]] : [];
+  });
 }

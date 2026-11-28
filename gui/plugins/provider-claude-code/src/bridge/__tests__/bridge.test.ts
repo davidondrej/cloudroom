@@ -4797,13 +4797,13 @@ describe("bridge", () => {
       ]);
 
       // The new Claude, still starting or stuck, never answers its MCP check (#1574).
+      // A fresh/restarted session skips the pre-turn MCP check and delivers the prompt immediately.
       queryMock.mockImplementationOnce(() => {
         const query = createControlledClaudeQuery();
         query.mcpServerStatus.mockReturnValue(new Promise(() => {}));
         queries.push(query);
         return query;
       });
-      vi.useFakeTimers();
       bridge.sendRequest(
         3,
         "turn/start",
@@ -4813,11 +4813,11 @@ describe("bridge", () => {
           input: [{ type: "text", text: "after reauthentication" }],
         }),
       );
-      await vi.advanceTimersByTimeAsync(10_000);
-      vi.useRealTimers();
+      await bridge.flushWork();
 
       expect(queries).toHaveLength(2);
       expect(queries[0]?.close).toHaveBeenCalledOnce();
+      expect(queries[1]?.mcpServerStatus).not.toHaveBeenCalled();
       expect(getLatestQueryOptions()).toMatchObject({
         resume: providerThreadId,
       });

@@ -62,6 +62,8 @@ export interface PluginListItem {
   publisherLabel: string | null;
   sourceDisplay: string;
   updateState: PluginUpdateState;
+  /** Last install, update, on/off, or settings change by the user. 0 when the server doesn't say. */
+  changedAt: number;
 }
 
 export interface PluginListResult {
@@ -119,6 +121,7 @@ export function toPluginListItem(plugin: InstalledPlugin): PluginListItem {
     catalogMarketplaceName: plugin.catalogMarketplaceName ?? null,
     publisherLabel: plugin.publisherLabel,
     sourceDisplay: plugin.sourceDisplay,
+    changedAt: plugin.changedAt ?? 0,
     updateState: {
       outcome: state.outcome ?? null,
       detail: state.detail ?? null,

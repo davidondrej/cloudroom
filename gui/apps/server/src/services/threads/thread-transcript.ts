@@ -20,7 +20,9 @@ import {
   THREAD_IMPORT_OPERATION,
   THREAD_TELEPORT_LOCAL_OPERATION,
   promptInputSchema,
+  reasoningLevelSchema,
   type PromptInput,
+  type ReasoningLevel,
   type Thread,
 } from "@cloudroom/domain";
 import { z } from "zod";
@@ -33,7 +35,16 @@ export function threadMessages(
   threadId: string,
   range: { after?: number; before?: number } = {},
 ): ThreadMessage[] {
-  const rows = db
+  return messagesFromRows(threadMessageRows(db, threadId, range));
+}
+
+/** The event rows `threadMessages` reads. */
+export function threadMessageRows(
+  db: DbQueryConnection,
+  threadId: string,
+  range: { after?: number; before?: number } = {},
+): { type: string; data: string }[] {
+  return db
     .select({ type: events.type, data: events.data })
     .from(events)
     .where(
@@ -57,7 +68,24 @@ export function threadMessages(
     )
     .orderBy(asc(events.sequence))
     .all();
-  return messagesFromRows(rows);
+}
+
+/** The latest turn's effort in `threadMessageRows`, so a harness switch needs no second read (#2692). */
+export function lastTurnReasoningLevel(
+  rows: readonly { type: string; data: string }[],
+): ReasoningLevel | null {
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]!;
+    if (row.type !== "client/turn/requested") continue;
+    const data = JSON.parse(row.data) as {
+      execution?: { reasoningLevel?: unknown };
+    };
+    return (
+      reasoningLevelSchema.safeParse(data.execution?.reasoningLevel).data ??
+      null
+    );
+  }
+  return null;
 }
 
 export function messagesFromRows(rows: readonly { type: string; data: string }[]): ThreadMessage[] {

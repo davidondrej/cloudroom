@@ -32,11 +32,11 @@ export const RECENT_MS = 24 * 60 * 60_000;
 const LOOPS = "automations";
 
 /**
- * The one thread this ping checks, or null when nothing stopped since the Director last looked.
- * A failed thread first, then the most recent stop. Threads waiting on a prompt, a form or their
- * own queue are skipped: the Director can't answer those.
+ * Up to `limit` stopped threads this ping checks, or empty when nothing stopped since the Director
+ * last looked. Failed threads first, then most recent stops. Threads waiting on a prompt, a form
+ * or their own queue are skipped: the Director can't answer those.
  */
-export function pickThread(rows: readonly Row[], { now, seen, projectIds, watchLoops }: PickOptions): Row | null {
+export function pickThreads(rows: readonly Row[], { now, seen, projectIds, watchLoops }: PickOptions, limit = 1): Row[] {
   const open = rows.filter(
     (row) =>
       (row.status === "idle" || row.status === "error") &&
@@ -52,5 +52,7 @@ export function pickThread(rows: readonly Row[], { now, seen, projectIds, watchL
       now - row.latestAttentionAt <= RECENT_MS,
   );
   const failed = (row: Row) => (row.status === "error" ? 1 : 0);
-  return open.sort((a, b) => failed(b) - failed(a) || b.latestAttentionAt - a.latestAttentionAt)[0] ?? null;
+  return open
+    .sort((a, b) => failed(b) - failed(a) || b.latestAttentionAt - a.latestAttentionAt)
+    .slice(0, Math.max(1, limit));
 }

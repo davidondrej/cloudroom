@@ -1997,6 +1997,28 @@ describe("codex error and warning translation", () => {
     expect(final(unauthorized)).toMatchObject({ detail: unauthorized });
   });
 
+  it("gives a parent the routing retry hint with the failed turn (#2771)", () => {
+    const message =
+      "Error running remote compact task: workspace routing discovery timed out";
+    const events = createHarness().translate(
+      codexEvent("turn/completed", {
+        threadId: "t1",
+        turn: codexTurn({
+          id: "turn-1",
+          status: "failed",
+          error: { message, codexErrorInfo: "other", additionalDetails: null },
+        }),
+      }),
+    );
+    const failed = events.at(-1);
+    if (failed?.type !== "turn/completed") throw new Error("no failed turn");
+    expect(failed.error?.message).toContain(message);
+    // A batched parent notice keeps under 300 characters, with its marker.
+    expect(failed.error?.message.slice(0, 250)).toContain(
+      "The chat is kept: send again to retry.",
+    );
+  });
+
   it("says plainly when Codex sends only a bare Bad Request", () => {
     const harness = createHarness();
     const events = harness.translate(

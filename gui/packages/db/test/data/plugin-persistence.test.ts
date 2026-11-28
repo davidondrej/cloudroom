@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   stripGitUrlCredentials,
   stripTextGitUrlCredentials,
@@ -14,7 +14,11 @@ import {
   listPluginArtifactsAtOrUnderPath,
   listPluginArtifactsUnderPath,
   listPluginKvKeys,
+  markInstalledPluginChanged,
+  markInstalledPluginRemoved,
+  setInstalledPluginEnabled,
   setInstalledPluginLastFailure,
+  setInstalledPluginUpdateState,
   setPluginKvValue,
   upsertInstalledPlugin,
   upsertPluginMarketplace,
@@ -276,6 +280,63 @@ describe("normalized plugin persistence", () => {
     expect(getPluginMarketplace(db, "legacy")?.manifestUrl).toBe(
       "https://github.com/acme/repo",
     );
+  });
+
+  it("moves changedAt only for the user's own changes", () => {
+    const plugin: UpsertInstalledPluginInput = {
+      id: "github",
+      source: "builtin:github",
+      provenance: { kind: "builtin" },
+      sourceIntent: { kind: "builtin", name: "github" },
+      exactResolution: { kind: "builtin" },
+      updateState: {
+        lastCheckAt: null,
+        availableCompatibleVersion: null,
+        newestIncompatibleVersion: null,
+        statusDetail: null,
+      },
+      activeArtifactId: null,
+      rootDir: "/plugins/github",
+      version: "1.0.0",
+      enabled: true,
+    };
+    const dates = () => {
+      const row = getInstalledPlugin(db, "github");
+      return { installedAt: row?.installedAt, changedAt: row?.changedAt };
+    };
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      upsertInstalledPlugin(db, plugin);
+      expect(dates()).toEqual({ installedAt: 1_000, changedAt: 1_000 });
+
+      // A Cloudroom release re-registers built-ins, and update checks run on their own.
+      vi.setSystemTime(2_000);
+      upsertInstalledPlugin(db, { ...plugin, version: "1.1.0" });
+      setInstalledPluginUpdateState(db, "github", {
+        lastCheckAt: 2_000,
+        availableCompatibleVersion: "1.2.0",
+        newestIncompatibleVersion: null,
+        statusDetail: null,
+      });
+      expect(dates()).toEqual({ installedAt: 1_000, changedAt: 1_000 });
+
+      vi.setSystemTime(3_000);
+      setInstalledPluginEnabled(db, "github", false);
+      expect(dates().changedAt).toBe(3_000);
+
+      vi.setSystemTime(4_000);
+      markInstalledPluginChanged(db, "github");
+      expect(dates().changedAt).toBe(4_000);
+
+      // Installed again after removal: a new install date.
+      markInstalledPluginRemoved(db, "github");
+      vi.setSystemTime(5_000);
+      upsertInstalledPlugin(db, plugin);
+      expect(dates().installedAt).toBe(5_000);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("retains artifact records when a plugin registration is removed", () => {

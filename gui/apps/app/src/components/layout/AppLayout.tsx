@@ -961,7 +961,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                   <ProviderLoginListener />
                   <main
                     ref={mainRef}
-                    className="relative flex min-h-0 flex-1 flex-col p-4 md:p-5"
+                    className="flex min-h-0 flex-1 flex-col p-4 md:p-5"
                   >
                     {children}
                   </main>

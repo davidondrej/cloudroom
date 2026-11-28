@@ -60,7 +60,12 @@ export class CloudStream {
           if (history && until >= (history.until ?? -1)) this.rt.threadStates.set(threadId, { ...state, history: { ...history, until } });
           const eventTypes = page.records.length ? projectShown(this.rt.host.db, threadId, page.records).types : [];
           if (eventTypes.length) this.rt.notify(threadId, [...new Set(eventTypes)], false);
-          reached = `${session}:${binding(this.rt.host.db, threadId)?.cursor}`;
+          // An archive's catch-up is the child's last read, and no stream follows to act on it: its tells to its parent
+          // go now. The read starts past the saved cursor, so none was sent before.
+          if (again) for (const record of page.records) if (record.kind === "parent_tell" && record.sequence > (state.actFrom ?? Infinity)) this.children.tellParent(threadId, record.data);
+          const nextCursor = binding(this.rt.host.db, threadId)?.cursor;
+          if (nextCursor !== undefined && nextCursor > current.cursor) this.rt.state(threadId).needsStatusSync = true;
+          reached = `${session}:${nextCursor}`;
           if (!page.more || !page.records.length) break;
           page = await this.rt.sandboxes.records(threadId, session, binding(this.rt.host.db, threadId)!.cursor);
         }
@@ -111,19 +116,24 @@ export class CloudStream {
 
   asleep(threadId: string): void {
     const entry = this.rt.state(threadId);
+    const hadIssue = Boolean(entry.connectionIssues?.delivery || entry.connectionIssues?.stream);
     entry.sleptAtCheck = this.rt.sandboxes.awakeChecks;
     this.rt.detach(threadId);
     // An open thread shows its history now, not on the next tick (needsDelivery reads it there too, once).
     const saved = this.rt.host.watching(threadId) ? binding(this.rt.host.db, threadId) : null;
     if (saved && sandboxThread(saved.coreUrl) === threadId) void this.readHistory(threadId);
     const thread = this.rt.host.getThread(threadId), status = thread?.status;
+    let notified = false;
     // A stop held for the next wake (#553, #1699) isn't work: an asleep sandbox runs nothing.
     if (thread && status && status !== "idle" && status !== "error" && !commands(this.rt.host.db, threadId).some((c) => c.state === "sending" && c.command !== "stop" && c.command !== "unarchive_session")) {
       // Last heard from over 6 days ago: the website may have archived the sandbox as an old run, not as a finished one.
       if (Date.now() - thread.updatedAt < 6 * 86_400_000) entry.cutOffTries = 0;
+      entry.needsStatusSync = true;
       saveStatus(this.rt.host.db, threadId, "idle");
       this.rt.notify(threadId);
+      notified = true;
     }
+    if (hadIssue && !notified) this.rt.notify(threadId);
     if (entry.cutOffTries !== undefined) void this.endedElsewhere(threadId);
   }
 
@@ -293,9 +303,11 @@ export class CloudStream {
     }
     this.transfers.resumeCopy(saved.threadId, client);
     this.rt.setConnectionIssue(saved.threadId, "stream");
+    const entry = this.rt.peek(saved.threadId);
     const needsErrorCheck = Boolean(saved.error?.startsWith(connectionOrReplayFailed) && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending"));
-    // A sandbox stream that reconnects mid-turn (`cursor > 0`) while the thread looks `idle` gets no new `state` record until the turn ends.
-    const needsStatusCheck = Boolean(sandboxThread(saved.coreUrl)) && saved.cursor > 0 && this.rt.host.getThread(saved.threadId)?.status === "idle";
+    // Only check Core's live session when local status was forced `idle` past records (asleep/readHistory), not on normal idle wakes.
+    const needsStatusCheck = Boolean(sandboxThread(saved.coreUrl)) && saved.cursor > 0 && this.rt.host.getThread(saved.threadId)?.status === "idle" && Boolean(entry?.needsStatusSync);
+    if (!needsStatusCheck && entry?.needsStatusSync) entry.needsStatusSync = false;
     if (!signal.aborted && !snapshot && (needsErrorCheck || needsStatusCheck)) {
       snapshot = await client.session(saved.sessionId!, signal).catch((error: unknown) => {
         if (needsErrorCheck) throw error;
@@ -303,7 +315,10 @@ export class CloudStream {
       });
     }
     if (signal.aborted || !snapshot) return;
-    this.reconcileStatus(saved.threadId, snapshot);
+    if (needsStatusCheck) {
+      if (entry) entry.needsStatusSync = false;
+      this.reconcileStatus(saved.threadId, snapshot);
+    }
     if (needsErrorCheck && snapshot.last_sequence === saved.cursor && binding(this.rt.host.db, saved.threadId)?.error === saved.error && !commands(this.rt.host.db, saved.threadId).some((item) => item.state === "sending")) {
       saveBinding(this.rt.host.db, saved.threadId, { error: null });
       this.rt.notify(saved.threadId);
@@ -313,24 +328,15 @@ export class CloudStream {
   private reconcileStatus(threadId: string, snapshot: Session): void {
     const thread = this.rt.host.getThread(threadId);
     const current = binding(this.rt.host.db, threadId);
-    if (!thread || !current || current.sessionId !== snapshot.session_id) return;
+    if (!thread || !current || current.sessionId !== snapshot.session_id || thread.status !== "idle") return;
     const liveStatus = statusOf(snapshot.state);
-    if (liveStatus === null) return;
+    if (liveStatus !== "active" && liveStatus !== "starting" && liveStatus !== "stopping") return;
     const waiting = !current.queuePaused && Boolean(unstartedTurn(this.rt.host.db, threadId));
-    if (liveStatus === "active" || liveStatus === "starting" || liveStatus === "stopping") {
-      // A wake restarts an idle thread's agent (`resuming`) with nothing to run: keep it idle, as events.ts does.
-      if (snapshot.state === "resuming" && !waiting && thread.status === "idle") return;
-      const next = waiting ? "active" : liveStatus;
-      if (thread.status !== next) {
-        saveStatus(this.rt.host.db, threadId, next);
-        this.rt.notify(threadId);
-      }
-      return;
-    }
-    if (liveStatus === "idle" && snapshot.last_sequence <= current.cursor && !waiting && !commands(this.rt.host.db, threadId, "sending").length && ["active", "starting", "stopping"].includes(thread.status)) {
-      saveStatus(this.rt.host.db, threadId, "idle");
-      this.rt.notify(threadId);
-    }
+    // A wake restarts an idle thread's agent (`resuming`) with nothing to run: keep it idle, as events.ts does.
+    if (snapshot.state === "resuming" && !waiting) return;
+    const next = waiting && liveStatus !== "stopping" ? "active" : liveStatus;
+    saveStatus(this.rt.host.db, threadId, next);
+    this.rt.notify(threadId);
   }
 
   private async handleStreamRecord(
@@ -364,6 +370,8 @@ export class CloudStream {
     const lists = record.kind === "own_child" ? await this.rt.sandboxes.followsThreads().catch(() => null) : null;
     if (lists) this.rt.sync.changed();
     else if (lists === false) await this.children.adoptChild(saved, record.data).catch((error: unknown) => this.rt.host.warn("A Cloud child thread could not be shown", error, { threadId: saved.threadId }));
+    // Not awaited: the computer that holds the thread answers, and one that doesn't may wait a moment first.
+    if (record.kind === "thread_request" && fresh && acts(record)) void this.children.threadRequest(saved, client, record).catch((error: unknown) => this.rt.host.warn("A thread request failed", error, { threadId: saved.threadId }));
     if (record.kind === "fork_request" && fresh && acts(record) && this.rt.isHome(saved.threadId)) {
       await this.children.agentFork(saved, client, record).catch((error: unknown) => this.rt.host.warn("A Cloud fork request failed", error, { threadId: saved.threadId }));
       if (signal.aborted) return null;
@@ -425,6 +433,7 @@ export class CloudStream {
     if (ended) try { this.rt.host.pruneEvents("idle", saved.threadId); } catch (error) { this.rt.host.warn("A finished Cloud turn's streamed pieces could not be cleared", error, { threadId: saved.threadId }); }
     if (held) void this.children.deliverChildReports();
     else if (owned) this.children.tellLocalParent(saved.threadId, owned, turn, cause);
+    if (record.kind === "parent_tell" && fresh && acts(record)) this.children.tellParent(saved.threadId, record.data);
     const reply = ended ? this.rt.host.getLastOutput(saved.threadId) : null;
     if (reply) void saveCloudImages(this.rt.host.deps, saved.threadId, reply).catch((error: unknown) => this.rt.host.warn("Chat images could not be saved", error, { threadId: saved.threadId }));
     if (mirroredArchive) this.rt.sync.local?.archive(mirroredArchive);

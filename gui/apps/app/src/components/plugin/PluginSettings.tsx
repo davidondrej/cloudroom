@@ -19,13 +19,11 @@ import {
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Textarea } from "@cloudroom/shared-ui/textarea";
-import { Link } from "react-router";
 import { ScopedInstructionRules } from "@/components/settings/ScopedInstructionRules";
 import {
   SettingsSection,
   SettingsWithControl,
 } from "@/components/ui/settings-section.js";
-import { getPluginDetailRoutePath } from "@/lib/route-paths";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { Switch } from "@cloudroom/shared-ui/switch";
 import {
@@ -598,18 +596,13 @@ function PluginSettingsPageSkeleton() {
   );
 }
 
+/** Loads a plugin by id and shows its settings, with a skeleton while the list loads. */
 export function PluginSettingsPage({
   children,
   pluginId,
-  headerActions,
-  detailSections,
 }: {
   children?: ReactNode;
   pluginId: string;
-  /** Drawn next to the on/off switch. */
-  headerActions?: ReactNode;
-  /** Release, capabilities and the rest. When given, they replace the link to the plugin page. */
-  detailSections?: ReactNode;
 }) {
   const listQuery = usePluginList({ enabled: true });
   const plugin =
@@ -637,18 +630,14 @@ export function PluginSettingsPage({
     );
   }
   return (
-    <PluginSettingsContent
-      key={plugin.id}
-      plugin={plugin}
-      headerActions={headerActions}
-      detailSections={detailSections}
-    >
+    <PluginSettingsContent key={plugin.id} plugin={plugin}>
       {children}
     </PluginSettingsContent>
   );
 }
 
-function PluginSettingsContent({
+/** An installed plugin's page: header and switch, its settings, then `detailSections`. */
+export function PluginSettingsContent({
   children,
   plugin,
   headerActions,
@@ -656,7 +645,9 @@ function PluginSettingsContent({
 }: {
   children?: ReactNode;
   plugin: PluginListItem;
+  /** Drawn next to the on/off switch. */
   headerActions?: ReactNode;
+  /** Release, capabilities and the rest, drawn under the settings. */
   detailSections?: ReactNode;
 }) {
   const queryClient = useQueryClient();
@@ -682,8 +673,8 @@ function PluginSettingsContent({
   const hasAvailableSettings =
     plugin.hasSettings ||
     settingsSections.some((section) => section.pluginId === plugin.id);
+  // The Accounts page is one list with no header or details (ADR 20261110-120732).
   if (
-    detailSections === undefined &&
     plugin.id === ACCOUNTS_PLUGIN_ID &&
     plugin.enabled &&
     PLUGIN_STATUSES_WITH_SETTINGS.includes(plugin.status)
@@ -702,6 +693,7 @@ function PluginSettingsContent({
             <PluginIcon
               pluginId={plugin.id}
               icon={plugin.icon}
+              compactIconUrl={plugin.compactIconUrl}
               className="size-full"
             />
           </div>
@@ -710,7 +702,7 @@ function PluginSettingsContent({
               {plugin.name ?? plugin.id}
             </h1>
             {plugin.description ? (
-              <p className="truncate text-xs text-subtle-foreground">
+              <p className="text-xs text-subtle-foreground">
                 {plugin.description}
               </p>
             ) : null}
@@ -754,27 +746,7 @@ function PluginSettingsContent({
           </ResourceDetailConfigurationSection>
         ) : null}
         {enabled && plugin.enabled ? children : null}
-        {detailSections ?? (
-          <ResourceDetailOverviewSection label="Plugin details">
-            <p className="max-w-none text-sm leading-relaxed text-muted-foreground">
-              Release, capabilities, and health live on{" "}
-              <Link
-                to={getPluginDetailRoutePath({
-                  pluginId: plugin.id,
-                  view: "installed",
-                })}
-                className="inline-flex items-center gap-0.5 rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                its plugin page
-                <Icon
-                  name="ChevronRight"
-                  className="size-3.5 no-underline"
-                  aria-hidden
-                />
-              </Link>
-            </p>
-          </ResourceDetailOverviewSection>
-        )}
+        {detailSections}
       </ResourceDetailStack>
     </div>
   );

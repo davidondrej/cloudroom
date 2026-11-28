@@ -133,11 +133,9 @@ function renderPlugin(
     <MemoryRouter>
       <QueryClientWrapper>
         <PluginDetail
-          isLoading={false}
           plugin={plugin}
           pending={false}
           openSourceDisabled
-          onToggle={() => {}}
           onEdit={() => {}}
           onOpenSource={() => {}}
           onDelete={() => {}}
@@ -153,10 +151,7 @@ describe("Plugin detail recipe", () => {
   it("omits Capabilities when the plugin has no capability rows", () => {
     const { container } = renderPlugin(PLUGIN);
 
-    expect(renderedRecipe(container)).toEqual([
-      ["overview", ""],
-      ["release", "Release"],
-    ]);
+    expect(renderedRecipe(container)).toEqual([["release", "Release"]]);
   });
 
   it("names each activity section after its own object, with no Health wrapper", () => {
@@ -176,7 +171,6 @@ describe("Plugin detail recipe", () => {
     });
 
     expect(renderedRecipe(container)).toEqual([
-      ["overview", ""],
       ["release", "Release"],
       ["activity", "Background services"],
       ["activity", "Scheduled jobs"],
@@ -190,21 +184,9 @@ describe("Plugin detail recipe", () => {
     });
 
     expect(renderedRecipe(container)).toEqual([
-      ["overview", ""],
       ["release", "Release"],
       ["activity", "Background services"],
     ]);
-  });
-
-  it("keeps the description present when a plugin declares no description", () => {
-    const { container } = renderPlugin({ ...PLUGIN, description: null });
-
-    expect(renderedRecipe(container).map(([kind]) => kind)).toContain(
-      "overview",
-    );
-    expect(
-      screen.getByText("This plugin does not describe itself."),
-    ).toBeTruthy();
   });
 
   it("lists declared capabilities without category chrome", () => {
@@ -411,7 +393,6 @@ describe("Plugin detail recipe", () => {
     );
 
     const destinations = [
-      ["Settings", "/settings/plugins/github"],
       ["Issues", "/plugins/github/issues"],
       ["GitHub dashboard", "/#plugin-homepage:github:dashboard"],
       ["GitHub threads", "/settings/appearance"],
@@ -428,7 +409,8 @@ describe("Plugin detail recipe", () => {
       "configuration",
       "Configuration",
     ]);
-    expect(screen.getAllByRole("link", { name: "Settings" })).toHaveLength(1);
+    // The page is the plugin's settings, so it never links to itself.
+    expect(screen.queryByRole("link", { name: "Settings" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Inspect issue" })).toBeNull();
     expect(screen.queryByRole("link", { name: "Sync status" })).toBeNull();
     expect(listSkills).not.toHaveBeenCalled();

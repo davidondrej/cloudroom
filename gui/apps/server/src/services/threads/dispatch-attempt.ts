@@ -406,7 +406,6 @@ async function runDispatchAttempt(
     payload,
     args.executionDefaults ?? { threadId: thread.id },
   );
-  const resolvedPayload = resolveExecutionIntoPayload(payload, execution);
   const queuedMessage: QueuedDispatchMessage = {
     input: payload.input,
     execution,
@@ -670,7 +669,8 @@ async function runDispatchAttempt(
     if (firstDispatch) {
       admitted.value = await admitPendingThread(deps, {
         claimed,
-        payload: resolvedPayload,
+        execution,
+        payload,
         isRetry: args.retryOf !== undefined,
         respectManualStopPause,
         beforeDispatch: args.beforeDispatch,
@@ -790,7 +790,8 @@ async function runDispatchAttempt(
   try {
     await sendThreadMessage(deps, {
       environment,
-      payload: resolvedPayload,
+      payload,
+      resolvedExecution: execution,
       thread,
       trigger: args.trigger,
       onStartSettled: (error) => {
@@ -904,6 +905,7 @@ function consumeClaimedRow(
 
 interface AdmitPendingThreadArgs {
   claimed: ClaimedQueuedThreadMessageRow | null;
+  execution: ResolvedThreadExecutionOptions;
   isRetry: boolean;
   payload: SendMessageRequest & { inputGroups?: PromptInput[][] };
   respectManualStopPause: boolean;
@@ -961,9 +963,7 @@ async function admitPendingThread(
       `Thread ${args.thread.id} is pending but has no start context to dispatch`,
     );
   }
-  const execution = await buildExecutionOptions(deps, args.payload, {
-    threadId: args.thread.id,
-  });
+  const { execution } = args;
   let startingThread: Thread;
   let cancelledRetries: QueuedThreadMessageRow[];
   const notifications = new NotificationBuffer();
@@ -1082,30 +1082,4 @@ async function launchAdmittedThread(
     settleQueueRowDispatched({ row: claimedRow });
   }
   scheduleThreadProvisioningAdvance(deps, startingThread.id);
-}
-
-/**
- * Writes the resolved execution tuple back onto the request the executor will
- * run, as EXPLICIT fields rather than leaving it to be re-derived, so the
- * executor's own `buildExecutionOptions` is idempotent — the same trick the
- * queue drain has always used to replay a frozen tuple.
- */
-function resolveExecutionIntoPayload(
-  payload: SendMessageRequest & { inputGroups?: PromptInput[][] },
-  execution: ResolvedThreadExecutionOptions,
-): SendMessageRequest & { inputGroups?: PromptInput[][] } {
-  return {
-    ...payload,
-    model: execution.model,
-    reasoningLevel: execution.reasoningLevel,
-    serviceTier: execution.serviceTier,
-    permissionMode: execution.permissionMode,
-    executionInputSources: {
-      ...(payload.executionInputSources ?? {}),
-      model: "explicit",
-      reasoningLevel: "explicit",
-      serviceTier: "explicit",
-      permissionMode: "explicit",
-    },
-  };
 }

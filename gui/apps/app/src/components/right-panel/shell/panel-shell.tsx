@@ -30,7 +30,6 @@ import {
   useDiffFilesCollapseControls,
   type GitDiffTabStatus,
 } from "@/components/diff/diff-store";
-import { usePluginDetailPanelProps } from "@/components/plugin/plugin-detail-navigation";
 import { SIDEBAR_FIXED_INFO_TAB_ID } from "@/components/right-panel/store/split-state";
 import { threadSecondaryPanelResizingAtom } from "@/components/right-panel/store/panel-prefs";
 import type {
@@ -38,7 +37,6 @@ import type {
   SecondaryFixedPanelTab,
 } from "@/components/right-panel/store/tab-model";
 import type {
-  MarketplacePluginDetailPanelTab,
   SecondaryPanelPaneRenderContext,
   SecondaryPanelRenderableTab,
   SecondaryPanelTabReorderHandler,
@@ -119,7 +117,7 @@ export function resolveCollapsedPanelTrafficLightReserveClassName({
 }
 
 export interface ThreadSecondaryPanelProps {
-  activeTab: SecondaryFixedPanelTab | MarketplacePluginDetailPanelTab | null;
+  activeTab: SecondaryFixedPanelTab | null;
   canUseGitUi: boolean;
   gitDiffTabStatus?: GitDiffTabStatus;
   onRetryGitDiffEligibility?: () => void;
@@ -155,12 +153,7 @@ export interface ThreadSecondaryPanelProps {
   renderAsDrawer: boolean;
 }
 
-export function ThreadSecondaryPanel(props: ThreadSecondaryPanelProps) {
-  const merged = usePluginDetailPanelProps(props);
-  return <RightPanelInner {...merged} />;
-}
-
-function RightPanelInner(p: ThreadSecondaryPanelProps) {
+export function ThreadSecondaryPanel(p: ThreadSecondaryPanelProps) {
   const {
     activeTab,
     canUseGitUi,

@@ -69,6 +69,7 @@ import {
   extractClaudeResultTokenUsage,
   extractStreamTextDelta,
   extractStreamThinkingDelta,
+  extractStreamThinkingStart,
   extractThinkingBlocks,
   extractToolResults,
   extractToolUses,
@@ -393,6 +394,7 @@ interface ClaudeThreadDialectState {
   /** This turn showed reply text, so a hook stop after it is not a silent turn (#1036). */
   turnReplied: boolean;
   openCompaction: { segment: number } | undefined;
+  openThinkingChannels: Set<string>;
   startedTools: Map<string, ClaudeClassifiedTool>;
   tasksById: ClaudeTaskMap;
   taskPlan: ClaudeTaskPlanState;
@@ -411,6 +413,7 @@ function createThreadState(): ClaudeThreadDialectState {
     suppressUnacceptedTurnStart: false,
     turnReplied: false,
     openCompaction: undefined,
+    openThinkingChannels: new Set(),
     startedTools: new Map(),
     tasksById: new Map(),
     taskPlan: new Map(),
@@ -457,6 +460,7 @@ export function createClaudeDeltaTranslator(
     state.latestRequestContextTokens = undefined;
     state.latestProviderCheckpointId = undefined;
     state.armedHardRateLimitRejection = undefined;
+    state.openThinkingChannels.clear();
     state.startedTools.clear();
   }
 
@@ -464,6 +468,7 @@ export function createClaudeDeltaTranslator(
     state.mirror.turnOpen = false;
     state.armedHardRateLimitRejection = undefined;
     state.assistantError = undefined;
+    state.openThinkingChannels.clear();
     state.startedTools.clear();
   }
 
@@ -854,15 +859,41 @@ export function createClaudeDeltaTranslator(
       }
     }
 
+    const scopePrefix = `${parentToolCallId ?? ""}\0`;
+    const closedThinkingChannels = new Set<string>();
     for (const thinkingBlock of extractThinkingBlocks(message)) {
+      const channel = thinkingStreamChannel(thinkingBlock.contentIndex);
+      const key = `${scopePrefix}${channel}`;
+      closedThinkingChannels.add(key);
+      state.openThinkingChannels.delete(key);
       deltas.push({
         kind: "item.textClose",
         key: {
-          channel: thinkingStreamChannel(thinkingBlock.contentIndex),
+          channel,
           ...parentRefField,
         },
         channel: "reasoningText",
         text: thinkingBlock.text,
+      });
+    }
+    // Close any thinking block opened on content_block_start whose summary stayed empty/redacted.
+    for (const openKey of [...state.openThinkingChannels]) {
+      if (
+        !openKey.startsWith(scopePrefix) ||
+        closedThinkingChannels.has(openKey)
+      ) {
+        continue;
+      }
+      state.openThinkingChannels.delete(openKey);
+      const channel = openKey.slice(scopePrefix.length);
+      deltas.push({
+        kind: "item.close",
+        key: {
+          channel,
+          ...parentRefField,
+        },
+        status: "completed",
+        item: { type: "reasoning", summary: [], content: [] },
       });
     }
 
@@ -926,9 +957,30 @@ export function createClaudeDeltaTranslator(
       : {};
     const deltas: ThreadDelta[] = [];
 
+    const reasoningStart = extractStreamThinkingStart(message);
+    let openedThinkingKey: string | undefined;
+    if (reasoningStart) {
+      const channel = thinkingStreamChannel(reasoningStart.contentIndex);
+      const key = `${parentToolCallId ?? ""}\0${channel}`;
+      if (!state.openThinkingChannels.has(key)) {
+        openedThinkingKey = key;
+        deltas.push({ kind: "turn.open" });
+        deltas.push({
+          kind: "item.open",
+          key: {
+            channel,
+            ...parentRefField,
+          },
+          item: { type: "reasoning", summary: [], content: [] },
+        });
+      }
+    }
+
     const reasoningDelta = extractStreamThinkingDelta(message);
     if (reasoningDelta) {
-      deltas.push({ kind: "turn.open" });
+      if (!openedThinkingKey) {
+        deltas.push({ kind: "turn.open" });
+      }
       deltas.push({
         kind: "item.textDelta",
         key: {
@@ -951,7 +1003,12 @@ export function createClaudeDeltaTranslator(
       });
     }
 
-    return withMirror(state, deltas);
+    const translated = withMirror(state, deltas);
+    // Record after withMirror: mirrorOpenTurn clears openThinkingChannels on turn.open.
+    if (openedThinkingKey !== undefined) {
+      state.openThinkingChannels.add(openedThinkingKey);
+    }
+    return translated;
   }
 
   function translateUserMessage(

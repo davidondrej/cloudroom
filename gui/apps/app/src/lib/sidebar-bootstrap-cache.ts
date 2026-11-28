@@ -38,6 +38,9 @@ function boundSidebarBootstrapForCache(
     sections: response.sections,
     projects: response.projects.map(boundProject),
     personalProject: boundProject(response.personalProject),
+    ...(response.mentionableHiddenThreads !== undefined
+      ? { mentionableHiddenThreads: response.mentionableHiddenThreads }
+      : {}),
   };
 }
 

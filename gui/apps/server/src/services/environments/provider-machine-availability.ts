@@ -141,7 +141,9 @@ async function probeMachineAvailability(
       hostId: host.id,
       path: projectCheckout.path,
     });
-    if (checkout.status !== "available") return checkout;
+    if (checkout.status !== "available") {
+      return { status: checkout.status, message: checkout.message };
+    }
   }
   const resolution = await resolvePluginEnvironmentProviderAvailability(
     record,

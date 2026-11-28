@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { threadTimelineQueryKeyPrefix } from "../queries/query-keys";
 
-export const RECENT_THREAD_CACHE_LIMIT = 100;
+export const RECENT_THREAD_CACHE_LIMIT = 40;
 export const RECENT_THREAD_GC_TIME = Infinity;
 
 const recentThreadIdsByClient = new WeakMap<QueryClient, string[]>();

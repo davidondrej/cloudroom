@@ -252,6 +252,39 @@ describe("useThreadReadTracking", () => {
     expect(markThreadRead.mutateAsync).toHaveBeenCalledTimes(2);
   });
 
+  it("marks a manually unread kept-alive thread read when active toggles false then true", () => {
+    const markThreadRead = makeMarkThreadRead();
+    type ActiveThreadProps = {
+      active: boolean;
+      lastReadAt: number | null;
+    };
+    const initialProps: ActiveThreadProps = { active: true, lastReadAt: 20 };
+    const { rerender } = renderHook(
+      ({ active, lastReadAt }: ActiveThreadProps) =>
+        useThreadReadTracking({
+          active,
+          markThreadRead,
+          thread: {
+            id: "thr_kept",
+            lastReadAt,
+            latestAttentionAt: 20,
+          },
+        }),
+      { initialProps },
+    );
+
+    rerender({ active: true, lastReadAt: null });
+    expect(markThreadRead.mutateAsync).not.toHaveBeenCalled();
+
+    rerender({ active: false, lastReadAt: null });
+    rerender({ active: true, lastReadAt: null });
+
+    expect(markThreadRead.mutateAsync).toHaveBeenCalledTimes(1);
+    expect(markThreadRead.mutateAsync).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: "thr_kept" }),
+    );
+  });
+
   it("cancels a pending read when switching threads and retries when reopened", async () => {
     const markThreadRead = makeMarkThreadRead();
     type ThreadProps = { thread: TestThread };

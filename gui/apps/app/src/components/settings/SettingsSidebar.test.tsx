@@ -124,11 +124,6 @@ describe("SettingsSidebarContent navigation", () => {
     expect(currentRow()).toEqual(["Updates"]);
   });
 
-  it("files plugins without a group under Plugins", () => {
-    renderSidebar({ activeSection: null, activePluginId: "linear" });
-    expect(currentRow()).toEqual(["Plugins"]);
-  });
-
   it("links a row to its first available page", () => {
     renderSidebar({
       pluginEntries: pluginEntries.filter(

@@ -421,11 +421,11 @@ describe("host.inspect_git_source dispatch", () => {
     });
   });
 
-  it("reports missing paths", async () => {
+  it("reports missing paths and unreadable git repos distinctly from plain directories", async () => {
     const parentPath = await makeTempDir("bb-host-branches-missing-parent-");
     const harness = createHarness();
 
-    const result = await dispatchOnlineRpcCommand(
+    const missing = await dispatchOnlineRpcCommand(
       {
         type: "host.inspect_git_source",
         path: path.join(parentPath, "missing"),
@@ -433,15 +433,29 @@ describe("host.inspect_git_source dispatch", () => {
       },
       harness.dispatchOptions(),
     );
-
-    expect(result).toEqual({
-      checkout: { kind: "unknown", reason: "Path is not a git repository" },
+    expect(missing).toEqual({
+      checkout: { kind: "unknown", reason: "Path does not exist" },
       defaultBranch: null,
       defaultBranchRelation: null,
       isWorktree: false,
       hasUncommittedChanges: false,
       operation: { kind: "none" },
       originDefaultBranch: null,
+    });
+
+    const brokenRepo = await makeTempDir("bb-host-branches-broken-git-");
+    await fs.mkdir(path.join(brokenRepo, ".git"));
+    const broken = await dispatchOnlineRpcCommand(
+      {
+        type: "host.inspect_git_source",
+        path: brokenRepo,
+        remoteRefresh: "blocking",
+      },
+      harness.dispatchOptions(),
+    );
+    expect(broken.checkout).toEqual({
+      kind: "unknown",
+      reason: "Git repository is unreadable or invalid",
     });
   });
 });

@@ -17,7 +17,7 @@ import {
   BbRequestTimeoutError,
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
 } from "@cloudroom/sdk/node";
-import { action } from "../../action.js";
+import { action, CliExitError } from "../../action.js";
 import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import {
   resolveExplicitIdFlag,
@@ -50,6 +50,9 @@ import { SEND_AT_HELP, parseSendAt } from "./send-time.js";
 const SPAWN_ATTEMPTS = 3;
 // Short: the read only spares a retry, which still follows when it fails.
 const SPAWN_READBACK_TIMEOUT_MS = 10_000;
+// A thread still `pending` is read again, never spawned again, about as long as two retries waited behind Connect (#2446).
+const SPAWN_PENDING_WAIT_MS = 60_000;
+const SPAWN_PENDING_READ_EVERY_MS = 3_000;
 
 const PROVIDER_HELP =
   "Provider ID for the thread, such as claude-code or codex. Required with --machine cloud; otherwise omit to use the project's remembered provider choice";
@@ -659,10 +662,24 @@ export function registerSpawnCommand(
                 : getErrorMessage(error);
               // A slow first start can outlast the answer while the thread already exists: read it before any retry (#2446).
               // Only a request ID made here: a reused --request-id may name an older thread, which the server's 409 must judge.
+              const id = requestThreadId(projectId, requestId);
               const made =
                 unknown && !cloudTarget && opts.requestId === undefined
-                  ? await findSpawnedThread(sdk, projectId, requestId)
+                  ? await findSpawnedThread(sdk, projectId, id, () =>
+                      console.error(
+                        `Cloudroom at ${getUrl()} has not confirmed the spawn (${reason}); its thread ${id} is still pending, so it is read until it starts, not spawned again. If this command stops, check it with: room-cli thread show ${id}`,
+                      ),
+                    )
                   : null;
+              if (made === "gone")
+                throw new Error(
+                  `Cloudroom at ${getUrl()} did not answer the spawn in time (${reason}), then removed thread ${id} before it started: a check refused it or its start stopped. It was not spawned again; re-run with --request-id ${requestId} to try again and see why, which can't make a duplicate.`,
+                );
+              if (made === "pending")
+                throw new CliExitError(
+                  `Cloudroom at ${getUrl()} did not answer the spawn in time (${reason}), and thread ${id} is still pending ${SPAWN_PENDING_WAIT_MS / 1000} seconds later, so it was not spawned again. Check its start with: room-cli thread show ${id}. If it never starts, re-run with --request-id ${requestId}: that gets this thread, never a duplicate.`,
+                  1,
+                );
               if (made) {
                 console.error(
                   `Cloudroom at ${getUrl()} did not answer the spawn in time (${reason}), but thread ${made.id} exists (${made.status}), so it was not spawned again. Check its start with: room-cli thread show ${made.id}`,
@@ -696,6 +713,8 @@ export function registerSpawnCommand(
               .catch(() => undefined);
           }
         } catch (err: unknown) {
+          // A thread still starting was not a failed create (#2446).
+          if (err instanceof CliExitError) throw err;
           throw prependErrorContext("Failed to create thread", err);
         }
 
@@ -730,25 +749,50 @@ export function registerSpawnCommand(
     );
 }
 
-/** The thread a Local spawn's request ID names, once its first message cleared dispatch; null if not (yet) or unknown.
- *  A `pending` row can still be refused and deleted, or be left by a create that stopped: the retry settles those. */
+/** The thread a Local spawn's request ID names, once its first message cleared dispatch or queued; null if there is
+ *  none (yet) or it can't be read, which the retry settles. A `pending` one is still being created (slow plugin hooks or
+ *  admission) or its create stopped: it is only read again, until it moves on, is removed ("gone": refused or stopped),
+ *  or SPAWN_PENDING_WAIT_MS ends with it still "pending" (#2446). */
 async function findSpawnedThread(
   sdk: ReturnType<typeof createCliRoomSdk>,
   projectId: string,
-  requestId: string,
-): Promise<Thread | null> {
-  try {
-    const thread = await sdk.threads.get({
-      threadId: requestThreadId(projectId, requestId),
-      signal: AbortSignal.timeout(SPAWN_READBACK_TIMEOUT_MS),
-    });
-    return thread.projectId === projectId &&
-      thread.deletedAt === null &&
-      thread.status !== "pending"
-      ? thread
-      : null;
-  } catch {
-    return null;
+  threadId: string,
+  onPending: () => void,
+): Promise<Thread | "gone" | "pending" | null> {
+  let deadline: number | null = null;
+  for (;;) {
+    let thread: Awaited<ReturnType<typeof sdk.threads.get>> | "missing" | null;
+    try {
+      thread = await sdk.threads.get({
+        threadId,
+        signal: AbortSignal.timeout(SPAWN_READBACK_TIMEOUT_MS),
+      });
+    } catch (error) {
+      thread =
+        error instanceof BbHttpError && error.code === "thread_not_found"
+          ? "missing"
+          : null;
+    }
+    if (
+      thread === "missing" ||
+      (thread !== null &&
+        (thread.projectId !== projectId || thread.deletedAt !== null))
+    )
+      return deadline === null ? null : "gone";
+    if (
+      thread !== null &&
+      (thread.status !== "pending" || thread.queuedMessageCount > 0)
+    )
+      return thread;
+    if (deadline === null) {
+      if (thread === null) return null;
+      onPending();
+      deadline = Date.now() + SPAWN_PENDING_WAIT_MS;
+    }
+    if (Date.now() + SPAWN_PENDING_READ_EVERY_MS > deadline) return "pending";
+    await new Promise((resolve) =>
+      setTimeout(resolve, SPAWN_PENDING_READ_EVERY_MS),
+    );
   }
 }
 

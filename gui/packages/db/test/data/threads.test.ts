@@ -433,7 +433,7 @@ describe("threads", () => {
     ).toEqual([first.id, otherProjectThread.id, third.id, second.id]);
   });
 
-  it("rejects pinned reorder for unpinned threads, stale neighbors, and hidden child pins", () => {
+  it("rejects pinned reorder for unpinned threads, stale neighbors, and grouped child pins", () => {
     const { db, project } = setup();
     const pinned = createThread(db, noopNotifier, {
       projectId: project.id,
@@ -455,6 +455,12 @@ describe("threads", () => {
     pinThread(db, noopNotifier, { threadId: pinned.id });
     pinThread(db, noopNotifier, { threadId: pinnedParent.id });
     pinThread(db, noopNotifier, { threadId: pinnedChild.id });
+    const pinnedGrandchild = createThread(db, noopNotifier, {
+      parentThreadId: pinnedChild.id,
+      projectId: project.id,
+      providerId: "codex",
+    });
+    pinThread(db, noopNotifier, { threadId: pinnedGrandchild.id });
 
     expect(
       reorderPinnedThread({
@@ -481,13 +487,51 @@ describe("threads", () => {
         threadId: pinned.id,
         previousThreadId: pinnedChild.id,
         nextThreadId: null,
-      }).kind,
-    ).toBe("stale_neighbor");
+      }),
+    ).toEqual({
+      kind: "grouped_pin",
+      threadId: pinnedChild.id,
+      parentThreadId: pinnedParent.id,
+      rootThreadId: pinnedParent.id,
+    });
     expect(
       reorderPinnedThread({
         db,
         notifier: noopNotifier,
         threadId: pinnedChild.id,
+        previousThreadId: null,
+        nextThreadId: pinned.id,
+      }),
+    ).toEqual({
+      kind: "grouped_pin",
+      threadId: pinnedChild.id,
+      parentThreadId: pinnedParent.id,
+      rootThreadId: pinnedParent.id,
+    });
+    expect(
+      reorderPinnedThread({
+        db,
+        notifier: noopNotifier,
+        threadId: pinnedGrandchild.id,
+        previousThreadId: null,
+        nextThreadId: pinned.id,
+      }),
+    ).toEqual({
+      kind: "grouped_pin",
+      threadId: pinnedGrandchild.id,
+      parentThreadId: pinnedChild.id,
+      rootThreadId: pinnedParent.id,
+    });
+    // A parent loop has no top-level pin to name, so it stays a generic conflict.
+    db.update(threads)
+      .set({ parentThreadId: pinnedGrandchild.id })
+      .where(eq(threads.id, pinnedParent.id))
+      .run();
+    expect(
+      reorderPinnedThread({
+        db,
+        notifier: noopNotifier,
+        threadId: pinnedGrandchild.id,
         previousThreadId: null,
         nextThreadId: pinned.id,
       }).kind,

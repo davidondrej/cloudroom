@@ -106,14 +106,12 @@ function renderBrowse({
   data,
   plugins = [],
   initialEntry = "/plugins",
-  selectedPluginId = null,
   onInstall = vi.fn(),
   onOpenPlugin = vi.fn(),
 }: {
   data: PluginCatalogSearchData;
   plugins?: InstalledPlugin[];
   initialEntry?: string;
-  selectedPluginId?: string | null;
   onInstall?: Mock<(initial: AddPluginInitial) => void>;
   onOpenPlugin?: Mock<(pluginId: string, trigger: HTMLButtonElement) => void>;
 }) {
@@ -123,7 +121,6 @@ function renderBrowse({
     <MemoryRouter initialEntries={[initialEntry]}>
       <BrowsePluginsTab
         actions={null}
-        selectedPluginId={selectedPluginId}
         onInstall={onInstall}
         onOpenPlugin={onOpenPlugin}
       />
@@ -247,7 +244,6 @@ describe("BrowsePluginsTab", () => {
       <MemoryRouter>
         <BrowsePluginsTab
           actions={null}
-          selectedPluginId={null}
           onInstall={() => undefined}
           onOpenPlugin={() => undefined}
         />
@@ -266,7 +262,6 @@ describe("BrowsePluginsTab", () => {
   it("installs from the row and opens details from anywhere on it", async () => {
     const { onInstall, onOpenPlugin } = renderBrowse({
       data: { entries: [MEMORY_ENTRY], collections: [] },
-      selectedPluginId: "memory",
     });
 
     fireEvent.click(
@@ -286,8 +281,7 @@ describe("BrowsePluginsTab", () => {
     expect(onOpenPlugin).not.toHaveBeenCalled();
 
     const open = screen.getByRole("button", { name: "Open Memory details" });
-    expect(open.getAttribute("aria-current")).toBe("true");
     fireEvent.click(screen.getByText("Durable memory for agents."));
-    expect(onOpenPlugin).toHaveBeenCalledWith("memory", open);
+    expect(onOpenPlugin).toHaveBeenCalledWith("memory", open, "bb-official");
   });
 });

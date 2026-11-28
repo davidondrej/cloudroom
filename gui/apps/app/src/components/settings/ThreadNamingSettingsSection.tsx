@@ -480,7 +480,7 @@ export function ThreadPurposeSettingsSection() {
       <div className="space-y-4">
         <SettingsWithControl
           label="Thread purpose"
-          description="Uses a small model call after each reply."
+          description="When a thread starts and after each reply, sends its title, first and latest messages (including ones from other agents), the previous note, the agent's recent replies, and its Git status to your Claude Code or Codex login for a small model call. A harness or model picked below gets them instead."
         >
           <Switch
             aria-label="Thread purpose"

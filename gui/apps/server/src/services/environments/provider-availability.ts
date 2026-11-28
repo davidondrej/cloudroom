@@ -1,5 +1,11 @@
-import { getProjectSourceByHost } from "@cloudroom/db";
-import { isLocalPathProjectSource, PERSONAL_PROJECT_ID } from "@cloudroom/domain";
+import { getProjectSourceByHost, type DbConnection } from "@cloudroom/db";
+import {
+  isLocalPathProjectSource,
+  PERSONAL_PROJECT_ID,
+  PLAIN_NON_GIT_DIRECTORY_REASON,
+  type GitSourceInspection,
+  type ProjectSource,
+} from "@cloudroom/domain";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import type { WorkSessionDeps } from "../../types.js";
 import { callHostRetryableOnlineRpc } from "../hosts/online-rpc.js";
@@ -25,9 +31,18 @@ import type {
 import { resolveDefaultWorktreeBaseBranch } from "../projects/worktree-base-branch.js";
 import { decideWithinBox } from "../threads/dispatch-hooks.js";
 
-type GitCheckoutAvailability =
+export type GitCheckoutUnavailableReason =
+  | "unborn"
+  | "non_git_directory"
+  | "invalid";
+
+export type GitCheckoutAvailability =
   | { status: "available" }
-  | { status: "unavailable"; message: string };
+  | {
+      status: "unavailable";
+      reason: GitCheckoutUnavailableReason;
+      message: string;
+    };
 export type EnvironmentProviderAvailabilityResolution =
   | { ok: true; availability: PluginEnvironmentProviderAvailability }
   | { ok: false; message: string };
@@ -98,34 +113,122 @@ export async function resolvePluginEnvironmentProviderAvailability(
   return parseProviderAvailabilityInvocation(record.pluginId, invocation);
 }
 
+export interface CheckoutInspectionCache {
+  gitCheckoutAvailability: Map<string, Promise<GitCheckoutAvailability>>;
+  projectSources: Map<string, ProjectSource | null>;
+}
+
+export function createCheckoutInspectionCache(): CheckoutInspectionCache {
+  return {
+    gitCheckoutAvailability: new Map(),
+    projectSources: new Map(),
+  };
+}
+
+export function getCachedProjectSourceByHost(
+  db: DbConnection,
+  args: {
+    cache?: CheckoutInspectionCache;
+    hostId: string;
+    projectId: string;
+  },
+): ProjectSource | null {
+  if (args.cache === undefined) {
+    return getProjectSourceByHost(db, args.projectId, args.hostId);
+  }
+  const key = JSON.stringify([args.projectId, args.hostId]);
+  if (args.cache.projectSources.has(key)) {
+    return args.cache.projectSources.get(key) ?? null;
+  }
+  const source = getProjectSourceByHost(db, args.projectId, args.hostId);
+  args.cache.projectSources.set(key, source);
+  return source;
+}
+
+export function gitCheckoutAvailabilityKey(
+  hostId: string,
+  path: string,
+): string {
+  return JSON.stringify([hostId, path]);
+}
+
+interface InspectedGitCheckoutAvailability {
+  availability: GitCheckoutAvailability;
+  cacheable: boolean;
+}
+
 const pendingGitInspections = new WeakMap<
   object,
-  Map<string, Promise<GitCheckoutAvailability>>
+  Map<string, Promise<InspectedGitCheckoutAvailability>>
 >();
 
 export function resolveGitCheckoutAvailability(
   deps: WorkSessionDeps,
-  args: { hostId: string; path: string },
+  args: {
+    cache?: CheckoutInspectionCache;
+    hostId: string;
+    path: string;
+  },
 ): Promise<GitCheckoutAvailability> {
+  const key = gitCheckoutAvailabilityKey(args.hostId, args.path);
+  const cached = args.cache?.gitCheckoutAvailability.get(key);
+  if (cached !== undefined) return cached;
   let pending = pendingGitInspections.get(deps.db);
   if (pending === undefined) {
     pending = new Map();
     pendingGitInspections.set(deps.db, pending);
   }
-  const key = JSON.stringify([args.hostId, args.path]);
-  const existing = pending.get(key);
-  if (existing !== undefined) return existing;
-  const result = inspectGitCheckoutAvailability(deps, args).finally(() =>
-    pending.delete(key),
-  );
-  pending.set(key, result);
-  return result;
+  let inFlight = pending.get(key);
+  if (inFlight === undefined) {
+    inFlight = inspectGitCheckoutAvailability(deps, args).finally(() =>
+      pending.delete(key),
+    );
+    pending.set(key, inFlight);
+  }
+  const cache = args.cache;
+  return inFlight.then((inspected) => {
+    if (cache !== undefined && inspected.cacheable) {
+      cache.gitCheckoutAvailability.set(
+        key,
+        Promise.resolve(inspected.availability),
+      );
+    }
+    return inspected.availability;
+  });
+}
+
+export function classifyGitCheckoutAvailability(
+  path: string,
+  inspection: GitSourceInspection,
+): GitCheckoutAvailability {
+  const { checkout } = inspection;
+  if (
+    (checkout.kind === "unknown" || checkout.kind === "unborn") &&
+    resolveDefaultWorktreeBaseBranch(inspection) === null
+  ) {
+    if (checkout.kind === "unborn") {
+      return {
+        status: "unavailable",
+        reason: "unborn",
+        message: `The project folder ${path} has no commits to branch from. Make a first commit, or run it as a Cloud thread.`,
+      };
+    }
+    return {
+      status: "unavailable",
+      reason:
+        checkout.reason === PLAIN_NON_GIT_DIRECTORY_REASON
+          ? "non_git_directory"
+          : "invalid",
+      message: `The project folder ${path} is missing or git can't read it (${checkout.reason}). Change the folder in project settings, or run it as a Cloud thread.`,
+    };
+  }
+  return { status: "available" };
 }
 
 async function inspectGitCheckoutAvailability(
   deps: WorkSessionDeps,
   args: { hostId: string; path: string },
-): Promise<GitCheckoutAvailability> {
+): Promise<InspectedGitCheckoutAvailability> {
   try {
     const inspection = await callHostRetryableOnlineRpc(deps, {
       hostId: args.hostId,
@@ -136,25 +239,15 @@ async function inspectGitCheckoutAvailability(
         remoteRefresh: "background",
       },
     });
-    const { checkout } = inspection;
-    if (
-      (checkout.kind === "unknown" || checkout.kind === "unborn") &&
-      resolveDefaultWorktreeBaseBranch(inspection) === null
-    ) {
-      return {
-        status: "unavailable",
-        message:
-          checkout.kind === "unborn"
-            ? `The project folder ${args.path} has no commits to branch from. Make a first commit, or run it as a Cloud thread.`
-            : `The project folder ${args.path} is missing or git can't read it (${checkout.reason}). Change the folder in project settings, or run it as a Cloud thread.`,
-      };
-    }
-    return { status: "available" };
+    return {
+      availability: classifyGitCheckoutAvailability(args.path, inspection),
+      cacheable: true,
+    };
   } catch (error) {
     deps.logger.warn(
       { hostId: args.hostId, ...runtimeErrorLogFields(deps.config, error) },
       "Could not inspect the project checkout; allowing the environment",
     );
-    return { status: "available" };
+    return { availability: { status: "available" }, cacheable: false };
   }
 }

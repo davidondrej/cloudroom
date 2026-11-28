@@ -202,7 +202,7 @@ describe("@cloudroom/templates", () => {
         "Percent: 50",
         "Keep the goal word for word.",
         "Change it only when the user changed the main goal, or to the past tense once it is reached.",
-        "If the latest reply brought nothing new, keep the state word for word too.",
+        "If none of the agent's replies below changes it, keep the state word for word too.",
         "",
         "Thread name: Fix login",
         "",

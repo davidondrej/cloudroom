@@ -947,9 +947,10 @@ export class CloudroomClient {
     });
   }
 
-  /** Answers an agent's request for a child in its own sandbox: the child thread started, or why it could not. */
-  async answerChild(sessionId: string, id: string, answer: { thread: string } | { error: string }): Promise<void> {
-    await this.#json(`${sessionPath(sessionId)}/children/${encodeURIComponent(id)}`, answer);
+  /** Answers an agent's request for a child in its own sandbox: the child thread started, or why it could not. A
+   *  thread request (ADR 0286) gets its `output`. */
+  async answerChild(sessionId: string, id: string, answer: { thread: string } | { error: string } | { output: unknown }): Promise<void> {
+    await this.#json(`${sessionPath(sessionId)}/children/${encodeURIComponent(id)}`, answer as Json);
   }
 
   /** `freeze`: Teleport to Local's, so the close happens only while it still holds (#237). */

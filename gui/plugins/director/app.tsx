@@ -6,7 +6,7 @@ import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { COLORS, Glyph, ICONS, INTERVALS, Meter, Minutes, Prompt, SLOT, Tile, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
+import { COLORS, Glyph, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, SLOT, Tile, WeakModel, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
 import { DirectorModal } from "./src/modal.js";
 
 /** The sidebar row above Pinned. It opens the Director's thread. */
@@ -74,8 +74,11 @@ function Row() {
               <span className={`flex shrink-0 items-center group-hover/director:opacity-0 max-md:pointer-coarse:mr-9 ${settings ? "opacity-0" : ""}`}>
                 {view.unread && !active ? (
                   <span className="size-1.5 rounded-full" style={{ background: ink }} aria-label="New from the Director" />
+                ) : !config.ping && !opening ? (
+                  // Off: say so, so nobody waits on a Director that is not running (David, 2026-11-27).
+                  <span className="rounded-full bg-state-active px-2 py-0.5 text-[11px] font-medium text-muted-foreground">Paused</span>
                 ) : (
-                  <span className="font-mono text-[11px] tabular-nums" style={{ color: ink }}>{opening ? "…" : learning.on && learning.done < learning.goal ? `${learning.done}/${learning.goal}` : config.ping ? timeLeft(view.nextAt) : "off"}</span>
+                  <span className="font-mono text-[11px] tabular-nums" style={{ color: ink }}>{opening ? "…" : learning.on && learning.done < learning.goal ? `${learning.done}/${learning.goal}` : timeLeft(view.nextAt)}</span>
                 )}
               </span>
             </button>
@@ -126,7 +129,7 @@ function Settings() {
 
   return (
     <div className="w-full space-y-6">
-      <Field title="Ping" hint="Each ping checks one thread that stopped since the Director last looked. When nothing stopped, no model runs.">
+      <Field title="Ping" hint="Each ping checks stopped threads since the Director last looked. When nothing stopped, no model runs.">
         <label className="flex items-center gap-3 text-sm">
           <Switch checked={config.ping} onCheckedChange={(ping) => save({ ping })} aria-label="Wake the Director on a timer" />
           Wake the Director on a timer
@@ -143,6 +146,11 @@ function Settings() {
             Ping now
           </Button>
         </div>
+        <div className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Unblock up to</span>
+          <MaxThreads value={config.maxThreads} onSave={(maxThreads) => save({ maxThreads })} />
+          <span>{config.maxThreads === 1 ? "thread" : "threads"} per ping</span>
+        </div>
         <p className="mt-2 text-xs text-muted-foreground" role="status">
           {view.last ? `Last ping ${new Date(view.last.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: ${view.last.text}. ` : "No ping yet. "}
           {config.ping ? `Next in ${timeLeft(view.nextAt)}.` : "The timer is off."}
@@ -151,6 +159,7 @@ function Settings() {
 
       <Field title="Agent" hint="The harness, model and effort the Director runs on. Changing the harness starts a new Director thread.">
         <AgentPicker value={config.agent} onChange={(agent) => save({ agent })} allowProviderChange align="start" />
+        <WeakModel check={view.modelCheck} onPick={(agent) => save({ agent })} />
       </Field>
 
       <Field title="What it watches" hint="Sub-agents and threads waiting on a prompt or a form are always skipped.">
@@ -202,7 +211,7 @@ function Settings() {
         <Prompt key={config.role} value={config.role} fallback={view.defaults.role} rows={12} max={4096} onSave={(role) => save({ role })} />
       </Field>
 
-      <Field title="Ping message" hint="What each ping asks. The thread to check is added below it.">
+      <Field title="Ping message" hint="What each ping asks. The threads to check are added below it.">
         <Prompt key={config.prompt} value={config.prompt} fallback={view.defaults.prompt} rows={2} max={2000} onSave={(prompt) => save({ prompt })} />
       </Field>
 
@@ -243,12 +252,6 @@ function Settings() {
             }}
           />
         </div>
-      </Field>
-
-      <Field title="Start over" hint="Archives the Director's thread. The next ping starts a new one with a clean memory.">
-        <Button size="sm" variant="outline" disabled={busy || view.threadId === null} onClick={() => run("fresh")}>
-          New Director thread
-        </Button>
       </Field>
 
       {error ? (

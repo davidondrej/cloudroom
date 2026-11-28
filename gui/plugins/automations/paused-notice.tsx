@@ -104,7 +104,7 @@ const resume = (loop: PausedLoop) =>
 const stop = (event: SyntheticEvent) => event.stopPropagation();
 
 // The purpose cards' loop line on threads loops started or wake (#1136, gui/apps/app/src/lib/loop-threads.ts). Each label
-// sends its own set, and null when it goes, so a copy that remounts never clears another's icons.
+// sends its own set, and null when it goes, so a copy that remounts never clears another's loop names.
 const sendLoopThreads = (
   owner: string,
   threads: Record<string, string> | null,
@@ -124,12 +124,12 @@ export function PausedLoopsLabel() {
   const [offset, setOffset] = useState(14);
   const label = useRef<HTMLSpanElement>(null);
   // Only the newest answer counts: one that started before a Resume may arrive after it. Icons count separately, so
-  // an icons-only read never drops the paused list (#1136).
+  // a names-only read never drops the paused list (#1136).
   const latest = useRef(0);
   const latestIcons = useRef(0);
-  // This mount's ID for its loop icons; null once Loops is turned off or hidden, so a late answer can't bring them back.
+  // This mount's ID for its loop names; null once Loops is turned off or hidden, so a late answer can't bring them back.
   const owner = useRef<string | null>(null);
-  // The open threads the sidebar already shows: the read looks up only these for loop icons, not all run history.
+  // The open threads the sidebar already shows: the read looks up only these for loop names, not all run history.
   // From the app's cache, so showing Loops again costs no request (not even hosts).
   const shown = [...experimental_useSidebarThreadIds()].sort().join(" ");
   const threads = useRef(shown);
@@ -171,8 +171,8 @@ export function PausedLoopsLabel() {
       sendLoopThreads(id, null);
     };
   }, []);
-  // A thread opened or closed (or the sidebar loaded after the first read): only the icons, so a new loop thread gets
-  // its icon at once without reading the paused loops again.
+  // A thread opened or closed (or the sidebar loaded after the first read): only the loop names, so a new loop thread gets
+  // its names at once without reading the paused loops again.
   useEffect(() => {
     if (threads.current === shown) return;
     threads.current = shown;

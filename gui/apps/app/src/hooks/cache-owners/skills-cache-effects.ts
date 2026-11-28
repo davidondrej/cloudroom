@@ -1,5 +1,8 @@
 import type { QueryClientArg } from "../cache-effect-types";
-import { projectSkillsQueryKey } from "../queries/query-keys";
+import {
+  allProjectCommandsQueryKeyPrefix,
+  projectSkillsQueryKey,
+} from "../queries/query-keys";
 import { invalidateQueryKeys } from "./cache-effect-utils";
 
 interface ProjectSkillsInvalidationArg extends QueryClientArg {
@@ -12,6 +15,9 @@ export function invalidateProjectSkillsMutationQueries({
 }: ProjectSkillsInvalidationArg): void {
   invalidateQueryKeys({
     queryClient,
-    queryKeys: [projectSkillsQueryKey(projectId)],
+    queryKeys: [
+      projectSkillsQueryKey(projectId),
+      allProjectCommandsQueryKeyPrefix(),
+    ],
   });
 }

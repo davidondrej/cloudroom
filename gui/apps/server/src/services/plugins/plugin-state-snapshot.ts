@@ -83,6 +83,8 @@ const installedPluginRowFields = {
   removedAt: z.number().int().nullable(),
   installedAt: z.number().int(),
   updatedAt: z.number().int(),
+  // Snapshots taken before this column existed don't have it.
+  changedAt: z.number().int().nullable().default(null),
 } as const;
 const installedPluginRowSchema = z
   .object({

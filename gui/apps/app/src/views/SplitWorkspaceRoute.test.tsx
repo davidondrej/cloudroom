@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { Suspense, useEffect } from "react";
+import { useEffect } from "react";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,12 +23,6 @@ vi.mock("./thread-detail/SplitThreadArea", () => ({
 
 vi.mock("./RootComposeView", () => ({
   LegacyProjectComposeRedirect: () => <div>legacy redirect</div>,
-}));
-
-vi.mock("./ToolsView", () => ({
-  PluginsView: ({ pluginId }: { pluginId?: string }) => (
-    <output data-testid="tools-view">{pluginId ?? "overview"}</output>
-  ),
 }));
 
 function NavigationControls() {
@@ -70,26 +64,5 @@ describe("SplitWorkspaceRoute", () => {
     fireEvent.click(screen.getByRole("button", { name: "thread" }));
     expect(screen.getByTestId("route-content").textContent).toBe("thread");
     expect(workspaceLifecycle).toEqual({ mounts: 1, unmounts: 0 });
-  });
-
-  it("passes the plugin id from the full-window detail URL to PluginsView", async () => {
-    render(
-      <MemoryRouter initialEntries={["/plugins/github"]}>
-        <Routes>
-          <Route
-            path="*"
-            element={
-              <Suspense fallback={null}>
-                <SplitWorkspaceRoute />
-              </Suspense>
-            }
-          />
-        </Routes>
-      </MemoryRouter>,
-    );
-
-    expect((await screen.findByTestId("tools-view")).textContent).toBe(
-      "github",
-    );
   });
 });

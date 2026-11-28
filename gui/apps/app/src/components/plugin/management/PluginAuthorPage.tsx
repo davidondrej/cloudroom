@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { Link, useLocation, useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import {
   ResourceCollectionViewport,
@@ -12,17 +12,14 @@ import {
   usePluginCatalogSearch,
 } from "@/hooks/queries/plugin-catalog-queries";
 import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
-import {
-  SETTINGS_PLUGINS_ROUTE_PATH,
-  getPluginsRoutePath,
-  isSettingsPluginsRoutePath,
-} from "@/lib/route-paths";
+import { getPluginsRoutePath } from "@/lib/route-paths";
 import type { AddPluginInitial } from "./AddPluginDialog";
 import {
   PLUGINS_LIST_BAND_CLASSES,
   PLUGINS_LIST_SCROLL_CONTENT_CLASS,
   PluginRowGroups,
   useCatalogSearchMatches,
+  type OpenPlugin,
 } from "./BrowsePluginsTab";
 import { PluginAuthorAvatar } from "./PluginAuthorAvatar";
 import {
@@ -67,17 +64,14 @@ function authorForEntries(
 
 export function PluginAuthorPage({
   authorKey,
-  selectedPluginId,
   onInstall,
   onOpenPlugin,
 }: {
   authorKey: string;
-  selectedPluginId: string | null;
   onInstall: (initial: AddPluginInitial) => void;
-  onOpenPlugin: (pluginId: string, trigger: HTMLButtonElement) => void;
+  onOpenPlugin: OpenPlugin;
 }) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const inSettings = isSettingsPluginsRoutePath(useLocation().pathname);
   const query = searchParams.get("query") ?? "";
   const catalogQuery = usePluginCatalogSearch("", { enabled: true });
   const listQuery = usePluginList({ enabled: true });
@@ -124,18 +118,14 @@ export function PluginAuthorPage({
       <div className={cn("space-y-6 pb-8", PLUGINS_LIST_BAND_CLASSES)}>
         <div className="space-y-2">
           <Link
-            to={
-              inSettings
-                ? SETTINGS_PLUGINS_ROUTE_PATH
-                : {
-                    pathname: getPluginsRoutePath(),
-                    search: browseSearch === "" ? "" : `?${browseSearch}`,
-                  }
-            }
+            to={{
+              pathname: getPluginsRoutePath(),
+              search: browseSearch === "" ? "" : `?${browseSearch}`,
+            }}
             className="-ml-1 inline-flex items-center gap-1 rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
             <Icon name="ChevronLeft" className="size-3" aria-hidden />
-            {inSettings ? "Plugins" : "Browse plugins"}
+            Browse plugins
           </Link>
           {author === null ? null : (
             <div className="flex items-center gap-3">
@@ -199,7 +189,6 @@ export function PluginAuthorPage({
             ) : (
               <PluginRowGroups
                 groups={groups}
-                selectedPluginId={selectedPluginId}
                 onInstall={onInstall}
                 onOpenPlugin={onOpenPlugin}
               />

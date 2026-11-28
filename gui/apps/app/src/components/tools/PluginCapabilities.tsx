@@ -30,7 +30,6 @@ import {
 } from "@/hooks/queries/plugin-settings-queries";
 import { usePluginSlots, type PluginSlotSnapshot } from "@/lib/plugin-slots";
 import {
-  getPluginConfigurationRoutePath,
   getPluginPanelRoutePath,
   getRootComposeRoutePath,
   getSettingsRoutePath,
@@ -180,21 +179,7 @@ function pluginAppSurfaceItems(
   slots: PluginSlotSnapshot,
 ): PluginCapabilityItem[] {
   const pluginId = plugin.id;
-  const settingsSections = slots.settingsSections.filter(
-    (section) => section.pluginId === pluginId,
-  );
   return [
-    ...(plugin.hasSettings || settingsSections.length > 0
-      ? [
-          namedSurface(
-            "settings",
-            "settings",
-            "Settings",
-            "Opens this plugin's configuration.",
-            getPluginConfigurationRoutePath({ pluginId }),
-          ),
-        ]
-      : []),
     ...namedSlotItems(
       pluginId,
       slots.navPanels,
@@ -512,12 +497,7 @@ function PluginRuntimeStatusAlert({
   onReload: () => void;
   reloadPending: boolean;
 }) {
-  const { settingsSections } = usePluginSlots();
-  const hasSettingsPage =
-    plugin.hasSettings ||
-    settingsSections.some((section) => section.pluginId === plugin.id);
-  const canOpenSettings =
-    plugin.status === "needs-configuration" && hasSettingsPage;
+  // The banner sits on the plugin's own page, above its Configuration section.
   const canReload =
     plugin.status === "error" ||
     plugin.status === "degraded" ||
@@ -542,38 +522,23 @@ function PluginRuntimeStatusAlert({
       detail={detail}
       separator={plugin.status !== "degraded"}
       action={
-        canOpenSettings || canReload ? (
-          <span className="flex items-center gap-2">
-            {canOpenSettings ? (
-              <Button asChild size="sm" className="h-7 gap-0.5 px-2.5 text-xs">
-                <Link
-                  to={getPluginConfigurationRoutePath({ pluginId: plugin.id })}
-                >
-                  Open settings
-                  <Icon name="ChevronRight" className="size-3.5" aria-hidden />
-                </Link>
-              </Button>
+        canReload ? (
+          <Button
+            type="button"
+            size="sm"
+            disabled={reloadPending}
+            className="h-7 px-2.5 text-xs"
+            onClick={onReload}
+          >
+            {reloadPending ? (
+              <Icon
+                name="Loading"
+                className="size-3.5 animate-spin"
+                aria-hidden
+              />
             ) : null}
-            {canReload ? (
-              <Button
-                type="button"
-                size="sm"
-                variant={canOpenSettings ? "outline" : "default"}
-                disabled={reloadPending}
-                className="h-7 px-2.5 text-xs"
-                onClick={onReload}
-              >
-                {reloadPending ? (
-                  <Icon
-                    name="Loading"
-                    className="size-3.5 animate-spin"
-                    aria-hidden
-                  />
-                ) : null}
-                {reloadPending ? "Reloading\u2026" : "Reload"}
-              </Button>
-            ) : null}
-          </span>
+            {reloadPending ? "Reloading\u2026" : "Reload"}
+          </Button>
         ) : undefined
       }
     />

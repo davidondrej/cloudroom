@@ -20,7 +20,10 @@ import {
   AddPluginDialog,
   type AddPluginInitial,
 } from "@/components/plugin/management/AddPluginDialog";
-import { BrowsePluginsTab } from "@/components/plugin/management/BrowsePluginsTab";
+import {
+  BrowsePluginsTab,
+  type OpenPlugin,
+} from "@/components/plugin/management/BrowsePluginsTab";
 import { useCheckPluginUpdates } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import { InstalledPluginsTab } from "@/components/plugin/management/InstalledPluginsTab";
 import {
@@ -32,25 +35,48 @@ import {
   pluginPublisherFilterId,
   pluginPublisherFilterOptions,
 } from "@/components/plugin/plugin-provenance";
-import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
+import { pluginHasSettingsTab } from "@/components/settings/settings-sections";
 import {
+  usePluginList,
+  type PluginListItem,
+} from "@/hooks/queries/plugin-settings-queries";
+import {
+  getPluginConfigurationRoutePath,
   getPluginDetailRoutePath,
   getRootComposeRoutePath,
   getSettingsRoutePath,
 } from "@/lib/route-paths";
 
+export type InstalledPluginSort = "recent" | "name";
+
+/** Recent puts the last plugin the user changed first. Ties, and the name sort, go A to Z. */
+export function sortInstalledPlugins(
+  plugins: readonly PluginListItem[],
+  sort: InstalledPluginSort,
+  changedAt: (plugin: PluginListItem) => number = (plugin) => plugin.changedAt,
+): PluginListItem[] {
+  const byName = (left: PluginListItem, right: PluginListItem) =>
+    (left.name ?? left.id).localeCompare(right.name ?? right.id) ||
+    left.id.localeCompare(right.id);
+  return [...plugins].sort((left, right) =>
+    sort === "name"
+      ? byName(left, right)
+      : changedAt(right) - changedAt(left) || byName(left, right),
+  );
+}
+
 /** Everything the installed list used to keep in its toolbar, behind one button. */
 function InstalledPluginsMenu({
   hasPlugins,
-  sortDirection,
-  onToggleSort,
+  sort,
+  onSortChange,
   typeOptions,
   activeTypes,
   onTypesChange,
 }: {
   hasPlugins: boolean;
-  sortDirection: "asc" | "desc";
-  onToggleSort: () => void;
+  sort: InstalledPluginSort;
+  onSortChange: (sort: InstalledPluginSort) => void;
   typeOptions: readonly { id: string; label: string }[];
   activeTypes: readonly string[];
   onTypesChange: (values: string[]) => void;
@@ -103,11 +129,11 @@ function InstalledPluginsMenu({
         <DropdownMenuItem
           onSelect={(event) => {
             event.preventDefault();
-            onToggleSort();
+            onSortChange(sort === "recent" ? "name" : "recent");
           }}
         >
           <Icon name="ArrowUpDown" className="size-4" aria-hidden />
-          {sortDirection === "asc" ? "Sort Z to A" : "Sort A to Z"}
+          {sort === "recent" ? "Sort by name" : "Sort by recent"}
         </DropdownMenuItem>
         {typeOptions.length > 0 ? (
           <>
@@ -145,8 +171,9 @@ export function PluginsOverview({
   renderDetail,
 }: {
   mode?: "installed" | "browse";
+  /** Installed mode: the plugin in the URL. */
   selectedPluginId?: string | null;
-  onOpenPlugin?: (pluginId: string, trigger: HTMLButtonElement) => void;
+  onOpenPlugin?: OpenPlugin;
   /** Installed mode: the selected plugin's page, drawn beside the list. */
   renderDetail?: (pluginId: string) => ReactNode;
 } = {}) {
@@ -159,9 +186,10 @@ export function PluginsOverview({
   );
   const authorKey = searchParams.get("author");
   const [installedQuery, setInstalledQuery] = useState("");
-  const [installedSortDirection, setInstalledSortDirection] = useState<
-    "asc" | "desc"
-  >("asc");
+  const [installedSort, setInstalledSort] =
+    useState<InstalledPluginSort>("recent");
+  // The dates seen when the page opened, so a row the user just changed doesn't jump away.
+  const [openedChangedAt] = useState(() => new Map<string, number>());
   const [typeFilters, setTypeFilters] = useState<string[]>([]);
   const typeFilterOptions = useMemo(
     () => pluginPublisherFilterOptions(plugins),
@@ -177,53 +205,43 @@ export function PluginsOverview({
     initial: AddPluginInitial | null;
   }>({ open: false, initial: null });
 
-  const visiblePlugins = useMemo(
-    () =>
-      plugins
-        .filter((plugin) => {
-          if (
-            activeTypeFilters.length > 0 &&
-            !activeTypeFilters.includes(pluginPublisherFilterId(plugin))
-          ) {
-            return false;
-          }
-          if (normalizedInstalledQuery.length === 0) return true;
-          return [
-            plugin.id,
-            plugin.name ?? "",
-            plugin.description ?? "",
-            plugin.version,
-            plugin.sourceDisplay,
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(normalizedInstalledQuery);
-        })
-        .sort((left, right) => {
-          const enabledResult = Number(!left.enabled) - Number(!right.enabled);
-          if (enabledResult !== 0) return enabledResult;
-          if (left.enabled) {
-            const leftPublisher = left.publisherLabel;
-            const rightPublisher = right.publisherLabel;
-            const publisherResult =
-              Number(leftPublisher === null) - Number(rightPublisher === null);
-            if (publisherResult !== 0) return publisherResult;
-          }
-          const result = (left.name ?? left.id).localeCompare(
-            right.name ?? right.id,
-          );
-          if (result !== 0) {
-            return installedSortDirection === "asc" ? result : -result;
-          }
-          return left.id.localeCompare(right.id);
-        }),
-    [
-      activeTypeFilters,
-      installedSortDirection,
-      normalizedInstalledQuery,
-      plugins,
-    ],
-  );
+  const visiblePlugins = useMemo(() => {
+    for (const plugin of plugins) {
+      if (!openedChangedAt.has(plugin.id)) {
+        openedChangedAt.set(plugin.id, plugin.changedAt);
+      }
+    }
+    const matching = plugins.filter((plugin) => {
+      if (
+        activeTypeFilters.length > 0 &&
+        !activeTypeFilters.includes(pluginPublisherFilterId(plugin))
+      ) {
+        return false;
+      }
+      if (normalizedInstalledQuery.length === 0) return true;
+      return [
+        plugin.id,
+        plugin.name ?? "",
+        plugin.description ?? "",
+        plugin.version,
+        plugin.sourceDisplay,
+      ]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedInstalledQuery);
+    });
+    return sortInstalledPlugins(
+      matching,
+      installedSort,
+      (plugin) => openedChangedAt.get(plugin.id) ?? plugin.changedAt,
+    );
+  }, [
+    activeTypeFilters,
+    installedSort,
+    normalizedInstalledQuery,
+    openedChangedAt,
+    plugins,
+  ]);
   const startCreatePlugin = (prompt?: string) => {
     navigate(getRootComposeRoutePath(), {
       state: {
@@ -260,21 +278,23 @@ export function PluginsOverview({
       authorKey === null ? (
         <BrowsePluginsTab
           actions={createActions}
-          selectedPluginId={selectedPluginId}
           onInstall={(initial) => setAddDialog({ open: true, initial })}
           onOpenPlugin={openPlugin}
         />
       ) : (
         <PluginAuthorPage
           authorKey={authorKey}
-          selectedPluginId={selectedPluginId}
           onInstall={(initial) => setAddDialog({ open: true, initial })}
           onOpenPlugin={openPlugin}
         />
       );
   } else {
-    // With no plugin in the URL, wide screens show the first one. Narrow screens show the list alone.
-    const shownPluginId = selectedPluginId ?? visiblePlugins[0]?.id ?? null;
+    // With no plugin in the URL, wide screens show the first one that opens beside the list
+    // (a plugin with its own Settings tab opens there). Narrow screens show the list alone.
+    const shownPluginId =
+      selectedPluginId ??
+      visiblePlugins.find((plugin) => !pluginHasSettingsTab(plugin.id))?.id ??
+      null;
     content = (
       <div className="@container/plugins flex min-h-0 flex-1 flex-col gap-3 px-4 pb-4 md:px-5">
         <PluginSafeModeBanner />
@@ -302,12 +322,8 @@ export function PluginsOverview({
               </div>
               <InstalledPluginsMenu
                 hasPlugins={plugins.length > 0}
-                sortDirection={installedSortDirection}
-                onToggleSort={() =>
-                  setInstalledSortDirection((current) =>
-                    current === "asc" ? "desc" : "asc",
-                  )
-                }
+                sort={installedSort}
+                onSortChange={setInstalledSort}
                 typeOptions={typeFilterOptions}
                 activeTypes={activeTypeFilters}
                 onTypesChange={setTypeFilters}
@@ -338,9 +354,7 @@ export function PluginsOverview({
                   plugins={visiblePlugins}
                   selectedPluginId={shownPluginId}
                   onOpenPlugin={(pluginId) =>
-                    navigate(
-                      getPluginDetailRoutePath({ pluginId, view: "installed" }),
-                    )
+                    navigate(getPluginConfigurationRoutePath({ pluginId }))
                   }
                 />
               )}
@@ -381,12 +395,7 @@ export function PluginsOverview({
           setAddDialog((current) => ({ ...current, open }))
         }
         onInstalled={(plugin) =>
-          navigate(
-            getPluginDetailRoutePath({
-              pluginId: plugin.id,
-              view: "installed",
-            }),
-          )
+          navigate(getPluginConfigurationRoutePath({ pluginId: plugin.id }))
         }
       />
     </>

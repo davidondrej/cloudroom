@@ -72,6 +72,7 @@ export function makePluginListItem(
     catalogMarketplaceName: null,
     publisherLabel: null,
     sourceDisplay: "path · /plugins/plugin-test",
+    changedAt: 0,
     updateState: {
       outcome: null,
       detail: null,

@@ -238,7 +238,7 @@ function PluginScreenshotGallery({
   );
 }
 
-export function PluginOverviewLead({ description }: { description: string }) {
+function PluginOverviewLead({ description }: { description: string }) {
   return (
     <p
       className="max-w-prose text-base leading-relaxed text-foreground"
@@ -251,17 +251,22 @@ export function PluginOverviewLead({ description }: { description: string }) {
 
 function PluginMarketplaceOverview({
   entry,
+  lead,
 }: {
   entry: PluginCatalogSearchEntry;
+  lead: boolean;
 }) {
+  if (!lead && entry.screenshots.length === 0 && entry.overview === undefined) {
+    return null;
+  }
   return (
     <section className="space-y-6" data-resource-detail-section="overview">
       <PluginScreenshotGallery entry={entry} />
       <div className="space-y-3">
-        <PluginOverviewLead description={entry.description} />
+        {lead ? <PluginOverviewLead description={entry.description} /> : null}
         {entry.overview === undefined ? null : (
           <>
-            <hr className="border-t border-border" />
+            {lead ? <hr className="border-t border-border" /> : null}
             <h2 className="text-sm font-medium text-foreground">Overview</h2>
             <PluginOverviewMarkdown markdown={entry.overview} />
           </>
@@ -273,12 +278,15 @@ function PluginMarketplaceOverview({
 
 export function PluginMarketplaceListingSections({
   entry,
+  lead = true,
 }: {
   entry: PluginCatalogSearchEntry;
+  /** Off on an installed plugin's page, whose header already shows the description. */
+  lead?: boolean;
 }) {
   return (
     <>
-      <PluginMarketplaceOverview entry={entry} />
+      <PluginMarketplaceOverview entry={entry} lead={lead} />
       <PluginMarketplaceSource entry={entry} />
       <PluginMarketplaceDetails entry={entry} />
     </>
@@ -292,7 +300,7 @@ export function PluginMoreFromAuthorSection({
 }: {
   entry: PluginCatalogSearchEntry;
   catalogEntries: readonly PluginCatalogSearchEntry[];
-  onOpenPlugin: (pluginId: string) => void;
+  onOpenPlugin: (pluginId: string, marketplace?: string) => void;
 }) {
   const authorKey = pluginMarketplaceAuthorKey(entry);
   const moreEntries = useMemo(
@@ -326,7 +334,9 @@ export function PluginMoreFromAuthorSection({
             description={candidate.description || undefined}
             trailingVisual={<ResourceRowDetailChevron />}
             openLabel={`Open ${candidate.displayName} details`}
-            onOpen={() => onOpenPlugin(candidate.pluginId)}
+            onOpen={() =>
+              onOpenPlugin(candidate.pluginId, candidate.marketplace)
+            }
           />
         ))}
       </ResourceListPanel>

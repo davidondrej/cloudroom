@@ -467,7 +467,9 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
         {
           providerId: switchTo,
           model: payload.model,
-          reasoningLevel: payload.reasoningLevel ?? null,
+          ...(payload.reasoningLevel !== undefined
+            ? { reasoningLevel: payload.reasoningLevel }
+            : {}),
         },
         { resend: payload.resend === true },
       );

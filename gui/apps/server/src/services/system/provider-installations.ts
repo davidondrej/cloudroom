@@ -71,6 +71,28 @@ export async function aggregateProviderInstallations(
   );
 }
 
+// The last answer per host and provider. A check that fails or times out
+// reports it instead of dropping the provider, if it says installed and came
+// in the last 5 minutes (#2670). The host answers from a cache of at most 5
+// minutes, so a reported answer is at most 10 minutes old.
+const LAST_INSTALLATION_MAX_AGE_MS = 5 * 60_000;
+const lastInstallations = new WeakMap<
+  object,
+  Map<string, { at: number; status: ProviderInstallationStatus }>
+>();
+function lastInstallationsFor(deps: WorkSessionDeps) {
+  let answers = lastInstallations.get(deps.db);
+  if (!answers) {
+    answers = new Map();
+    lastInstallations.set(deps.db, answers);
+  }
+  const oldest = Date.now() - LAST_INSTALLATION_MAX_AGE_MS;
+  for (const [key, answer] of answers) {
+    if (answer.at < oldest) answers.delete(key);
+  }
+  return answers;
+}
+
 export async function getProviderInstallations(
   deps: WorkSessionDeps,
   args: { hostId: string; providerIds?: readonly string[] },
@@ -117,9 +139,10 @@ export async function getProviderInstallations(
         );
         return null;
       }
+      const key = `${args.hostId}\0${provider.id}`;
       return async (timeoutMs) => {
         try {
-          return await callHostRetryableOnlineRpc(deps, {
+          const status = await callHostRetryableOnlineRpc(deps, {
             hostId: args.hostId,
             timeoutMs,
             command: {
@@ -128,19 +151,26 @@ export async function getProviderInstallations(
               bridgeLaunch,
             },
           });
+          lastInstallationsFor(deps).set(key, { at: Date.now(), status });
+          return status;
         } catch (error) {
           if (!canOmitProviderInstallationStatusError(error)) {
             throw error;
           }
+          const saved = lastInstallationsFor(deps).get(key)?.status;
+          const last =
+            saved?.installed && !saved.versionUnsupported ? saved : null;
           deps.logger.warn(
             {
               failure: "status_request_failed",
               hostId: args.hostId,
               providerId: provider.id,
             },
-            "Failed to load provider installation status; omitting provider",
+            last === null
+              ? "Failed to load provider installation status; omitting provider"
+              : "Failed to load provider installation status; reporting the last answer",
           );
-          return null;
+          return last;
         }
       };
     },
@@ -234,6 +264,7 @@ export async function runProviderCliInstall(
       hostId: args.hostId,
       providerId: args.provider,
     });
+    lastInstallationsFor(deps).delete(`${args.hostId}\0${args.provider}`);
     deps.lifecycleDedupers.providerModelCatalogs.markProviderStale(
       args.hostId,
       args.provider,

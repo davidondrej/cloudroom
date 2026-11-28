@@ -19,7 +19,8 @@ The SDK equivalents are `sdk.cloudroom.signIn`, `.status`, `.cancel`, and `.logo
 `room-cli cloud env list|set|unset`, `cloud repo add|remove`, and `cloud setup set`
 manage the API keys, repos, and setup script every new cloud sandbox gets; values
 come from stdin. `room-cli cloud auto-delete [days|never]` shows or sets how long
-unused cloud threads are kept.
+unused cloud threads are kept. `room-cli cloud thread-access [off|read|full]` shows or
+sets whether Cloud agents may read or message the user's other threads.
 Existing cloud threads keep their account, core URL, and project bindings.
 Every computer signed in to the same Cloudroom account shows its Cloud threads: they
 follow the website's list, open in a project with the same ID, GitHub repo, or name,

@@ -1,6 +1,7 @@
 import { getEnvironmentProvider } from "../plugins/plugin-environment-provider-registry.js";
 import type {
   AvailableModel,
+  LocalPathProjectSource,
   PermissionMode,
   ProjectExecutionDefaults,
   RecordedPermissionMode,
@@ -8,7 +9,7 @@ import type {
   ServiceTier,
   Thread,
 } from "@cloudroom/domain";
-import { getEnvironment, getProjectSourceByHost } from "@cloudroom/db";
+import { getEnvironment } from "@cloudroom/db";
 import { DEFAULT_ENVIRONMENT_PROVIDER_ID } from "../environments/environment-provider-ids.js";
 import {
   PERSONAL_PROJECT_ID,
@@ -22,7 +23,14 @@ import type {
   ProviderEnvironmentArgs,
 } from "@cloudroom/server-contract";
 import { COMMAND_TIMEOUT_MS } from "../../constants.js";
-import { resolveGitCheckoutAvailability } from "../environments/provider-availability.js";
+import {
+  classifyGitCheckoutAvailability,
+  getCachedProjectSourceByHost,
+  gitCheckoutAvailabilityKey,
+  resolveGitCheckoutAvailability,
+  type CheckoutInspectionCache,
+  type GitCheckoutAvailability,
+} from "../environments/provider-availability.js";
 import type { WorkSessionDeps } from "../../types.js";
 import type { ProviderRegistryService } from "../providers/provider-registry.js";
 import { ApiError } from "../../errors.js";
@@ -102,8 +110,11 @@ interface ResolveThreadExecutionPermissionModeArgs {
 }
 
 interface ResolveCreateThreadEnvironmentArgs {
+  checkoutInspectionCache?: CheckoutInspectionCache;
   parentThread: ParentThread | null;
   projectId: string;
+  /** Wakes a host before its checkout is inspected; a suspended host can't answer (#2704). */
+  readyHost?: (hostId: string) => Promise<void>;
   requestedEnvironment: CreateThreadEnvironment;
 }
 
@@ -125,7 +136,7 @@ type ImplicitHostDefaultEnvironment = Extract<
   EnvironmentArgs,
   { type: "host" }
 > & {
-  workspace: { path: null; type: "unmanaged" };
+  workspace: { branch?: undefined; path: null; type: "unmanaged" };
 };
 
 function isImplicitHostDefaultEnvironment(
@@ -134,7 +145,8 @@ function isImplicitHostDefaultEnvironment(
   return (
     environment.type === "host" &&
     environment.workspace.type === "unmanaged" &&
-    environment.workspace.path === null
+    environment.workspace.path === null &&
+    environment.workspace.branch === undefined
   );
 }
 
@@ -276,22 +288,53 @@ function requireDefaultEnvironmentProvider(id: string): string {
   return id;
 }
 
-async function hasUsableGitCheckout(
+async function inspectHostProjectCheckout(
   deps: WorkSessionDeps,
-  args: { hostId: string; projectId: string },
-): Promise<boolean> {
-  const source = getProjectSourceByHost(deps.db, args.projectId, args.hostId);
-  if (source === null || !isLocalPathProjectSource(source)) return true;
+  args: {
+    checkoutInspectionCache?: CheckoutInspectionCache;
+    hostId: string;
+    projectId: string;
+  },
+): Promise<{
+  availability: GitCheckoutAvailability;
+  source: LocalPathProjectSource;
+} | null> {
+  const source = getCachedProjectSourceByHost(deps.db, {
+    ...(args.checkoutInspectionCache !== undefined
+      ? { cache: args.checkoutInspectionCache }
+      : {}),
+    hostId: args.hostId,
+    projectId: args.projectId,
+  });
+  if (source === null || !isLocalPathProjectSource(source)) return null;
   const availability = await resolveGitCheckoutAvailability(deps, {
+    ...(args.checkoutInspectionCache !== undefined
+      ? { cache: args.checkoutInspectionCache }
+      : {}),
     hostId: args.hostId,
     path: source.path,
   });
-  return availability.status === "available";
+  return { availability, source };
+}
+
+async function hasUsableGitCheckout(
+  deps: WorkSessionDeps,
+  args: {
+    checkoutInspectionCache?: CheckoutInspectionCache;
+    hostId: string;
+    projectId: string;
+  },
+): Promise<boolean> {
+  const inspected = await inspectHostProjectCheckout(deps, args);
+  return inspected === null || inspected.availability.status === "available";
 }
 
 export async function resolveProjectDefaultThreadEnvironment(
   deps: WorkSessionDeps,
-  args: { projectId: string },
+  args: {
+    checkoutInspectionCache?: CheckoutInspectionCache;
+    projectId: string;
+  },
 ): Promise<ResolvedCreateThreadEnvironment> {
   if (args.projectId === PERSONAL_PROJECT_ID) {
     return {
@@ -321,6 +364,10 @@ export async function resolveProjectDefaultThreadEnvironment(
       remoteRefresh: "background",
     },
   });
+  args.checkoutInspectionCache?.gitCheckoutAvailability.set(
+    gitCheckoutAvailabilityKey(hostId, source.path),
+    Promise.resolve(classifyGitCheckoutAvailability(source.path, checkout)),
+  );
   const baseBranch = resolveDefaultWorktreeBaseBranch(checkout);
   if (baseBranch === null) {
     return {
@@ -378,6 +425,9 @@ export async function resolveCreateThreadEnvironment(
     }
     if (
       !(await hasUsableGitCheckout(deps, {
+        ...(args.checkoutInspectionCache !== undefined
+          ? { checkoutInspectionCache: args.checkoutInspectionCache }
+          : {}),
         hostId: parentEnvironment.hostId,
         projectId: args.projectId,
       }))
@@ -396,6 +446,9 @@ export async function resolveCreateThreadEnvironment(
   const environment =
     args.requestedEnvironment.type === "project-default"
       ? await resolveProjectDefaultThreadEnvironment(deps, {
+          ...(args.checkoutInspectionCache !== undefined
+            ? { checkoutInspectionCache: args.checkoutInspectionCache }
+            : {}),
           projectId: args.projectId,
         })
       : args.requestedEnvironment;
@@ -419,20 +472,38 @@ export async function resolveCreateThreadEnvironment(
 
   if (hasLiveParent && isImplicitHostDefaultEnvironment(environment)) {
     const hostId = requireHostEnvironmentId(environment);
-    // An explicit machine that is the parent's own host gets the same
-    // non-Git fallback as project-default: share the parent's folder.
-    const parentEnvironment =
-      parentThread?.projectId === args.projectId && parentThread.environmentId
-        ? getEnvironment(deps.db, parentThread.environmentId)
-        : null;
-    if (
-      parentEnvironment?.hostId === hostId &&
-      !(await hasUsableGitCheckout(deps, {
-        hostId,
-        projectId: args.projectId,
-      }))
-    ) {
-      return { type: "reuse", environmentId: parentEnvironment.id };
+    await args.readyHost?.(hostId);
+    const inspected = await inspectHostProjectCheckout(deps, {
+      ...(args.checkoutInspectionCache !== undefined
+        ? { checkoutInspectionCache: args.checkoutInspectionCache }
+        : {}),
+      hostId,
+      projectId: args.projectId,
+    });
+    if (inspected !== null && inspected.availability.status !== "available") {
+      // An explicit machine that is the parent's own host keeps #822 reuse
+      // whenever git-worktree is unavailable; another host only falls back to
+      // its registered folder when it is a plain directory or unborn repo (#2704).
+      const parentEnvironment =
+        parentThread?.projectId === args.projectId && parentThread.environmentId
+          ? getEnvironment(deps.db, parentThread.environmentId)
+          : null;
+      if (parentEnvironment?.hostId === hostId) {
+        return { type: "reuse", environmentId: parentEnvironment.id };
+      }
+      if (
+        inspected.availability.reason === "non_git_directory" ||
+        inspected.availability.reason === "unborn"
+      ) {
+        return {
+          type: "provider",
+          environmentProviderId: requireDefaultEnvironmentProvider(
+            DEFAULT_ENVIRONMENT_PROVIDER_ID.projectCheckout,
+          ),
+          machine: { type: "existing", hostId },
+          inputs: checkoutProviderInputs(inspected.source.path, undefined),
+        };
+      }
     }
     return {
       type: "provider",
@@ -451,6 +522,9 @@ export async function resolveCreateThreadEnvironment(
     args.requestedEnvironment.type === "project-default" &&
     environment.machine?.type === "existing" &&
     (await hasUsableGitCheckout(deps, {
+      ...(args.checkoutInspectionCache !== undefined
+        ? { checkoutInspectionCache: args.checkoutInspectionCache }
+        : {}),
       hostId: environment.machine.hostId,
       projectId: args.projectId,
     }))

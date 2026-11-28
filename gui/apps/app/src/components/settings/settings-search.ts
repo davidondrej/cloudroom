@@ -168,6 +168,9 @@ const SETTINGS_SEARCH_ENTRIES: readonly SettingsSearchEntry[] = [
   ...entries("auto-delete", "Auto-delete", [
     ["Delete unused cloud threads after", "retention delete old cloud threads sessions history days year never"],
   ]),
+  ...entries("thread-access", "Thread access", [
+    ["Agents reach your other threads", "read message other threads cross thread agents talk permission off read full"],
+  ]),
   ...entries("projects", undefined, [
     ["Projects", "repos folders rename delete"],
     ["Hidden projects", "hide unhide restore sidebar removed"],

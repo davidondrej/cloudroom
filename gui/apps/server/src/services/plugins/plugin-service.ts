@@ -81,6 +81,7 @@ import {
   listThreadPluginMetadataRows,
   markInstalledPluginRemoved,
   recordPluginScheduleResult,
+  markInstalledPluginChanged,
   setInstalledPluginEnabled,
   setPluginSafeMode,
   type InstalledPluginRow,
@@ -135,6 +136,7 @@ import {
   syncPluginCommandsSkill,
   type PluginCliContribution,
 } from "./plugin-commands-skill.js";
+import { invalidateCommandCatalog } from "../skills/skill-catalog.js";
 import { readPluginLogTail } from "./plugin-log.js";
 import {
   buildPluginSettingsView,
@@ -874,6 +876,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
   }
 
   function notifyPluginsChanged(): void {
+    invalidateCommandCatalog();
     const changes: SystemChangeKind[] = ["plugins-changed"];
     const providerRegistrationRevision =
       deps.providerRegistry?.getRegistrationRevision();
@@ -1058,6 +1061,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           sourceDisplay: sourceDisplayForRow(row),
           updateState: updateStateForRow(row),
           enabled: row.enabled,
+          changedAt: row.changedAt ?? row.installedAt,
           alwaysEnabled: isAlwaysEnabledPlugin(row),
           description:
             loadedPlugin?.manifest.description ??
@@ -1862,6 +1866,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       await writePluginSettingsUpdate({ ...storeArgs, values });
       const next = await readPluginSettingsValues(storeArgs);
       if (JSON.stringify(next) !== JSON.stringify(prev)) {
+        markInstalledPluginChanged(deps.db, id);
         for (const listener of plugin.handle.settings.listeners) {
           try {
             listener(next, prev);

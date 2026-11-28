@@ -1,5 +1,5 @@
 import { THREAD_TIMELINE_EXCLUDED_EVENT_TYPES } from "@cloudroom/thread-view";
-import type { ThreadEventType } from "@cloudroom/domain";
+import type { ThreadEventItemType, ThreadEventType } from "@cloudroom/domain";
 import {
   findTimelineWindowBudgetFloorSequence,
   getDatabaseDataVersion,
@@ -90,6 +90,19 @@ const APPENDABLE_EVENT_TYPES: ReadonlySet<ThreadEventType> = new Set([
   "item/plan/delta",
   "item/toolCall/progress",
   "item/mcpToolCall/progress",
+]);
+
+// Starts and ends of items no selection step looks up by kind (#1032): tool calls and
+// delegations pull child rows, background tasks pull task state, planSteps feed head state.
+const APPENDABLE_ITEM_KINDS: ReadonlySet<ThreadEventItemType> = new Set([
+  "agentMessage",
+  "reasoning",
+  "commandExecution",
+  "fileChange",
+  "fileRead",
+  "webSearch",
+  "webFetch",
+  "imageView",
 ]);
 
 const IGNORABLE_EVENT_TYPES: ReadonlySet<ThreadEventType> = new Set(
@@ -190,12 +203,14 @@ function isAppendableRow(
   appendableTurnIds: ReadonlySet<string>,
 ): boolean {
   return (
-    APPENDABLE_EVENT_TYPES.has(row.type) &&
+    (row.itemKind === null
+      ? APPENDABLE_EVENT_TYPES.has(row.type)
+      : (row.type === "item/started" || row.type === "item/completed") &&
+        APPENDABLE_ITEM_KINDS.has(row.itemKind)) &&
     row.scopeKind === "turn" &&
     row.turnId !== null &&
     appendableTurnIds.has(row.turnId) &&
-    row.parentToolCallId === null &&
-    row.itemKind === null
+    row.parentToolCallId === null
   );
 }
 

@@ -22,7 +22,7 @@ Examples:
 - Task done, next step obvious: "commit and push"
 
 Never repeat the user's latest message. Never suggest praise, questions, the agent's voice ("Let me...", "I'll..."), new ideas, or more than one sentence.
-Return an empty string after an error, when the next step isn't obvious, or for anything sensitive (credentials, security, private data, harm).
+Return an empty string after an error or when the next step isn't obvious.
 Copy the user's length, tone, capitalization, and wording.`;
 
 export const THREAD_PURPOSE_CLAUDE_MODEL = "claude-code/claude-haiku-5-5";

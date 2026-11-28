@@ -28,6 +28,7 @@ import { startClaudeVersionSync } from "./harness-versions.js";
 import { macInstalledAgents, macSignedInAgents } from "./mac-agents.js";
 import { disconnectAgent, restoreAgent } from "./agent-logins.js";
 import { autoDeleteDaysSchema, readAutoDelete, saveAutoDelete, startAutoDeleteSync } from "./auto-delete.js";
+import { threadAccessSchema, threadAccessSettingSchema } from "./thread-access.js";
 import { importRoomThreads } from "./bb-import.js";
 import { importConductorExport, importNativeSessions, listConductorExport, listNativeSessions } from "./session-import.js";
 import { conductorAppFound } from "./session-import-more.js";
@@ -46,6 +47,7 @@ import { deleteThreadOnMac } from "../threads/thread-lifecycle.js";
 import { emitPluginThreadUnarchived } from "../plugins/plugin-thread-events.js";
 import { assertValidParentThread } from "../threads/thread-parent.js";
 import { queueChildThreadTurnNotificationBestEffort } from "../threads/child-thread-notifications.js";
+import { acceptThreadSendRequest } from "../threads/thread-send-request.js";
 import { reportBug } from "./bug-reports.js";
 import { threadCredits } from "./thread-credits.js";
 import { continueShare, shareClicked, shareThread, stopSharing, threadShare } from "./shares.js";
@@ -90,6 +92,7 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     remove: (thread) => deleteThreadOnMac(deps, thread),
   };
   cloudroom(deps).childTurnEnded = (child, turnStatus, failureReason, turnId) => void queueChildThreadTurnNotificationBestEffort(deps, { childThread: child, parentThreadId: child.parentThreadId, turnStatus, failureReason, ...(turnId ? { turnId } : {}) });
+  cloudroom(deps).childTold = (parent, childId, text, queue) => acceptThreadSendRequest(deps, { thread: parent, payload: { input: [{ type: "text", text, mentions: [] }], mode: queue ? "queue-if-active" : "steer-if-active", senderThreadId: childId } });
   startClaudeVersionSync(deps, () => cloudroom(deps).teleportClient());
   startAutoDeleteSync(deps);
   const localOnly: MiddlewareHandler = async (context, next) => {
@@ -397,6 +400,14 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
   app.post("/api/v1/cloudroom/account/auto-delete", async (context) => {
     const { days } = z.object({ days: autoDeleteDaysSchema }).strict().parse(await context.req.json());
     return context.json(await autoDelete(saveAutoDelete(deps, days)));
+  });
+  const threadAccess = (body: { action: "get" } | { action: "set"; level: string }) => cloudroom(deps).sandboxes.threadAccess(body).then((value) => threadAccessSettingSchema.parse(value)).catch((error: unknown) => {
+    throw new ApiError(error instanceof CloudroomError && error.status ? 400 : 503, "cloud_thread_access", error instanceof Error ? error.message : String(error));
+  });
+  app.get("/api/v1/cloudroom/account/thread-access", async (context) => context.json(await threadAccess({ action: "get" })));
+  app.post("/api/v1/cloudroom/account/thread-access", async (context) => {
+    const { level } = z.object({ level: threadAccessSchema }).strict().parse(await context.req.json());
+    return context.json(await threadAccess({ action: "set", level }));
   });
   // The user's own VPS (ADR 0319) lives on the website, which routes Cloud threads to it.
   const vps = (body: Parameters<ReturnType<typeof cloudroom>["sandboxes"]["vps"]>[0]) => cloudroom(deps).sandboxes.vps(body).catch((error: unknown) => {

@@ -1,4 +1,4 @@
-import { getHost, updateHost } from "@cloudroom/db";
+import { getHost, heartbeatSession, updateHost } from "@cloudroom/db";
 import { setPluginMachineProviderBridge } from "../../src/services/plugins/plugin-machine-provider-registry.js";
 import type {
   HostDaemonOnlineRpcRequestMessage,
@@ -229,11 +229,13 @@ describe("public provider installation routes", () => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "provider-installation-partial-status-host",
       });
+      let claudeFails = true;
       registerHostRpcResponder(harness, {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
           if (
+            claudeFails &&
             request.command.type === "provider.installation.status" &&
             request.command.providerId === "claude-code"
           ) {
@@ -273,6 +275,29 @@ describe("public provider installation routes", () => {
         },
         "Failed to load provider installation status; omitting provider",
       );
+
+      // After one good answer, a later failure reports it instead (#2670).
+      claudeFails = false;
+      await harness.app.request(`${API}/hosts/${host.id}/provider-clis/status`);
+      claudeFails = true;
+      const again = (await readJson(
+        await harness.app.request(
+          `${API}/hosts/${host.id}/provider-clis/status`,
+        ),
+      )) as ProviderCliStatusResponse;
+      expect(again["claude-code"]?.installed).toBe(true);
+
+      // An answer older than 5 minutes is not reported.
+      const realNow = Date.now;
+      vi.spyOn(Date, "now").mockImplementation(() => realNow() + 6 * 60_000);
+      heartbeatSession(harness.db, session.id, Date.now() + 60_000);
+      const stale = (await readJson(
+        await harness.app.request(
+          `${API}/hosts/${host.id}/provider-clis/status`,
+        ),
+      )) as ProviderCliStatusResponse;
+      vi.restoreAllMocks();
+      expect(stale["claude-code"]).toBeUndefined();
     });
   });
 

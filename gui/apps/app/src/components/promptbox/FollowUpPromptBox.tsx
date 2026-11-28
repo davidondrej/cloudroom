@@ -721,7 +721,7 @@ function FollowUpPromptBoxWithComposer({
     >
       <PromptBoxWithScrollAnchor
         id={id}
-        autoFocus={paneContext ? paneContext.isFocused && !paneContext.isHidden : true}
+        autoFocus={!(paneContext?.isHidden ?? false)}
         promptBoxRef={promptBoxRef}
         voice={voice}
         minHeight={FOLLOW_UP_PROMPT_BOX_MIN_HEIGHT}

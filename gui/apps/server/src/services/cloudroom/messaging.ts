@@ -84,14 +84,6 @@ export class CloudMessaging {
     return { key_source: sandbox, ...(keys && !keys.includes(".env") ? { no_env: true as const } : {}) };
   }
 
-  /** The only API keys the sandbox a thread runs in gets (ADR 0342): null for every key and for threads without a
-   *  sandbox, like a VM's, and undefined when the website has no row for it. A sandbox with a list gets nothing from
-   *  this Mac at its agent's request. */
-  async keyList(threadId: string): Promise<string[] | null | undefined> {
-    const sandbox = sandboxThread(binding(this.rt.host.db, threadId)?.coreUrl ?? "");
-    return sandbox ? this.rt.sandboxes.loopSecrets(sandbox) : null;
-  }
-
   threadStatus(threadId: string) {
     const saved = binding(this.rt.host.db, threadId);
     if (!saved) return null;
@@ -213,7 +205,7 @@ export class CloudMessaging {
       const made = this.rt.host.createThread(tx, {
         executionTarget: "cloud", projectId: request.projectId, providerId, status: "pending", parentThreadId: parentId ?? null,
         ...(fork ? { originKind: "fork" as const, sourceThreadId: fork.sourceThreadId } : {}),
-        title: request.title, titleFallback: this.rt.host.deriveTitleFallback(titleInput), sectionId: request.sectionId, visibility: request.visibility,
+        title: request.title, titleFallback: this.rt.host.deriveTitleFallback(titleInput), pinned: request.pinned, sectionId: request.sectionId, visibility: request.visibility,
         originPluginId: request.originPluginId,
         pluginMetadata: request.pluginMetadata && request.originPluginId ? { pluginId: request.originPluginId, metadata: request.pluginMetadata } : null,
       });

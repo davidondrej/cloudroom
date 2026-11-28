@@ -1,19 +1,22 @@
-import { useSetPluginEnabled } from "@/components/plugin/useSetPluginEnabled";
 import {
   Suspense,
   useCallback,
-  useMemo,
+  useEffect,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { matchPath, useLocation, useNavigate } from "react-router";
+import {
+  matchPath,
+  Navigate,
+  useLocation,
+  useNavigate,
+  useSearchParams,
+} from "react-router";
 import "@cloudroom/shared-ui/icon-extended";
-import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { useMutation } from "@tanstack/react-query";
 import { buildPluginEditThreadPrompt } from "@cloudroom/shared-ui/resource-edit-prompt";
-import { appToast } from "@/components/ui/app-toast";
 import { OverflowFade } from "@/components/ui/overflow-fade";
 import { useScrollOverflowState } from "@/components/thread/timeline/useScrollOverflowState";
 import {
@@ -30,6 +33,7 @@ import {
 } from "@cloudroom/shared-ui/resource-list";
 import { Skeleton } from "@cloudroom/shared-ui/skeleton";
 import { PluginsOverview } from "@/components/plugin/PluginsOverview";
+import { PluginSettingsPage } from "@/components/plugin/PluginSettings";
 import {
   CatalogPluginDetail,
   CatalogPluginDetailBanner,
@@ -39,10 +43,8 @@ import {
   pluginRemovalDescription,
   pluginRemovalLabel,
 } from "@/components/tools/PluginDetail";
-import {
-  usePluginCatalogSearch,
-  type PluginCatalogSearchEntry,
-} from "@/hooks/queries/plugin-catalog-queries";
+import { usePluginCatalogSearch } from "@/hooks/queries/plugin-catalog-queries";
+import { OFFICIAL_MARKETPLACE } from "@/components/plugin/management/plugin-browse-discovery";
 import {
   removePlugin,
   usePluginList,
@@ -53,11 +55,11 @@ import { pluginAdminErrorMessage } from "@/lib/plugin-admin-error";
 import {
   REGISTRY_SKILLS_ROUTE_PATH,
   SKILLS_ROUTE_PATH,
+  getPluginConfigurationRoutePath,
   getPluginDetailRoutePath,
   getPluginsRoutePath,
   getRootComposeRoutePath,
   isPluginsRoutePath,
-  isSettingsPluginsRoutePath,
 } from "@/lib/route-paths";
 import { getToolsOwnedCollectionRoutePath } from "@/components/tools/tools-navigation";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
@@ -127,316 +129,276 @@ function ResourceScrollPage({
   );
 }
 
-function PluginsToolView({
-  selectedPluginId,
-  onOpenPlugin,
-}: {
-  selectedPluginId: string | null;
-  onOpenPlugin: (pluginId: string, trigger: HTMLButtonElement) => void;
-}) {
-  return (
-    <ResourceScrollPage fillViewport>
-      <PluginsOverview
-        selectedPluginId={selectedPluginId}
-        onOpenPlugin={onOpenPlugin}
-      />
-    </ResourceScrollPage>
+/** Opens a plugin: its one page in Settings when installed, else its listing. */
+export function useOpenPlugin(): (
+  pluginId: string,
+  marketplace?: string,
+) => void {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const listQuery = usePluginList({ enabled: true });
+  const plugins = listQuery.data?.plugins;
+  return useCallback(
+    (pluginId: string, marketplace?: string) => {
+      if (plugins?.some((plugin) => plugin.id === pluginId)) {
+        navigate(getPluginConfigurationRoutePath({ pluginId }));
+        return;
+      }
+      // On the Plugins page, the way back keeps the list's search and filter.
+      const search = new URLSearchParams(
+        isPluginsRoutePath(location.pathname) ? location.search : "",
+      );
+      if (marketplace === undefined) search.delete(LISTING_MARKETPLACE_PARAM);
+      else search.set(LISTING_MARKETPLACE_PARAM, marketplace);
+      navigate({
+        pathname: getPluginDetailRoutePath({ pluginId }),
+        search: search.size === 0 ? "" : `?${search}`,
+      });
+    },
+    [location.pathname, location.search, navigate, plugins],
   );
 }
 
-function PluginDetailToolView({
+/** Picks the listing when two marketplaces list the same plugin ID. */
+const LISTING_MARKETPLACE_PARAM = "marketplace";
+
+function PluginPageState({
+  state,
+  message,
+  onRetry,
+}: {
+  state: "loading" | "error" | "empty";
+  message: string;
+  onRetry?: () => void;
+}) {
+  return (
+    <ResourceListState
+      state={state}
+      message={message}
+      layout="detail"
+      maxWidthClassName="max-w-5xl"
+      onRetry={onRetry}
+    />
+  );
+}
+
+/** An installed plugin's one page: switch, settings, release and capabilities. Settings hosts it. */
+export function PluginDetailPaneView({
   pluginId,
   settings,
+  inFlow = false,
 }: {
   pluginId: string;
+  /** Extra settings the app adds for this plugin. */
   settings?: ReactNode;
+  /** Flows inside a Settings tab instead of scrolling on its own. */
+  inFlow?: boolean;
 }) {
   const navigate = useNavigate();
-  const location = useLocation();
+  const openPlugin = useOpenPlugin();
   const [deleteTarget, setDeleteTarget] = useState<PluginListItem | null>(null);
-  const [installTarget, setInstallTarget] =
-    useState<PluginCatalogSearchEntry | null>(null);
   const listQuery = usePluginList({ enabled: true });
   const catalogQuery = usePluginCatalogSearch("", { enabled: true });
-  const plugins = useMemo(
-    () => listQuery.data?.plugins ?? [],
-    [listQuery.data],
-  );
+  const plugin =
+    listQuery.data?.plugins.find((entry) => entry.id === pluginId) ?? null;
+  const catalogEntry =
+    plugin === null
+      ? undefined
+      : catalogQuery.data?.entries.find(
+          (entry) =>
+            entry.pluginId === plugin.id &&
+            entry.entryId === plugin.catalogEntryId &&
+            entry.marketplace === plugin.catalogMarketplaceName,
+        );
   const {
     canOpenPreferredDirectoryTarget,
     openPathInPreferredDirectoryTarget,
   } = useLocalOpenTargets({
-    enabled: plugins.some(
-      (plugin) => pluginIsLocalSource(plugin) && plugin.rootDir !== null,
-    ),
-  });
-  const setEnabled = useSetPluginEnabled();
-  const pluginToggle = useMutation({
-    meta: { showErrorToast: false },
-    mutationFn: async (plugin: PluginListItem) => {
-      const action = plugin.enabled ? "disable" : "enable";
-      try {
-        await setEnabled(plugin.id, !plugin.enabled);
-      } catch {
-        throw new Error(`Failed to ${action} plugin`);
-      }
-    },
-    onSuccess: () => listQuery.refetch(),
-    onError: (error) => {
-      appToast.error(error instanceof Error ? error.message : String(error));
-    },
+    enabled: plugin !== null && pluginIsLocalSource(plugin),
   });
   const pluginDelete = useMutation({
     meta: { showErrorToast: false },
-    mutationFn: (plugin: PluginListItem) => removePlugin(fetch, plugin.id),
-    onSuccess: (_data, deletedPlugin) => {
-      const isLocal = pluginIsLocalSource(deletedPlugin);
+    mutationFn: (target: PluginListItem) => removePlugin(fetch, target.id),
+    onSuccess: (_data, deleted) => {
       pluginToast.success(
-        isLocal ? "Plugin removed from Cloudroom" : "Plugin uninstalled",
-        deletedPlugin,
+        pluginIsLocalSource(deleted)
+          ? "Plugin removed from Cloudroom"
+          : "Plugin uninstalled",
+        deleted,
         "catalog",
       );
       setDeleteTarget(null);
-      navigate(
-        isPluginsRoutePath(location.pathname)
-          ? { pathname: getPluginsRoutePath(), search: location.search }
-          : getToolsOwnedCollectionRoutePath("plugins"),
-      );
+      navigate(getToolsOwnedCollectionRoutePath("plugins"));
       return listQuery.refetch();
     },
-    onError: (error, plugin) => {
-      const isLocal = pluginIsLocalSource(plugin);
+    onError: (error, target) => {
       pluginToast.error(
-        isLocal ? "Plugin removal failed" : "Plugin uninstall failed",
-        plugin,
+        pluginIsLocalSource(target)
+          ? "Plugin removal failed"
+          : "Plugin uninstall failed",
+        target,
         "installed",
         pluginAdminErrorMessage(error),
       );
     },
   });
-  const isLoading = listQuery.isFetching && listQuery.data === undefined;
-  const selectedPlugin =
-    plugins.find((plugin) => plugin.id === pluginId) ?? null;
-  const selectedCatalogEntryId = selectedPlugin?.catalogEntryId ?? null;
-  const selectedCatalogMarketplaceName =
-    selectedPlugin?.catalogMarketplaceName ?? null;
-  const selectedCatalogEntry =
-    selectedPlugin === null
-      ? (catalogQuery.data?.entries.find(
-          (entry) => entry.pluginId === pluginId,
-        ) ?? null)
-      : selectedCatalogEntryId === null ||
-          selectedCatalogMarketplaceName === null
-        ? null
-        : (catalogQuery.data?.entries.find(
-            (entry) =>
-              entry.pluginId === selectedPlugin.id &&
-              entry.entryId === selectedCatalogEntryId &&
-              entry.marketplace === selectedCatalogMarketplaceName,
-          ) ?? null);
-  useResourceRouteLabel(
-    selectedPlugin?.name ??
-      selectedPlugin?.id ??
-      selectedCatalogEntry?.displayName ??
-      null,
-  );
-  const pendingPluginId =
-    pluginToggle.isPending && pluginToggle.variables
-      ? pluginToggle.variables.id
-      : pluginDelete.isPending && pluginDelete.variables
-        ? pluginDelete.variables.id
-        : null;
-  const handleEditPlugin = useCallback(
-    (plugin: PluginListItem) => {
-      navigate(getRootComposeRoutePath(), {
-        state: {
-          focusPrompt: true,
-          initialPrompt: buildPluginEditThreadPrompt({
-            name: plugin.name ?? plugin.id,
-            path: plugin.rootDir,
-          }),
-          replaceInitialPrompt: true,
-        },
-      });
-    },
-    [navigate],
-  );
-  const handleOpenPluginSource = useCallback(
-    (plugin: PluginListItem) => {
-      if (!canOpenPreferredDirectoryTarget) return;
-      void openPathInPreferredDirectoryTarget({
-        path: plugin.rootDir,
-        lineNumber: null,
-      });
-    },
-    [canOpenPreferredDirectoryTarget, openPathInPreferredDirectoryTarget],
-  );
-  const handleOpenCatalogPlugin = useCallback(
-    (nextPluginId: string) => {
-      navigate(
-        isSettingsPluginsRoutePath(location.pathname)
-          ? getPluginDetailRoutePath({
-              pluginId: nextPluginId,
-              view: "installed",
-            })
-          : {
-              pathname: getPluginDetailRoutePath({ pluginId: nextPluginId }),
-              search: location.search,
-            },
-      );
-    },
-    [location.pathname, location.search, navigate],
-  );
+  useResourceRouteLabel(plugin?.name ?? plugin?.id ?? null);
 
-  let detailContent: ReactNode;
-  if (listQuery.isError) {
-    detailContent = (
-      <ResourceListState
-        state="error"
-        message="Couldn't load plugin."
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-        onRetry={() => void listQuery.refetch()}
-      />
-    );
-  } else if (isLoading) {
-    detailContent = (
-      <ResourceListState
-        state="loading"
-        message="Loading plugin"
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-      />
-    );
-  } else if (selectedPlugin !== null) {
-    detailContent = (
+  let content: ReactNode;
+  if (plugin !== null) {
+    content = (
       <PluginDetail
-        isLoading={false}
-        plugin={selectedPlugin}
-        pending={pendingPluginId === selectedPlugin.id}
+        plugin={plugin}
+        pending={pluginDelete.isPending}
         openSourceDisabled={!canOpenPreferredDirectoryTarget}
-        onToggle={(target) => pluginToggle.mutate(target)}
-        onEdit={handleEditPlugin}
-        onOpenSource={handleOpenPluginSource}
+        onEdit={(target) =>
+          navigate(getRootComposeRoutePath(), {
+            state: {
+              focusPrompt: true,
+              initialPrompt: buildPluginEditThreadPrompt({
+                name: target.name ?? target.id,
+                path: target.rootDir,
+              }),
+              replaceInitialPrompt: true,
+            },
+          })
+        }
+        onOpenSource={(target) =>
+          void openPathInPreferredDirectoryTarget({
+            path: target.rootDir,
+            lineNumber: null,
+          })
+        }
         onDelete={setDeleteTarget}
-        catalogEntry={selectedCatalogEntry ?? undefined}
+        catalogEntry={catalogEntry}
         catalogEntries={catalogQuery.data?.entries ?? []}
-        onOpenPlugin={handleOpenCatalogPlugin}
+        onOpenPlugin={openPlugin}
         settings={settings}
       />
     );
-  } else if (selectedCatalogEntry !== null && !selectedCatalogEntry.installed) {
-    detailContent = (
-      <CatalogPluginDetail
-        entry={selectedCatalogEntry}
-        onInstall={setInstallTarget}
-        catalogEntries={catalogQuery.data?.entries ?? []}
-        onOpenPlugin={handleOpenCatalogPlugin}
-      />
-    );
-  } else if (catalogQuery.isError) {
-    detailContent = (
-      <ResourceListState
+  } else if (listQuery.isError) {
+    content = (
+      <PluginPageState
         state="error"
         message="Couldn't load plugin."
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-        onRetry={() => void catalogQuery.refetch()}
-      />
-    );
-  } else if (catalogQuery.isFetching && catalogQuery.data === undefined) {
-    detailContent = (
-      <ResourceListState
-        state="loading"
-        message="Loading plugin"
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-      />
-    );
-  } else if (selectedCatalogEntry?.installed) {
-    detailContent = (
-      <ResourceListState
-        state="error"
-        message="Couldn't load the installed plugin."
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
         onRetry={() => void listQuery.refetch()}
       />
     );
-  } else {
-    detailContent = (
-      <ResourceListState
-        state="empty"
-        message="Plugin not found."
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-      />
+  } else if (listQuery.data === undefined) {
+    // A Settings tab keeps its own skeleton, which Accounts skips: it has no header to flash.
+    content = inFlow ? (
+      <PluginSettingsPage pluginId={pluginId} />
+    ) : (
+      <PluginPageState state="loading" message="Loading plugin" />
     );
+  } else {
+    // A stale link to a plugin that is no longer installed opens its listing.
+    content = <Navigate to={getPluginDetailRoutePath({ pluginId })} replace />;
   }
 
-  return (
-    <div className="flex h-full min-h-0 flex-col">
-      {selectedPlugin !== null ? (
-        <PluginDetailBanners plugin={selectedPlugin} />
-      ) : selectedCatalogEntry !== null && !selectedCatalogEntry.installed ? (
-        <CatalogPluginDetailBanner entry={selectedCatalogEntry} />
+  const banner =
+    plugin === null ? null : <PluginDetailBanners plugin={plugin} />;
+  const removeDialog = (
+    <ConfirmDeleteDialog
+      open={deleteTarget !== null}
+      onOpenChange={(open) => {
+        if (!open && !pluginDelete.isPending) setDeleteTarget(null);
+      }}
+    >
+      {deleteTarget ? (
+        <ConfirmDeleteDialogContent
+          title={
+            pluginIsLocalSource(deleteTarget)
+              ? "Remove plugin from Cloudroom?"
+              : "Uninstall plugin?"
+          }
+          description={pluginRemovalDescription(deleteTarget)}
+          confirmLabel={pluginRemovalLabel(deleteTarget)}
+          pending={pluginDelete.isPending}
+          onConfirm={() => pluginDelete.mutate(deleteTarget)}
+          onCancel={() => setDeleteTarget(null)}
+        />
       ) : null}
+    </ConfirmDeleteDialog>
+  );
+  if (inFlow) {
+    return (
+      <div className="space-y-4">
+        {banner}
+        {content}
+        {removeDialog}
+      </div>
+    );
+  }
+  return (
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      {banner}
       <div className="min-h-0 flex-1">
         <ResourceScrollPage>
-          {detailContent}
-          <ConfirmDeleteDialog
-            open={deleteTarget !== null}
-            onOpenChange={(open) => {
-              if (!open && !pluginDelete.isPending) setDeleteTarget(null);
-            }}
-          >
-            {deleteTarget ? (
-              <ConfirmDeleteDialogContent
-                title={
-                  pluginIsLocalSource(deleteTarget)
-                    ? "Remove plugin from Cloudroom?"
-                    : "Uninstall plugin?"
-                }
-                description={pluginRemovalDescription(deleteTarget)}
-                confirmLabel={pluginRemovalLabel(deleteTarget)}
-                pending={pluginDelete.isPending}
-                onConfirm={() => pluginDelete.mutate(deleteTarget)}
-                onCancel={() => setDeleteTarget(null)}
-              />
-            ) : null}
-          </ConfirmDeleteDialog>
-          <AddPluginDialog
-            open={installTarget !== null}
-            initial={
-              installTarget === null
-                ? null
-                : addPluginInitialFromEntry(installTarget)
-            }
-            onOpenChange={(open) => {
-              if (!open) setInstallTarget(null);
-            }}
-            onInstalled={() => void listQuery.refetch()}
-          />
+          {content}
+          {removeDialog}
         </ResourceScrollPage>
       </div>
     </div>
   );
 }
 
-export function PluginDetailPaneView({
-  pluginId,
-  settings,
-}: {
-  pluginId: string;
-  /** Settings → Plugins passes the plugin's extra settings, so the page shows them in place. */
-  settings?: ReactNode;
-}) {
+/** The listing of a plugin that is not installed: what it does, and Install. */
+function PluginListing({ pluginId }: { pluginId: string }) {
+  const openPlugin = useOpenPlugin();
+  const [searchParams] = useSearchParams();
+  const [installOpen, setInstallOpen] = useState(false);
+  const catalogQuery = usePluginCatalogSearch("", { enabled: true });
+  const entries = catalogQuery.data?.entries ?? [];
+  const marketplace = searchParams.get(LISTING_MARKETPLACE_PARAM);
+  const matches = entries.filter(
+    (candidate) => candidate.pluginId === pluginId,
+  );
+  // Without a marketplace in the URL, the official one wins, then the first listing.
+  const entry =
+    matches.find(
+      (candidate) =>
+        candidate.marketplace === (marketplace ?? OFFICIAL_MARKETPLACE),
+    ) ?? (marketplace === null ? matches[0] : undefined);
+  useResourceRouteLabel(entry?.displayName ?? null);
+
+  if (entry?.installed) {
+    return (
+      <Navigate to={getPluginConfigurationRoutePath({ pluginId })} replace />
+    );
+  }
+
+  if (entry === undefined) {
+    return catalogQuery.isError ? (
+      <PluginPageState
+        state="error"
+        message="Couldn't load plugin."
+        onRetry={() => void catalogQuery.refetch()}
+      />
+    ) : catalogQuery.data === undefined ? (
+      <PluginPageState state="loading" message="Loading plugin" />
+    ) : (
+      <PluginPageState state="empty" message="Plugin not found." />
+    );
+  }
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-      <div className="min-h-0 flex-1 overflow-hidden">
-        <Suspense fallback={<ResourceBodyFallback />}>
-          <PluginDetailToolView pluginId={pluginId} settings={settings} />
-        </Suspense>
+    <div className="flex h-full min-h-0 flex-col">
+      <CatalogPluginDetailBanner entry={entry} />
+      <div className="min-h-0 flex-1">
+        <ResourceScrollPage>
+          <CatalogPluginDetail
+            entry={entry}
+            onInstall={() => setInstallOpen(true)}
+            catalogEntries={entries}
+            onOpenPlugin={openPlugin}
+          />
+          {/* Once installed, the Plugins page redirects to the plugin's page in Settings. */}
+          <AddPluginDialog
+            open={installOpen}
+            initial={addPluginInitialFromEntry(entry)}
+            onOpenChange={setInstallOpen}
+          />
+        </ResourceScrollPage>
       </div>
     </div>
   );
@@ -445,74 +407,78 @@ export function PluginDetailPaneView({
 export function PluginsView({ pluginId }: { pluginId?: string } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
+  const openPlugin = useOpenPlugin();
   const focusReturnRef = useRef<HTMLButtonElement | null>(null);
-  const catalogQuery = usePluginCatalogSearch("", {
-    enabled: pluginId !== undefined,
-  });
-  const listQuery = usePluginList({ enabled: pluginId !== undefined });
+  const listQuery = usePluginList({ enabled: true });
+  const isInstalled =
+    pluginId !== undefined &&
+    (listQuery.data?.plugins.some((plugin) => plugin.id === pluginId) ?? false);
+  const backSearch = new URLSearchParams(location.search);
+  backSearch.delete(LISTING_MARKETPLACE_PARAM);
 
-  const openPlugin = useCallback(
-    (nextPluginId: string, trigger: HTMLButtonElement) => {
-      focusReturnRef.current = trigger;
-      navigate({
-        pathname: getPluginDetailRoutePath({ pluginId: nextPluginId }),
-        search: location.search,
-      });
-    },
-    [location.search, navigate],
-  );
-  const closeCard = useCallback(() => {
-    navigate({
-      pathname: getPluginsRoutePath(),
-      search: location.search,
-    });
+  // Back at the list, focus returns to the row that opened the listing.
+  useEffect(() => {
+    if (pluginId !== undefined) return;
     const focusTarget = focusReturnRef.current;
-    window.requestAnimationFrame(() => {
-      if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
-    });
-  }, [location.search, navigate]);
-  const label =
-    catalogQuery.data?.entries.find((entry) => entry.pluginId === pluginId)
-      ?.displayName ??
-    listQuery.data?.plugins.find((plugin) => plugin.id === pluginId)?.name ??
-    pluginId ??
-    "Plugin";
+    focusReturnRef.current = null;
+    if (focusTarget?.isConnected) focusTarget.focus({ preventScroll: true });
+  }, [pluginId]);
+
+  // Old links to an installed plugin, and a plugin that was just installed.
+  if (pluginId !== undefined && isInstalled) {
+    return (
+      <Navigate to={getPluginConfigurationRoutePath({ pluginId })} replace />
+    );
+  }
 
   return (
-    <div className="@container/plugins relative -mx-4 -mb-4 -mt-4 flex min-h-0 min-w-0 flex-1 overflow-hidden md:-mx-5 md:-mb-5 md:-mt-5">
-      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div className="relative -mx-4 -mb-4 -mt-4 flex min-h-0 min-w-0 flex-1 overflow-hidden md:-mx-5 md:-mb-5 md:-mt-5">
+      {/* The list stays mounted under a listing, so the way back keeps its scroll and search. */}
+      <div
+        className={cn(
+          "min-h-0 min-w-0 flex-1 overflow-hidden",
+          pluginId !== undefined && "invisible",
+        )}
+      >
         <Suspense fallback={<ResourceBodyFallback />}>
-          <PluginsToolView
-            selectedPluginId={pluginId ?? null}
-            onOpenPlugin={openPlugin}
-          />
+          <ResourceScrollPage fillViewport>
+            <PluginsOverview
+              onOpenPlugin={(nextPluginId, trigger, marketplace) => {
+                focusReturnRef.current = trigger;
+                openPlugin(nextPluginId, marketplace);
+              }}
+            />
+          </ResourceScrollPage>
         </Suspense>
       </div>
       {pluginId === undefined ? null : (
-        <aside
-          aria-label={`${label} details`}
-          className="flex w-[min(36rem,48%)] shrink-0 flex-col py-3 pr-3 @max-3xl/plugins:absolute @max-3xl/plugins:inset-0 @max-3xl/plugins:z-20 @max-3xl/plugins:w-full @max-3xl/plugins:bg-background @max-3xl/plugins:p-0"
-        >
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-lg @max-3xl/plugins:rounded-none @max-3xl/plugins:border-0 @max-3xl/plugins:shadow-none">
-            <div className="flex h-10 shrink-0 items-center justify-end px-2">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="size-7 text-muted-foreground hover:text-foreground"
-                aria-label={`Close ${label}`}
-                onClick={closeCard}
-              >
-                <Icon name="X" className="size-4" aria-hidden />
-              </Button>
-            </div>
-            <div className="min-h-0 flex-1">
-              <Suspense fallback={<ResourceBodyFallback />}>
-                <PluginDetailToolView pluginId={pluginId} />
-              </Suspense>
-            </div>
+        <div className="absolute inset-0 flex flex-col bg-background">
+          <div className="mx-auto w-full max-w-5xl shrink-0 px-4 pt-3 md:px-5 md:pt-4">
+            <button
+              type="button"
+              className="-ml-1 inline-flex items-center gap-1 rounded-sm px-1 text-xs text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={() =>
+                navigate({
+                  pathname: getPluginsRoutePath(),
+                  search: backSearch.size === 0 ? "" : `?${backSearch}`,
+                })
+              }
+            >
+              <Icon name="ChevronLeft" className="size-3" aria-hidden />
+              Browse plugins
+            </button>
           </div>
-        </aside>
+          <div className="min-h-0 flex-1">
+            <Suspense fallback={<ResourceBodyFallback />}>
+              {/* Until the installed list arrives, a listing could offer Install for an installed plugin. */}
+              {listQuery.data === undefined && !listQuery.isError ? (
+                <ResourceBodyFallback />
+              ) : (
+                <PluginListing key={pluginId} pluginId={pluginId} />
+              )}
+            </Suspense>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useRealtime, useRpc, type StandardSchemaV1InferOutput } from "@get-bb/plugin-sdk/app";
+import { experimental_ProviderIcon as ProviderIcon, experimental_useProviders as useProviders, useRealtime, useRpc, type StandardSchemaV1InferOutput } from "@get-bb/plugin-sdk/app";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -103,14 +103,14 @@ export function Minutes({ value, className = "", onSave }: { value: number; clas
   const [draft, setDraft] = useState(String(value));
   const commit = () => {
     const typed = Math.round(Number(draft));
-    const minutes = draft.trim() === "" || Number.isNaN(typed) ? value : Math.min(1440, Math.max(5, typed));
+    const minutes = draft.trim() === "" || Number.isNaN(typed) ? value : Math.min(1440, Math.max(1, typed));
     setDraft(String(minutes));
     if (minutes !== value) onSave(minutes);
   };
   return (
     <Input
       type="number"
-      min={5}
+      min={1}
       max={1440}
       aria-label="Minutes between pings"
       className={`h-8 w-20 ${className}`}
@@ -121,6 +121,40 @@ export function Minutes({ value, className = "", onSave }: { value: number; clas
         if (event.key === "Enter") commit();
       }}
     />
+  );
+}
+
+export const MAX_THREADS_MIN = 1;
+export const MAX_THREADS_MAX = 20;
+
+/** Compact − N + stepper for how many stopped threads a ping can check and unblock at once. */
+export function MaxThreads({ value, onSave }: { value: number; onSave(next: number): void }) {
+  const step = (delta: number) => {
+    const next = Math.min(MAX_THREADS_MAX, Math.max(MAX_THREADS_MIN, value + delta));
+    if (next !== value) onSave(next);
+  };
+  return (
+    <span className="inline-flex h-7 items-center rounded-full bg-state-hover px-1">
+      <button
+        type="button"
+        aria-label="Decrease max threads per ping"
+        disabled={value <= MAX_THREADS_MIN}
+        onClick={() => step(-1)}
+        className="flex size-5 cursor-pointer items-center justify-center rounded-full text-sm leading-none text-muted-foreground hover:bg-state-active hover:text-foreground disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+      >
+        −
+      </button>
+      <span className="min-w-6 text-center font-medium tabular-nums text-foreground">{value}</span>
+      <button
+        type="button"
+        aria-label="Increase max threads per ping"
+        disabled={value >= MAX_THREADS_MAX}
+        onClick={() => step(1)}
+        className="flex size-5 cursor-pointer items-center justify-center rounded-full text-sm leading-none text-muted-foreground hover:bg-state-active hover:text-foreground disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
+      >
+        +
+      </button>
+    </span>
   );
 }
 
@@ -162,7 +196,7 @@ export function useSettings() {
     rpc.call("forget", { id }).then(setView, (cause: unknown) => setError(message(cause)));
   };
   /** Runs after the saves still on their way, so a ping right after an edit uses it. */
-  const run = (method: "pingNow" | "fresh" | "skip") => {
+  const run = (method: "pingNow" | "skip") => {
     setBusy(true);
     setError(null);
     saves.current
@@ -205,6 +239,37 @@ export function Meter({ view, onSkip }: { view: View; onSkip(): void }) {
           </button>
         ) : null}
       </p>
+    </div>
+  );
+}
+
+/** A red alert under the model picker when the Director's model is too weak or an older version (David, 2026-11-27). */
+export function WeakModel({ check, onPick }: { check: View["modelCheck"]; onPick(agent: Config["agent"]): void }) {
+  const { providers } = useProviders();
+  if (check === null || check.problem === null) return null;
+  const picks = check.picks.flatMap((pick) => {
+    const provider = providers.find((each) => each.id === pick.agent.providerId);
+    return provider ? [{ ...pick, provider }] : [];
+  });
+  return (
+    <div className="mt-2.5 flex items-start gap-2.5 rounded-xl px-3.5 py-3" style={{ background: "color-mix(in oklab, var(--destructive) 14%, transparent)" }} role="alert">
+      <span className="mt-0.5 shrink-0 text-destructive">
+        <Icon name="AlertTriangle" className="size-4" />
+      </span>
+      <div className="min-w-0 space-y-2">
+        <p className="text-[13px] font-semibold text-foreground">
+          {check.name} is too {check.problem === "old" ? "old" : "weak"} to be your Director.
+        </p>
+        <p className="text-xs text-muted-foreground">Use a frontier model:</p>
+        <div className="flex flex-wrap gap-1.5">
+          {picks.map(({ name, agent, provider }) => (
+            <button key={name} type="button" onClick={() => onPick(agent)} className="flex h-7 cursor-pointer items-center gap-1.5 rounded-full bg-state-hover px-2.5 text-[13px] text-foreground hover:bg-state-active">
+              <ProviderIcon providerKind="agent" provider={provider} className="size-3.5 shrink-0" aria-hidden />
+              {name}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

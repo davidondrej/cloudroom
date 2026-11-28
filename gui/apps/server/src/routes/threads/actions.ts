@@ -207,6 +207,7 @@ function buildActivePinnedThreadRootListResponse(
 }
 
 function assertPinnedThreadOrderResult(
+  db: AppDeps["db"],
   result: ReorderPinnedThreadResult,
 ): void {
   switch (result.kind) {
@@ -224,6 +225,19 @@ function assertPinnedThreadOrderResult(
         409,
         "invalid_request",
         "Pinned thread order is invalid",
+      );
+    case "grouped_pin":
+      try {
+        // Name the top-level pin only if the reorder API would accept it.
+        requirePublicThread(db, result.rootThreadId);
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        throw new ApiError(409, "invalid_request", "Pinned thread order changed");
+      }
+      throw new ApiError(
+        409,
+        "invalid_request",
+        `Pinned thread ${result.threadId} is grouped under its pinned parent ${result.parentThreadId}, so it has no top-level pin order. Reorder only top-level pins; its top-level pin is ${result.rootThreadId}.`,
       );
   }
 }
@@ -603,6 +617,7 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   patch(routes.pinOrder, (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     assertPinnedThreadOrderResult(
+      deps.db,
       reorderPinnedThread({
         db: deps.db,
         notifier: deps.hub,

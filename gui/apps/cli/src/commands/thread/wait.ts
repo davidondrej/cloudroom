@@ -21,6 +21,7 @@ import {
 import {
   DEFAULT_CHILDREN_WAIT_POLL_INTERVAL_MS,
   DEFAULT_CHILDREN_WAIT_TIMEOUT_SECONDS,
+  shortWarning,
   waitForChildren,
 } from "./wait-children.js";
 
@@ -96,9 +97,9 @@ export function registerWaitCommand(
           result = await sdk.threads.wait(waitArgs);
         } catch (error) {
           if (error instanceof ThreadWaitTimeoutError) {
-            // A thread that went silent says so (#977).
+            // A thread that went silent says so (#977), in one short line without HTML (#2601).
             const warning = await sdk.threads.output({ threadId }).then(
-              (output) => output.error,
+              (output) => output.error && shortWarning(output.error),
               () => null,
             );
             throw new CliExitError(

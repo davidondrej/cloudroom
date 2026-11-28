@@ -44,9 +44,11 @@ import { acceptThreadSendRequest } from "./thread-send-request.js";
 import { cancelRetriesForExplicitStop, retryFailedTurn } from "./turn-retry.js";
 import { loadFailedTurn, type FailedTurnRecord } from "./turn-failed.js";
 import {
+  lastTurnReasoningLevel,
   MISSING_SESSION_ERROR,
+  messagesFromRows,
   sessionMayHoldHistory,
-  threadMessages,
+  threadMessageRows,
   transcriptMarkdown,
   type ThreadMessage,
 } from "./thread-transcript.js";
@@ -54,7 +56,7 @@ import {
 export interface HarnessSwitch {
   providerId: string;
   model: string;
-  reasoningLevel: ReasoningLevel | null;
+  reasoningLevel?: ReasoningLevel | null;
 }
 
 /** What `resend` did. `starting`: sent, but the host hasn't confirmed the turn yet. */
@@ -141,12 +143,19 @@ async function switchThenResend(
       thread.originKind === "fork" &&
       !threadHasProviderSession(deps.db, threadId);
     // A Core that switches the conversation itself builds the history (#237): no seed then.
-    const prepare = async (seeded = true) => {
-      const seed = !seeded ? [] : await historySeed(
-        deps,
-        thread,
-        `[Cloudroom] This conversation started with another agent (${thread.providerId}). You are now continuing it as ${target.providerId}.`,
-      );
+    const prepare = async (
+      seeded = true,
+      history?: ReturnType<typeof historyRows>,
+    ) => {
+      const seed = !seeded
+        ? []
+        : await historySeed(
+            deps,
+            thread,
+            `[Cloudroom] This conversation started with another agent (${thread.providerId}). You are now continuing it as ${target.providerId}.`,
+            thread.projectId,
+            history,
+          );
       if (unstartedLocalFork && seed.length === 0) {
         return () => {};
       }
@@ -174,10 +183,18 @@ async function switchThenResend(
       };
     };
     if (run.cloud) {
-      await cloudroom(deps).switchHarness(thread, target, prepare);
+      await cloudroom(deps).switchHarness(
+        thread,
+        { ...target, reasoningLevel: target.reasoningLevel ?? null },
+        prepare,
+      );
       return thread;
     }
-    const override = await resolveHarnessSwitchOverride(deps, thread, target);
+    const resolveOverride = await resolveHarnessSwitchOverride(
+      deps,
+      thread,
+      target,
+    );
     if (run.late) throw switchTimeout();
     requireReady(deps, thread, target);
     const environment = thread.environmentId
@@ -197,7 +214,10 @@ async function switchThenResend(
         );
       });
     }
-    const record = await prepare();
+    // Read once the stop has saved the old agent's last reply: one read for the seed and the inherited effort (#2692).
+    const history = historyRows(deps, thread);
+    const override = resolveOverride(lastTurnReasoningLevel(history));
+    const record = await prepare(true, history);
     if (run.late) throw switchTimeout();
     deps.db.transaction((tx) => {
       updateThread(tx, deps.hub, threadId, { providerId: target.providerId });
@@ -409,7 +429,7 @@ export async function continueInFreshSession(
 export function requireSwitchableThread(
   deps: LoggedPendingInteractionWorkSessionDeps,
   threadId: string,
-): Thread {
+): NonNullable<ReturnType<typeof getThread>> {
   const thread = getThread(deps.db, threadId);
   if (!thread) throw new ApiError(404, "thread_not_found", "Thread not found");
   if (thread.archivedAt !== null || thread.deletedAt !== null) {
@@ -448,17 +468,26 @@ export async function historySeed(
   thread: Thread,
   intro: string,
   projectId = thread.projectId,
+  rows = historyRows(deps, thread),
 ): Promise<PromptInput[]> {
+  return messagesSeed(
+    deps.config.dataDir,
+    projectId,
+    messagesFromRows(rows),
+    intro,
+  );
+}
+
+/** The thread's message events since its last context clear. */
+function historyRows(
+  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "db">,
+  thread: Thread,
+): ReturnType<typeof threadMessageRows> {
   const after =
     getLatestCompletedThreadContextClearSequence(deps.db, {
       threadId: thread.id,
     }) ?? undefined;
-  return messagesSeed(
-    deps.config.dataDir,
-    projectId,
-    threadMessages(deps.db, thread.id, { after }),
-    intro,
-  );
+  return threadMessageRows(deps.db, thread.id, { after });
 }
 
 /** The conversation so far, as hidden input for a fresh session: a short note with the latest messages, plus the full history as a file. */

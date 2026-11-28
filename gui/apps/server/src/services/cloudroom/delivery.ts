@@ -47,7 +47,8 @@ import type { CloudQueue } from "./queue.js";
 import type { CloudRuntime } from "./runtime.js";
 import { CLOUD_REGION, SANDBOX_PREFIX, SandboxAsleep, sandboxThread, startRefused } from "./sandboxes.js";
 import type { CloudStatusPreviews } from "./status-previews.js";
-import { baseBranch, binding, bindings, command, commands, openBinding, openBindings, projectCopyProgress, saveBinding, saveCommandState, TIMED_OUT, unsentDeletes, type Binding, type Command, type OpenBinding } from "./store.js";
+import { baseBranch, binding, bindings, command, commands, openBinding, projectCopyProgress, saveBinding, saveCommandState, TIMED_OUT, unsentDeletes, type Binding, type Command } from "./store.js";
+import { needsDelivery, pickDeliveries } from "./delivery-pick.js";
 import type { CloudStream } from "./stream.js";
 import { importCodexLogin, setupSync } from "./sync.js";
 import type { CloudTransfers } from "./transfers.js";
@@ -75,7 +76,7 @@ export class CloudDelivery {
   private onThreadWatched(threadId: string): void {
     if (this.rt.stopped) return;
     const row = openBinding(this.rt.host.db, threadId);
-    if (row && this.needsDelivery(row)) void this.deliver(row.threadId).catch(() => {});
+    if (row && needsDelivery(this.rt, (id) => this.stream.readHistory(id), row)) void this.deliver(row.threadId).catch(() => {});
   }
 
   start(): void {
@@ -104,7 +105,7 @@ export class CloudDelivery {
       if (this.rt.lastCapabilities) void this.statusPreviews.ensurePreviews(this.rt.lastCapabilities);
       void this.rt.sandboxes.discover().catch(() => {});
       void this.statusPreviews.reportMacAccess().catch(() => {});
-      for (const row of openBindings(this.rt.host.db)) if (this.needsDelivery(row)) void this.deliver(row.threadId).catch(() => {});
+      for (const id of pickDeliveries(this.rt, (thread) => this.stream.readHistory(thread))) void this.deliver(id).catch(() => {});
     }, 1500);
     this.timer.unref();
     const epoch = this.rt.epoch;
@@ -156,31 +157,6 @@ export class CloudDelivery {
     });
     entry.delivery = work;
     return work;
-  }
-
-  /** The 1.5 s tick skips threads with nothing to do: a live stream with nothing unsent, or a sandbox found asleep
-   *  since the last awake-list check, failed or not, and not woken here since. Everything else goes through deliver() as before. */
-  private needsDelivery(row: OpenBinding): boolean {
-    const entry = this.rt.peek(row.threadId);
-    // A fresh side chat stays unstarted until its first message so the user can pick any harness first.
-    if (!row.sessionId && row.status === "idle" && !row.sending) return false;
-    if (!row.sessionId || row.sending || entry?.connectionIssues?.delivery) return true;
-    const live = Boolean(entry?.stream);
-    // A Cloud thread streams here only while it's open on a screen here, a turn this computer sent runs, or this
-    // computer acts for it (home). A computer is home for every thread only it prompts (docs/scopes/cloud-threads.md App 4).
-    // A thread shown running streams until its turn ends, so no computer is left showing it running for good.
-    if (!this.rt.host.watching(row.threadId) && !this.rt.isHome(row.threadId) && !["pending", "starting", "active", "stopping"].includes(row.status)) {
-      if (live) this.rt.detach(row.threadId);
-      return false;
-    }
-    if (!live && ["pending", "starting", "active", "stopping"].includes(row.status)) return true;
-    const sandbox = sandboxThread(row.coreUrl);
-    if (!live && sandbox && entry?.sleptAtCheck === this.rt.sandboxes.awakeChecks && !this.rt.sandboxes.isAwake(sandbox)) {
-      if (sandbox === row.threadId && this.rt.host.watching(row.threadId)) void this.stream.readHistory(row.threadId);
-      return false;
-    }
-    if (sandbox && sandbox !== row.threadId && !row.parentThreadId && entry?.leftParent !== row.sessionId) return true;
-    return !live;
   }
 
   /** A note for a sandbox agent's next prompt once the account has used 80 %, then 95 %, of its Cloud Credits, plan
@@ -367,13 +343,18 @@ export class CloudDelivery {
       const fork = recovering ? null : cloudForkOf(initial?.input);
       const sideChat = !recovering && initial?.command === "side_chat" ? z.object({ side_chat: z.string() }).parse(JSON.parse(initial.input)).side_chat : null;
       const codeFrom = recovering ? undefined : codeFromOf(initial?.input);
+      // A recovered session copies no code but keeps its parent: the app leaves a relayed child's turn reports to Core
+      // (children.ts `noticeCloudParent`), so a new session that named none would report to nobody.
+      const wasRelayed = recovering && (saved.startRequestId?.startsWith(WEBSITE_CHILD) || Boolean(initial && JSON.parse(initial.input).parent_thread));
+      const linked = this.rt.host.getThread(threadId)?.parentThreadId ?? undefined;
+      const parent = codeFrom ?? (wasRelayed ? linked : undefined);
       // A Cloud parent's child reports its own turns, and takes tell, stop and archive, through the website (ADR 0259).
       // Only a parent with a sandbox of its own has a link there; children of one sharing a sandbox keep the app's path.
-      const relayed = Boolean(codeFrom && this.rt.host.getThread(threadId)?.parentThreadId === codeFrom && capabilities.relay && binding(this.rt.host.db, codeFrom)?.coreUrl === SANDBOX_PREFIX + codeFrom);
+      const relayed = Boolean(parent && linked === parent && capabilities.relay && binding(this.rt.host.db, parent)?.coreUrl === SANDBOX_PREFIX + parent);
       if (relayed && initial && !JSON.parse(initial.input).parent_thread) {
-        this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(initial.input), parent_thread: codeFrom }) }).where(eq(cloudroomCommands.id, initial.id)).run();
+        this.rt.host.db.update(cloudroomCommands).set({ input: JSON.stringify({ ...JSON.parse(initial.input), parent_thread: parent }) }).where(eq(cloudroomCommands.id, initial.id)).run();
       }
-      const parentThread = relayed ? { parent_thread: codeFrom } : {};
+      const parentThread = relayed ? { parent_thread: parent } : {};
       target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
       if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
       const plan = { key: copyKey(sandbox, target ?? ""), branch: recovering ? undefined : baseBranch(initial?.input) };

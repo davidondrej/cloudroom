@@ -60,6 +60,7 @@ import { RECOVERY_WAIT_MS, sweepDueAutomations } from "./sweep.js";
 import type { FallbackSdk } from "./fallback.js";
 import { createAutomationService } from "./service.js";
 import { buildReview } from "./review.js";
+import { buildFixLoopPrompt } from "../lib/paused.js";
 import { forgetCloud, loopThreads, pausedCloud } from "./paused.js";
 import { registerAutomationCli } from "./cli.js";
 import { createRpcHandlers } from "./rpc.js";
@@ -1856,6 +1857,11 @@ describe("automation service", () => {
     ];
     const req = (requestId: string, q?: string, ...texts: string[]) =>
       ({ type: "client/turn/requested", scope: {}, data: { requestId, queuedMessageId: q, input: (texts.length ? texts : ["status?"]).map((text) => ({ text, type: "text" })) } });
+    // A provider retry, such as one after a plan limit, re-runs that request (#2763).
+    const retry = (of: string) => ({
+      ...req("req_r", "q_r"),
+      data: { ...req("req_r", "q_r").data, retryOfRequestId: of },
+    });
     const sent = { ok: true, delivery: "sent", requestId: "req_a" };
     const queued = { ok: true, delivery: "queued", queuedMessage: { id: "q_b", content: [{ type: "text", text: "loop b" }] } };
     const rows = [
@@ -1867,6 +1873,9 @@ describe("automation service", () => {
       { name: "two loop messages", settled: "idle" as const, sends: [sent, queued], events: [...turn("t1", ["req_a", "req_q"]), req("req_a"), req("req_q", "q_b", "loop b")], reported: false },
       { name: "record outside the window", settled: "idle" as const, sends: [sent, queued], events: [...turn("t1", ["req_a", "req_q"]), req("req_a")], reported: false },
       { name: "later user turn", settled: "idle" as const, sends: [sent], events: [...turn("t2", ["req_user"]), req("req_user"), ...turn("t1", ["req_a"], true), req("req_a")], reported: false },
+      { name: "retry after a plan limit", settled: "limit" as const, sends: [sent, queued], events: [...turn("t2", ["req_r"]), retry("req_a"), ...turn("t1", ["req_a"], true), req("req_a")], reported: true },
+      { name: "retry of a user turn", settled: "limit" as const, sends: [sent], events: [...turn("t2", ["req_r"]), retry("req_user"), req("req_user")], reported: false },
+      { name: "turn after a retry", settled: "limit" as const, sends: [sent], events: [...turn("t3", ["req_user"]), req("req_user"), ...turn("t2", ["req_r"], true), retry("req_a"), req("req_a")], reported: false },
     ];
     for (const row of rows) {
       const db = createTestDb();
@@ -1890,10 +1899,20 @@ describe("automation service", () => {
         await executeAgentRun(room, db, { automation, run, execution: automation.execution as never, onFailure: () => {} });
       }
       // The busy turn the loop's message did not join ends first and closes the run.
-      await closeAutomationRunForSettledThread(room, db, { threadId: "thr_loop", status: row.settled });
+      const limit = row.settled === "limit";
+      await closeAutomationRunForSettledThread(room, db, {
+        threadId: "thr_loop",
+        status: limit ? "failed" : row.settled,
+        rateLimited: limit,
+      });
       const service = createAutomationService({ bb: room, db, pluginDataDir: "/tmp", serverUrl: "" });
       const report = service.report({ threadId: "thr_loop", outcome: "done", confidence: "high", reason: "ok", actions: [] });
       await (row.reported ? expect(report, row.name).resolves.toEqual({ reported: true }) : expect(report, row.name).rejects.toThrow("Nothing to report"));
+      // A skipped run shows in Review only once it resumed and reported.
+      if (limit)
+        expect((await buildReview(room, db, 2)).items, row.name).toHaveLength(
+          row.reported ? 1 : 0,
+        );
     }
   });
 });
@@ -2940,7 +2959,7 @@ describe("loop fallback", () => {
 });
 
 describe("loop review", () => {
-  it("names the loops that started or wake each thread, for the sidebar's loop icon (#1136)", async () => {
+  it("names the loops that started or wake each thread, for the purpose cards (#1136)", async () => {
     const now = Date.now();
     const db = createTestDb();
     createScheduledAutomation(db, now + 60_000);
@@ -3119,5 +3138,37 @@ describe("scans_start on the Free plan (#2645)", () => {
     expect(error).toBeNull();
     expect(spawned[0]?.prompt).toContain("Free plan: at most 2 readers, and Local loops.");
     expect(spawned[0]?.pluginMetadata).toEqual({ workflowScan: { stage: "finding", maxReaders: 2 } });
+  });
+});
+
+describe("buildFixLoopPrompt", () => {
+  it("builds a concise fix prompt for paused Local and Cloud loops", () => {
+    expect(
+      buildFixLoopPrompt({
+        name: 'Team "calls"\nchart',
+        id: "auto_123",
+        cloud: false,
+        reason: "TypeError: 'NoneType' object\n  is not subscriptable (exit 1)",
+      }),
+    ).toBe(
+      [
+        'Fix my paused Local loop "Team calls chart" (auto_123).',
+        "Error: TypeError: 'NoneType' object is not subscriptable (exit 1)",
+        "",
+        "Inspect the loop and its latest failed run with `room-cli loop`.",
+        "If the fix is obvious, apply it.",
+        "Verify it works.",
+        "Resume the loop.",
+        "If it needs a secret or a decision, stop and tell me.",
+      ].join("\n"),
+    );
+    expect(
+      buildFixLoopPrompt({
+        name: "Daily digest",
+        id: "11111111-1111-4111-8111-111111111111",
+        cloud: true,
+        reason: "curl: (22) 401 (exit 22)",
+      }),
+    ).toContain('Fix my paused Cloud loop "Daily digest" (11111111-1111-4111-8111-111111111111).');
   });
 });

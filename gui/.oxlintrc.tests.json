@@ -34,7 +34,7 @@
               "apps/server/test/public/public-terminals.test.ts": 2,
               "apps/server/test/services/cloudroom-account.test.ts": 1,
               "apps/server/test/services/cloudroom-pi.test.ts": 1,
-              "apps/server/test/services/cloudroom-sandboxes.test.ts": 9,
+              "apps/server/test/services/cloudroom-sandboxes.test.ts": 11,
               "apps/server/test/services/plugins/accounts-plugin.test.ts": 1,
               "apps/server/test/services/plugins/builtin-plugins.test.ts": 3,
               "apps/server/test/services/plugins/plugin-background.test.ts": 1,

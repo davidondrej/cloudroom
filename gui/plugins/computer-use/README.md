@@ -33,7 +33,7 @@ plugin asks the user before each new app, then forwards the call to a private
 ## Isolation
 
 - The driver runs with its own `HOME` under the plugin data folder, so it never shares config, caches, or pid files with a personal Cua install.
-- That `HOME` would reach apps the driver cold-starts, so on macOS the host starts a closed app first the driver's way (NSWorkspace in the background, `oapp` event, focus handed back) with the user's `HOME`, then the driver's `launch_app` finds it running (#942).
+- That `HOME` would reach apps the driver cold-starts, so on macOS the host starts a closed app first the driver's way (NSWorkspace in the background, `oapp` event, focus handed back) with the user's `HOME` and confirms it is running before handing off to `launch_app` (#942, #2745). If prelaunch fails, times out, or cannot be confirmed, the host returns an error instead of letting the driver cold-start the app with its private `HOME`.
 - Telemetry and update checks are off (`CUA_DRIVER_RS_TELEMETRY_ENABLED=false`, `CUA_DRIVER_RS_UPDATE_CHECK=false`).
 - Each thread uses one `session` label, so screenshots and snapshots stay valid across separate calls.
 

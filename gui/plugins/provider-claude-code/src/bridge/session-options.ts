@@ -16,6 +16,8 @@ import {
   readFileSync,
   readSync,
   realpathSync,
+  statSync,
+  writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -216,6 +218,43 @@ export function claudeSettingsAllowTrustd(env: NodeJS.ProcessEnv): boolean {
 
 const claudeConfigDir = (env: NodeJS.ProcessEnv): string =>
   env.CLAUDE_CONFIG_DIR || join(env.HOME || homedir(), ".claude");
+
+const keptTranscripts = new Set<string>();
+
+/**
+ * Claude Code deletes a session unused for `cleanupPeriodDays`, 30 by default,
+ * and the thread can never resume. Any `claude` run deletes by the user's
+ * settings, their terminal's too, so 3650 (10 years) goes there, in the
+ * account's folder and in ~/.claude, unless the user chose a period
+ * (ADR 20261127-220906). Never blocks a session.
+ */
+export function keepClaudeTranscripts(env: NodeJS.ProcessEnv): void {
+  const home = join(env.HOME || homedir(), ".claude");
+  for (const dir of new Set([claudeConfigDir(env), home])) {
+    const file = join(dir, "settings.json");
+    if (keptTranscripts.has(file)) continue;
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+      let text = "{}";
+      try {
+        text = readFileSync(file, "utf8");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+      }
+      const settings: unknown = JSON.parse(text);
+      if (!settings || typeof settings !== "object" || Array.isArray(settings))
+        continue;
+      // In place, so a linked file (an account folder's, dotfiles) stays linked.
+      if (!("cleanupPeriodDays" in settings)) {
+        const next = { ...settings, cleanupPeriodDays: 3650 };
+        writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+      }
+      keptTranscripts.add(file);
+    } catch {
+      // A missing folder or a broken file: the next session tries again.
+    }
+  }
+}
 
 const INSTRUCTION_FILE_MAX_BYTES = 200_000;
 
@@ -477,6 +516,7 @@ export function buildSessionOptions(
             : {}),
         };
   const model = params.model;
+  keepClaudeTranscripts(env);
   const pathToClaudeCodeExecutable = resolveClaudeCodeExecutable({ env });
   const flagSettings = buildFlagSettings(params, env);
   const extraArgs = buildChromeExtraArgs(params.chromeEnabled);

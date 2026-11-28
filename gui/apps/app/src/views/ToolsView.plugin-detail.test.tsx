@@ -38,7 +38,6 @@ import {
   CatalogPluginDetailBanner,
   PluginDetail,
   PluginDetailBanners,
-  PluginProvenancePill,
   pluginFrontendDiagnosticRequiresFailureBanner,
 } from "@/components/tools/PluginDetail";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
@@ -256,30 +255,6 @@ describe("PluginDetail official catalog lifecycle", () => {
     ).toBe(true);
   });
 
-  it("omits a provenance badge for default direct and local sources", () => {
-    const directPlugin: PluginListItem = {
-      ...GITHUB_PLUGIN,
-      source: "npm:@example/github@^1.0.0",
-      provenance: "direct",
-      catalogEntryId: null,
-      publisherLabel: null,
-    };
-    const { container, rerender } = render(
-      <PluginProvenancePill plugin={directPlugin} />,
-    );
-    expect(container.textContent).toBe("");
-
-    rerender(
-      <PluginProvenancePill
-        plugin={{
-          ...directPlugin,
-          source: "path:/Users/you/Code/github-plugin",
-        }}
-      />,
-    );
-    expect(container.textContent).toBe("");
-  });
-
   it("keeps catalog provenance and release management in the unified detail taxonomy", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });
@@ -289,11 +264,9 @@ describe("PluginDetail official catalog lifecycle", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={GITHUB_PLUGIN}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={onDelete}
@@ -306,7 +279,6 @@ describe("PluginDetail official catalog lifecycle", () => {
     );
 
     expect(screen.getAllByText("Cloudroom Official").length).toBeGreaterThan(0);
-    expect(screen.getByText("Developer tools")).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Uninstall GitHub" }),
     ).toBeNull();
@@ -359,11 +331,9 @@ describe("PluginDetail official catalog lifecycle", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={plugin}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -378,7 +348,7 @@ describe("PluginDetail official catalog lifecycle", () => {
     const update = screen.getByRole("button", {
       name: "Update GitHub to 1.5.0",
     });
-    const activation = screen.getByRole("switch", { name: "Disable GitHub" });
+    const activation = screen.getByRole("switch", { name: "Disable github" });
     const path = screen.getByText("~/.bb/plugins/github");
     const releaseSection = document.querySelector(
       '[data-resource-detail-section="release"]',
@@ -387,7 +357,7 @@ describe("PluginDetail official catalog lifecycle", () => {
     expect(releaseSection?.contains(version)).toBe(true);
     expect(releaseSection?.contains(update)).toBe(true);
     expect(releaseSection?.contains(activation)).toBe(false);
-    expect(releaseSection?.contains(path)).toBe(false);
+    expect(releaseSection?.contains(path)).toBe(true);
     expect(version.closest("td")).not.toBe(update.closest("td"));
     expect(update.closest("table")).toBeNull();
     const updateRow = screen
@@ -423,11 +393,9 @@ describe("PluginDetail official catalog lifecycle", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={plugin}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -476,7 +444,6 @@ describe("PluginDetail official catalog lifecycle", () => {
         <MemoryRouter>
           <QueryClientWrapper>
             <PluginDetail
-              isLoading={false}
               plugin={{
                 ...GITHUB_PLUGIN,
                 source: "npm:@example/github@^1.0.0",
@@ -487,7 +454,6 @@ describe("PluginDetail official catalog lifecycle", () => {
               }}
               pending={false}
               openSourceDisabled
-              onToggle={() => {}}
               onEdit={() => {}}
               onOpenSource={() => {}}
               onDelete={() => {}}
@@ -522,7 +488,6 @@ describe("PluginDetail official catalog lifecycle", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={{
               ...GITHUB_PLUGIN,
               id: "omega",
@@ -536,7 +501,6 @@ describe("PluginDetail official catalog lifecycle", () => {
             }}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -570,11 +534,9 @@ describe("PluginDetail official catalog lifecycle", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={builtinPlugin}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={onDelete}
@@ -587,7 +549,7 @@ describe("PluginDetail official catalog lifecycle", () => {
 
     expect(screen.getByText("Cloudroom Official")).toBeTruthy();
     expect(
-      screen.getByRole("switch", { name: "Disable Automations" }),
+      screen.getByRole("switch", { name: "Disable automations" }),
     ).toBeTruthy();
 
     fireEvent.pointerDown(
@@ -690,11 +652,10 @@ describe("Cloudroom Official plugin detail routing", () => {
       { wrapper: QueryClientWrapper },
     );
 
-    await waitFor(() => {
-      expect(document.querySelector("[data-plugin-summary]")?.textContent).toBe(
-        "Description from the installed catalog.",
-      );
-    });
+    expect(
+      await screen.findByRole("link", { name: "Installed publisher" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("First publisher")).toBeNull();
   });
 
   it("uses installed metadata when its catalog entry is unavailable", async () => {
@@ -824,7 +785,7 @@ describe("Cloudroom Official plugin detail routing", () => {
     expect(screen.getByTestId("full-trust-warning")).toBeTruthy();
   });
 
-  it("preserves Browse and restores card focus across the real app routes", async () => {
+  it("opens a listing over Browse and restores row focus across the real app routes", async () => {
     const catalogEntry = {
       ...GITHUB_CATALOG_ENTRY,
       categoryId: "code-and-reviews",
@@ -872,32 +833,20 @@ describe("Cloudroom Official plugin detail routing", () => {
     const card = await screen.findByRole("button", {
       name: "Open GitHub details",
     });
-    expect(
-      screen.queryByRole("complementary", { name: "GitHub details" }),
-    ).toBeNull();
     const search = screen.getByRole("textbox", { name: "Search plugins" });
     card.focus();
     fireEvent.click(card);
-    expect(
-      await screen.findByRole("button", { name: "Close GitHub" }),
-    ).toBeTruthy();
-    expect(
-      screen.getByRole("complementary", { name: "GitHub details" }),
-    ).toBeTruthy();
-    expect(card.getAttribute("aria-current")).toBe("true");
-    expect(screen.getAllByRole("button", { name: /^Close /u })).toHaveLength(1);
-    expect(screen.getByRole("textbox", { name: "Search plugins" })).toBe(
-      search,
+    expect(await screen.findByText("GitHub", { selector: "h1" })).toBeTruthy();
+    expect(screen.getByTestId("route-path").textContent).toBe(
+      "/plugins/github",
     );
+    expect(screen.queryByRole("complementary")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "Close GitHub" }));
+    fireEvent.click(screen.getByRole("button", { name: "Browse plugins" }));
     await waitFor(() => {
       expect(screen.getByTestId("route-path").textContent).toBe("/plugins");
       expect(document.activeElement).toBe(card);
     });
-    expect(
-      screen.queryByRole("complementary", { name: "GitHub details" }),
-    ).toBeNull();
     expect(screen.getByRole("textbox", { name: "Search plugins" })).toBe(
       search,
     );
@@ -911,11 +860,11 @@ describe("Cloudroom Official plugin detail routing", () => {
   });
 
   it.each([
-    "/settings/plugins/github?view=installed",
+    "/settings/plugins/github",
     "/settings/plugins",
-    "/plugins/github?view=installed",
+    "/plugins/github",
     "/plugins?view=installed",
-  ])("opens a related plugin from %s", async (path) => {
+  ])("opens a related plugin's listing from %s", async (path) => {
     const author = {
       name: "BB",
       github: "get-bb",
@@ -999,34 +948,35 @@ describe("Cloudroom Official plugin detail routing", () => {
       fireEvent.click(pluginButton);
     }
 
+    // GitHub is installed, so every path lands on its one page in Settings.
+    await waitFor(() => {
+      expect(screen.getByTestId("route-path").textContent).toBe(
+        "/settings/plugins/github",
+      );
+    });
+    expect(
+      await screen.findAllByText("GitHub", { selector: "h1" }),
+    ).toHaveLength(1);
     const relatedPluginButton = await screen.findByRole("button", {
       name: "Open Automations details",
     });
-    expect(screen.getAllByText("GitHub", { selector: "h1" })).toHaveLength(1);
     fireEvent.click(relatedPluginButton);
-    const inSettings = path.startsWith("/settings/plugins");
     await waitFor(() => {
       expect(screen.getByTestId("route-path").textContent).toBe(
-        inSettings ? "/settings/plugins/automations" : "/plugins/automations",
+        "/plugins/automations",
       );
     });
     expect(screen.getByTestId("route-search").textContent).toBe(
-      "?view=installed",
+      "?marketplace=bb-official",
     );
-    if (inSettings) {
-      expect(
-        await screen.findByText("Automations", { selector: "h1" }),
-      ).toBeTruthy();
-    } else {
-      expect(
-        await screen.findByRole("button", { name: "Close Automations" }),
-      ).toBeTruthy();
-    }
+    expect(
+      await screen.findByText("Automations", { selector: "h1" }),
+    ).toBeTruthy();
   });
 
   it.each([
     ["/plugins/github", "/plugins"],
-    ["/settings/plugins/github?view=installed", "/settings/plugins"],
+    ["/settings/plugins/github", "/plugins"],
   ])("routes the detail author link from %s to %s", async (startPath, authorPath) => {
     // BB's bundled plugins show "Official plugin" with no author page, so use Cloudroom's own.
     const author = { name: "Cloudroom", github: "cloudroom-dev", url: null };
@@ -1045,7 +995,22 @@ describe("Cloudroom Official plugin detail routing", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url === "/api/v1/plugins") {
-          return new Response(JSON.stringify({ enabled: true, plugins: [] }), {
+          // Settings only hosts installed plugins; the Plugins page hosts the rest.
+          const plugins = startPath.startsWith("/settings")
+            ? [
+                {
+                  ...GITHUB_PLUGIN,
+                  catalogMarketplaceName: "bb-official",
+                  iconUrl: null,
+                  screenshots: [],
+                  collections: [],
+                  providerIds: [],
+                  icons: {},
+                  updateState: {},
+                },
+              ]
+            : [];
+          return new Response(JSON.stringify({ enabled: true, plugins }), {
             headers: { "content-type": "application/json" },
           });
         }
@@ -1087,31 +1052,6 @@ describe("Cloudroom Official plugin detail routing", () => {
         screen.getByTestId("route-search").textContent ?? "",
       ).get("author"),
     ).toBe("11:bb-official:github:cloudroom-dev");
-    if (authorPath !== "/settings/plugins") return;
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Open Automations details" }),
-    );
-    await waitFor(() => {
-      expect(screen.getByTestId("route-path").textContent).toBe(
-        "/settings/plugins/automations",
-      );
-    });
-    expect(screen.getByTestId("route-search").textContent).toBe(
-      "?view=installed",
-    );
-    expect(
-      await screen.findByText("Automations", { selector: "h1" }),
-    ).toBeTruthy();
-
-    fireEvent.click(screen.getAllByRole("link", { name: "Cloudroom" }).at(-1)!);
-    fireEvent.click(await screen.findByRole("link", { name: "Plugins" }));
-    await waitFor(() => {
-      expect(screen.getByTestId("route-path").textContent).toBe(
-        "/settings/plugins",
-      );
-    });
-    expect(screen.getByTestId("route-search").textContent).toBe("");
   });
 });
 
@@ -1162,13 +1102,13 @@ describe("plugin removal confirmation", () => {
 
     const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
     render(
-      <MemoryRouter initialEntries={["/plugins/github"]}>
+      <MemoryRouter initialEntries={["/settings/plugins/github"]}>
         <Routes>
           <Route
-            path="/plugins/:pluginId"
+            path="/settings/plugins/:pluginId"
             element={
               <TooltipProvider>
-                <PluginsView pluginId="github" />
+                <SettingsPluginsContent />
               </TooltipProvider>
             }
           />
@@ -1325,11 +1265,9 @@ describe("PluginDetail runtime health", () => {
         <QueryClientWrapper>
           <PluginDetailBanners plugin={plugin} />
           <PluginDetail
-            isLoading={false}
             plugin={plugin}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -1362,11 +1300,11 @@ describe("PluginDetail runtime health", () => {
     expect(alert.textContent).toContain("Reload the plugin.");
     expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
 
-    const about = container.querySelector(
-      '[data-resource-detail-section="overview"]',
+    const release = container.querySelector(
+      '[data-resource-detail-section="release"]',
     ) as HTMLElement;
     expect(
-      alert.compareDocumentPosition(about) & Node.DOCUMENT_POSITION_FOLLOWING,
+      alert.compareDocumentPosition(release) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   });
 
@@ -1433,7 +1371,7 @@ describe("PluginDetail runtime health", () => {
     },
   );
 
-  it("sends needs-configuration to the plugin settings page instead of Reload", () => {
+  it("points needs-configuration at the Configuration section, with no Reload or self-link", () => {
     renderRuntimeStatus("needs-configuration", {
       statusDetail: "An API token is required.",
       hasSettings: true,
@@ -1444,10 +1382,7 @@ describe("PluginDetail runtime health", () => {
     expect(alert.textContent).toContain(
       "Complete the Configuration section; Cloudroom reloads the plugin after you save.",
     );
-    const settingsLink = within(alert).getByRole("link", {
-      name: "Open settings",
-    });
-    expect(settingsLink.getAttribute("href")).toBe("/settings/plugins/github");
+    expect(within(alert).queryByRole("link")).toBeNull();
     expect(screen.queryByRole("button", { name: "Reload" })).toBeNull();
   });
 
@@ -1470,7 +1405,7 @@ describe("PluginDetail runtime health", () => {
     ).toBeNull();
   });
 
-  it("links to a settings page contributed by the plugin frontend and keeps Reload", () => {
+  it("keeps Reload when the plugin's settings come from its frontend", () => {
     setPluginSlotRegistrations(
       "github",
       makePluginRegistrationSet({
@@ -1493,36 +1428,7 @@ describe("PluginDetail runtime health", () => {
     });
 
     const alert = screen.getByRole("alert");
-    const settingsLink = within(alert).getByRole("link", {
-      name: "Open settings",
-    });
-    expect(settingsLink.getAttribute("href")).toBe("/settings/plugins/github");
-    expect(within(alert).getByRole("button", { name: "Reload" })).toBeTruthy();
-  });
-
-  it("does not offer a settings link for other runtime failures", () => {
-    setPluginSlotRegistrations(
-      "github",
-      makePluginRegistrationSet({
-        settingsSections: [
-          { id: "accounts", title: "Accounts", component: () => null },
-        ],
-        navPanels: [],
-        threadPanelActions: [],
-        composerCustomizations: [],
-        pendingInteractions: [],
-        sidebarFooterActions: [],
-        fileOpeners: [],
-        messageDirectives: [],
-      }),
-    );
-
-    renderRuntimeStatus("error");
-
-    const alert = screen.getByRole("alert");
-    expect(
-      within(alert).queryByRole("link", { name: "Open settings" }),
-    ).toBeNull();
+    expect(within(alert).queryByRole("link")).toBeNull();
     expect(within(alert).getByRole("button", { name: "Reload" })).toBeTruthy();
   });
 
@@ -1683,11 +1589,9 @@ describe("PluginDetail capability inventory", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={plugin}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -1841,7 +1745,6 @@ describe("PluginDetail capability inventory", () => {
       <MemoryRouter>
         <QueryClientWrapper>
           <PluginDetail
-            isLoading={false}
             plugin={{
               ...GITHUB_PLUGIN,
               id: "simple-notes",
@@ -1850,7 +1753,6 @@ describe("PluginDetail capability inventory", () => {
             }}
             pending={false}
             openSourceDisabled
-            onToggle={() => {}}
             onEdit={() => {}}
             onOpenSource={() => {}}
             onDelete={() => {}}
@@ -1921,12 +1823,12 @@ describe("detail disable workspace cleanup", () => {
         </QueryClientWrapper>,
       );
       fireEvent.click(
-        await screen.findByRole("switch", { name: "Disable GitHub" }),
+        await screen.findByRole("switch", { name: "Disable github" }),
       );
       await waitFor(() =>
         expect(
           screen
-            .getByRole("switch", { name: "Disable GitHub" })
+            .getByRole("switch", { name: "Enable github" })
             .hasAttribute("disabled"),
         ).toBe(true),
       );

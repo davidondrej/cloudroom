@@ -1,3 +1,4 @@
+import { ACP_AGENT_MANAGED_REASONING_EFFORT } from "@cloudroom/domain";
 import { describe, expect, it } from "vitest";
 import { createTestProviderRegistry } from "../../helpers/provider-registry.js";
 import { resolveThreadExecutionOverrideUpdate } from "../../../src/services/threads/thread-execution-override.js";
@@ -183,6 +184,30 @@ describe("resolveThreadExecutionOverrideUpdate", () => {
     ).toEqual({
       modelOverride: "claude-opus-4-8",
       reasoningLevelOverride: "high",
+    });
+  });
+
+  it("checks an explicit level on an agent-managed ACP model against the provider's levels (#2692)", () => {
+    const managed = {
+      ...availableModelFixture({ model: "opencode/big-pickle" }),
+      supportedReasoningEfforts: [ACP_AGENT_MANAGED_REASONING_EFFORT],
+      defaultReasoningEffort: "medium" as const,
+    };
+
+    expect(
+      resolveThreadExecutionOverrideUpdate(registry, {
+        existing: {
+          modelOverride: "opencode/big-pickle",
+          reasoningLevelOverride: "high",
+        },
+        patch: { reasoningLevel: "low" },
+        models: [managed],
+        providerId: "acp-opencode",
+        fallbackModel: "opencode/big-pickle",
+      }),
+    ).toEqual({
+      modelOverride: "opencode/big-pickle",
+      reasoningLevelOverride: "low",
     });
   });
 });

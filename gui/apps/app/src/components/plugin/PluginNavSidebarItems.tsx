@@ -43,7 +43,7 @@ import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import { PROJECT_LIST_ACTION_BUTTON_CLASS } from "@/components/sidebar/ProjectList";
 import {
   AUTOMATIONS_PLUGIN_ID,
-  getPluginDetailRoutePath,
+  getPluginConfigurationRoutePath,
   getPluginPanelRoutePath,
 } from "@/lib/route-paths";
 import {
@@ -89,7 +89,6 @@ import {
   togglePluginNavPanelVisibility,
 } from "./pluginNavSidebarOrder";
 import { haveSameOrder, reorderStoredOrder } from "@/lib/stored-order";
-import { openPluginDetailsInWorkspace } from "./plugin-detail-opener";
 
 const MORE_TRIGGER_TEST_ID = "sidebar-navigation-more-trigger";
 
@@ -1100,14 +1099,9 @@ function PluginNavSidebarItem({
       }
       onOpenDetails={() => {
         onNavigate?.();
-        if (
-          openPluginDetailsInWorkspace({
-            pluginId: chrome.pluginId,
-            title: chrome.title,
-          })
-        )
-          return;
-        void navigate(getPluginDetailRoutePath({ pluginId: chrome.pluginId }));
+        void navigate(
+          getPluginConfigurationRoutePath({ pluginId: chrome.pluginId }),
+        );
       }}
       onDisable={
         alwaysEnabledPluginIds.has(chrome.pluginId)

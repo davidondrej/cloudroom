@@ -148,9 +148,9 @@ export const automationRpcContract = defineRpcContract({
     input: z
       .object({
         fresh: z.literal(true).optional(),
-        // The open threads the sidebar shows: only they are looked up for the loop icon (#1136).
+        // The open threads the sidebar shows: only they are looked up for loop names (#1136).
         threads: z.array(z.string()).optional(),
-        // Only the icons, when those threads changed: the paused loops aren't read again (no `loops` back).
+        // Only the loop names, when those threads changed: the paused loops aren't read again (no `loops` back).
         iconsOnly: z.literal(true).optional(),
       })
       .strict()

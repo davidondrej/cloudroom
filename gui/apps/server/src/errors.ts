@@ -89,6 +89,13 @@ export function errorToResponse(
     return error.toResponse();
   }
   if (error instanceof ApiError) {
+    // A change refused as not found logs which check refused it, under an ID its caller sees: a `thread tell` that
+    // arrived still answered "not found", and nothing showed why (#2755).
+    if (error.status === 404 && request && request.method !== "GET") {
+      const errorId = randomUUID().slice(0, 8);
+      logger.warn({ err: error, errorId, method: request.method, path: request.path }, "Request refused as not found");
+      return new Response(JSON.stringify({ ...error.body, errorId }), { status: 404, headers: { "content-type": "application/json" } });
+    }
     if (error.status !== 500) return error.toResponse();
   } else if (error instanceof HTTPException) {
     return new Response(

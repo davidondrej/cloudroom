@@ -109,7 +109,7 @@ export interface CloudroomGithubAccount {
 export interface CloudEnvironment {
   variables: { name: string; hint: string }[];
   setup: string;
-  /** `owner/name` GitHub repos every sandbox clones into /repos/<name>. */
+  /** `owner/name` GitHub repos every sandbox clones into /repos/<owner>/<name>. */
   repos: string[];
   /** MCP servers copied from this Mac into every sandbox, by name. */
   mcp: string[];
@@ -149,6 +149,8 @@ export type AutoDeleteDays = 30 | 90 | 180 | 365 | null;
 export type AutoDeleteLimit = { name: string; days: number; label: string };
 /** The setting, the days unused threads really stay, the plan limit that caps them, and the plan that allows longer. Null from older websites. */
 export type AutoDeleteSetting = { days: AutoDeleteDays; kept: number | null; plan: AutoDeleteLimit | null; upgrade: AutoDeleteLimit | null };
+/** What Cloud agents may do with the user's other threads, outside their own thread tree (ADR 0286). */
+export type ThreadAccessLevel = "off" | "read" | "full";
 
 /** The user's own VPS for Cloud threads (ADR 0319). `health` is live, null while the VPS is offline; `busy` names what
  *  is over its limit, when new threads would go to Cloud instead. `critical`: memory or disk so full that its threads
@@ -391,6 +393,8 @@ export interface CloudroomArea {
   /** Cloudroom Agent (docs/scopes/cloudroom-agent.md): a token from `/api/desktop/inference` that can only buy inference. */
   inference(): Promise<unknown>;
   setAutoDelete(days: AutoDeleteDays): Promise<AutoDeleteSetting>;
+  threadAccess(signal?: AbortSignal): Promise<{ level: ThreadAccessLevel }>;
+  setThreadAccess(level: ThreadAccessLevel): Promise<{ level: ThreadAccessLevel }>;
   /** Names of API keys and tokens set in this Mac's login shell, never their values. */
   macVariables(signal?: AbortSignal): Promise<{ names: string[] }>;
   /** Copies the named variables from this Mac's login shell into the Cloud environment. */
@@ -561,6 +565,8 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     gpu: (input) => transport.readJson(request("/gpu", input)),
     inference: () => transport.readJson(request("/inference", {})),
     setAutoDelete: (days) => transport.readJson(request("/auto-delete", { days })) as Promise<AutoDeleteSetting>,
+    threadAccess: (signal) => transport.readJson(request("/thread-access", undefined, signal)) as Promise<{ level: ThreadAccessLevel }>,
+    setThreadAccess: (level) => transport.readJson(request("/thread-access", { level })) as Promise<{ level: ThreadAccessLevel }>,
     macVariables: (signal) => transport.readJson(request("/environment/mac", undefined, signal)) as Promise<{ names: string[] }>,
     importMacVariables: (names) => transport.readJson(request("/environment/mac", { names })) as Promise<CloudEnvironment>,
     cloudSkills: (signal) => transport.readJson(request("/skills", undefined, signal)) as Promise<CloudSkills>,

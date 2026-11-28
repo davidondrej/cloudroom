@@ -78,8 +78,6 @@ describe("legacy resource redirects", () => {
 
   it.each([
     ["/settings/usage", "/settings/analytics?tab=credits"],
-    ["/settings/plugins/provider-usage", "/settings/analytics?tab=credits"],
-    ["/settings/plugins/provider-usage?view=installed", "/settings/plugins/provider-usage?view=installed"],
     ["/settings/plugins", "/settings/plugins"],
     ["/extensions?view=installed#catalog", "/plugins?view=installed#catalog"],
     ["/extensions/plugins", "/plugins"],

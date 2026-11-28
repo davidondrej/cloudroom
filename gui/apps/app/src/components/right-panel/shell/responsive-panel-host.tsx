@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -20,7 +19,6 @@ import { useIsCompactViewport } from "@cloudroom/shared-ui/hooks/use-compact-vie
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { useResponsiveDrawerRealization } from "@cloudroom/shared-ui/responsive-overlay";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
-import { PluginDetailPanelContext } from "@/components/plugin/plugin-detail-navigation";
 import { secondaryPanelWidthPercentAtom } from "@/components/right-panel/store/panel-prefs";
 import {
   isCompactSidebarDrawerShowing,
@@ -62,10 +60,10 @@ export function SecondaryPanelLayout({
   mainHeader,
   main,
   collapse,
-  renderPanel: renderInner,
+  renderPanel,
   renderHostedPanel,
   composerHost,
-  compactPresentation: baseCompactPresentation,
+  compactPresentation,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -85,23 +83,8 @@ export function SecondaryPanelLayout({
   compactPresentation: "shelf" | "full";
 }) {
   const paneCtx = useOptionalPaneContext();
-  const pluginDetails = useContext(PluginDetailPanelContext);
   const host = paneCtx?.secondaryPanelHost ?? null;
   const isDrawer = useIsCompactViewport();
-
-  const compactPresentation =
-    pluginDetails && pluginDetails.activePluginId !== null
-      ? "full"
-      : baseCompactPresentation;
-
-  const renderPanel = useCallback(
-    (args: SecondaryPanelRenderArgs) => (
-      <PluginDetailPanelContext.Provider value={pluginDetails}>
-        {renderInner(args)}
-      </PluginDetailPanelContext.Provider>
-    ),
-    [pluginDetails, renderInner],
-  );
 
   const sidebarOpen = useSyncExternalStore(
     subscribeCompactSidebarDrawerShowing,

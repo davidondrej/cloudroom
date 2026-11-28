@@ -1,4 +1,4 @@
-import type { QueryClient } from "@tanstack/react-query";
+import { notifyManager, type QueryClient } from "@tanstack/react-query";
 import { assertNever } from "@cloudroom/core-ui";
 import {
   createDebouncedCallbackScheduler,
@@ -10,6 +10,7 @@ import {
   type ThreadEventType,
   type ThreadChangeMetadata,
   type ThreadChangeKind,
+  type ThreadStatusChangeMetadata,
 } from "@cloudroom/domain";
 import {
   invalidateRealtimeQueriesAfterServerReconnect,
@@ -22,6 +23,7 @@ import {
   subscribeToDocumentVisibility,
 } from "@/lib/document-visibility";
 import {
+  applyBatchedThreadListStatusPatches,
   collectCachedThreadIdsForEnvironment,
   createFlushOncePredicate,
   disposeTrailingActiveRefetches,
@@ -31,8 +33,10 @@ import {
   REALTIME_PROJECT_CHANGE_REGISTRY,
   REALTIME_SYSTEM_CHANGE_REGISTRY,
   REALTIME_THREAD_CHANGE_REGISTRY,
+  REALTIME_THREAD_LIST_STATUS_PATCH_HANDLER,
   partitionThreadChangesByFlushPriority,
 } from "./cache-owners/realtime-cache-registry";
+import { threadSearchQueryKeyPrefix } from "./queries/query-keys";
 
 interface ThreadInvalidationDebounce {
   debounceMs: number;
@@ -61,6 +65,7 @@ const {
 } = resolveThreadInvalidationDebounce(detectCoarsePointer());
 const ENVIRONMENT_INVALIDATION_DEBOUNCE_MS = 250;
 const ENVIRONMENT_INVALIDATION_MAX_WAIT_MS = 500;
+const STATUS_CHANGE_BURST_WINDOW_MS = 32;
 
 type RealtimeConnectedEvent =
   | { reconnected: false }
@@ -203,43 +208,81 @@ function flushThreadInvalidations(
   queryClient: QueryClient,
   state: ThreadChangeState,
 ): void {
-  const flushOnce = createFlushOncePredicate();
-  for (const changeKind of state.globalChangeKinds) {
-    executeRealtimeDirtyHandlers({
-      context: {
-        archived: undefined,
-        backgroundActivityChanged: undefined,
-        eventTypes: undefined,
-        flushOnce,
-        hasPendingInteraction: undefined,
-        projectId: undefined,
-        queryClient,
-        statusChange: undefined,
-        threadId: undefined,
-      },
-      handlers: REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty,
-    });
-  }
-
-  for (const [threadId, changeKinds] of state.changedThreadKinds) {
-    const metadata = state.metadataByThreadId.get(threadId);
-    for (const changeKind of changeKinds) {
+  notifyManager.batch(() => {
+    const flushOnce = createFlushOncePredicate();
+    const batchedStatusPatches = new Map<string, ThreadStatusChangeMetadata>();
+    for (const [threadId, changeKinds] of state.changedThreadKinds) {
+      if (!changeKinds.has("status-changed")) {
+        continue;
+      }
+      const statusChange = state.metadataByThreadId.get(threadId)?.statusChange;
+      if (statusChange) {
+        batchedStatusPatches.set(threadId, statusChange);
+      }
+    }
+    if (batchedStatusPatches.size > 0) {
+      applyBatchedThreadListStatusPatches(queryClient, batchedStatusPatches);
       executeRealtimeDirtyHandlers({
         context: {
-          archived: metadata?.archived,
-          backgroundActivityChanged: metadata?.backgroundActivityChanged,
-          eventTypes: metadata?.eventTypes,
+          archived: undefined,
+          backgroundActivityChanged: undefined,
+          eventTypes: undefined,
           flushOnce,
-          hasPendingInteraction: metadata?.hasPendingInteraction,
-          projectId: metadata?.projectId,
+          hasPendingInteraction: undefined,
+          projectId: undefined,
           queryClient,
-          statusChange: metadata?.statusChange,
-          threadId,
+          statusChange: undefined,
+          threadId: undefined,
+        },
+        handlers: [() => [threadSearchQueryKeyPrefix()]],
+      });
+    }
+
+    for (const changeKind of state.globalChangeKinds) {
+      executeRealtimeDirtyHandlers({
+        context: {
+          archived: undefined,
+          backgroundActivityChanged: undefined,
+          eventTypes: undefined,
+          flushOnce,
+          hasPendingInteraction: undefined,
+          projectId: undefined,
+          queryClient,
+          statusChange: undefined,
+          threadId: undefined,
         },
         handlers: REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty,
       });
     }
-  }
+
+    for (const [threadId, changeKinds] of state.changedThreadKinds) {
+      const metadata = state.metadataByThreadId.get(threadId);
+      const patchedInBatch = batchedStatusPatches.has(threadId);
+      for (const changeKind of changeKinds) {
+        const handlers =
+          changeKind === "status-changed" && patchedInBatch
+            ? REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty.filter(
+                (handler) =>
+                  handler !== REALTIME_THREAD_LIST_STATUS_PATCH_HANDLER,
+              )
+            : REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty;
+        executeRealtimeDirtyHandlers({
+          context: {
+            archived: metadata?.archived,
+            backgroundActivityChanged: metadata?.backgroundActivityChanged,
+            eventTypes: metadata?.eventTypes,
+            flushOnce,
+            hasPendingInteraction: metadata?.hasPendingInteraction,
+            projectId: metadata?.projectId,
+            queryClient,
+            statusChange: metadata?.statusChange,
+            threadId,
+          },
+          handlers,
+        });
+      }
+    }
+  });
 
   resetThreadChangeState(state);
 }
@@ -386,8 +429,52 @@ export function createRealtimeCacheEffects({
   visibility = DEFAULT_VISIBILITY,
 }: RealtimeCacheEffectsOptions): RealtimeCacheEffects {
   const threadChangeState = createThreadChangeState();
+  const statusBurstState = createThreadChangeState();
+  let statusBurstUntil = 0;
+  let statusBurstTimer: ReturnType<typeof setTimeout> | null = null;
   let hasDeferredThreadChanges = false;
   const deferredNonThreadChanges = createDeferredNonThreadChanges();
+  const clearStatusBurstTimer = (): void => {
+    if (statusBurstTimer !== null) {
+      clearTimeout(statusBurstTimer);
+      statusBurstTimer = null;
+    }
+  };
+  const flushStatusBurst = (): void => {
+    clearStatusBurstTimer();
+    if (
+      statusBurstState.changedThreadKinds.size === 0 &&
+      statusBurstState.globalChangeKinds.size === 0
+    ) {
+      return;
+    }
+    if (!visibility.isDocumentVisible()) {
+      for (const [threadId, changeKinds] of statusBurstState.changedThreadKinds) {
+        mergeThreadChanges({
+          changes: Array.from(changeKinds),
+          state: threadChangeState,
+          threadId,
+        });
+        const metadata = statusBurstState.metadataByThreadId.get(threadId);
+        if (metadata) {
+          threadChangeState.metadataByThreadId.set(
+            threadId,
+            mergeThreadChangeMetadata({
+              archivedChanged: false,
+              current: threadChangeState.metadataByThreadId.get(threadId),
+              next: metadata,
+              statusChanged: true,
+            }),
+          );
+        }
+      }
+      resetThreadChangeState(statusBurstState);
+      hasDeferredThreadChanges = true;
+      return;
+    }
+    flushThreadInvalidations(queryClient, statusBurstState);
+    statusBurstUntil = Date.now() + STATUS_CHANGE_BURST_WINDOW_MS;
+  };
   const invalidationScheduler = createDebouncedCallbackScheduler({
     debounceMs: INVALIDATION_DEBOUNCE_MS,
     maxWaitMs: INVALIDATION_MAX_WAIT_MS,
@@ -462,6 +549,7 @@ export function createRealtimeCacheEffects({
   };
 
   const flushDeferredChanges = (): void => {
+    flushStatusBurst();
     if (hasDeferredNonThreadChanges(deferredNonThreadChanges)) {
       const { environmentKindsById, hostKinds, projectKindsById, systemKinds } =
         deferredNonThreadChanges;
@@ -495,6 +583,8 @@ export function createRealtimeCacheEffects({
   return {
     dispose: () => {
       unsubscribeVisibility();
+      clearStatusBurstTimer();
+      resetThreadChangeState(statusBurstState);
       invalidationScheduler.dispose();
       environmentInvalidator.dispose();
       disposeTrailingActiveRefetches(queryClient);
@@ -510,6 +600,7 @@ export function createRealtimeCacheEffects({
             break;
           }
           if (message.metadata?.eventTypes?.includes("turn/completed")) {
+            flushStatusBurst();
             recordThreadChange(threadChangeState, message);
             invalidationScheduler.flush();
             break;
@@ -524,12 +615,35 @@ export function createRealtimeCacheEffects({
             invalidationScheduler.schedule();
           }
           if (immediate) {
-            applyImmediateThreadChanges({
-              changes: immediate,
-              id: message.id,
-              metadata: message.id ? message.metadata : undefined,
-              queryClient,
-            });
+            const isPatchedStatusOnly =
+              immediate.length === 1 &&
+              immediate[0] === "status-changed" &&
+              Boolean(message.id) &&
+              Boolean(message.metadata?.statusChange);
+            const now = Date.now();
+            if (isPatchedStatusOnly && now < statusBurstUntil) {
+              recordThreadChange(statusBurstState, {
+                ...message,
+                changes: immediate,
+              });
+              if (statusBurstTimer === null) {
+                statusBurstTimer = setTimeout(
+                  flushStatusBurst,
+                  STATUS_CHANGE_BURST_WINDOW_MS,
+                );
+              }
+            } else {
+              flushStatusBurst();
+              applyImmediateThreadChanges({
+                changes: immediate,
+                id: message.id,
+                metadata: message.id ? message.metadata : undefined,
+                queryClient,
+              });
+              if (isPatchedStatusOnly) {
+                statusBurstUntil = now + STATUS_CHANGE_BURST_WINDOW_MS;
+              }
+            }
           }
           break;
         }

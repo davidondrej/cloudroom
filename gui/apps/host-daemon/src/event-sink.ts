@@ -72,6 +72,17 @@ function isWaitingForApprovalItemEvent(event: ThreadEvent): boolean {
   return event.item.approvalStatus === "waiting_for_approval";
 }
 
+function isFirstTurnOutputEvent(event: ThreadEvent): boolean {
+  if (event.type === "item/started") {
+    return event.item.type !== "userMessage";
+  }
+  return (
+    event.type === "item/agentMessage/delta" ||
+    event.type === "item/reasoning/textDelta" ||
+    event.type === "item/reasoning/summaryTextDelta"
+  );
+}
+
 function shouldFlushThreadEventImmediately(event: ThreadEvent): boolean {
   if (event.type === "turn/started" || event.type === "item/completed") {
     return true;
@@ -127,6 +138,8 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
   let disposed = false;
   let backedUpSinceMs: number | null = null;
   let backpressureLogged = false;
+  // Threads whose turn just started and have not flushed their first output yet.
+  const awaitingFirstOutput = new Set<string>();
 
   function maybeLogQueuePressure(): void {
     if (backpressureLogged || backedUpSinceMs === null) {
@@ -320,11 +333,24 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
         });
       }
       maybeLogQueuePressure();
-      const delayMs = shouldFlushThreadEventImmediately(input.event)
-        ? 0
-        : isStreamDeltaEvent(input.event)
-          ? STREAM_DELTA_DEBOUNCE_MS
-          : DEFAULT_DEBOUNCE_MS;
+      if (input.event.type === "turn/started") {
+        awaitingFirstOutput.add(input.threadId);
+      } else if (
+        input.event.type === "turn/completed" ||
+        input.event.type === "system/error" ||
+        input.event.type === "system/thread/interrupted"
+      ) {
+        awaitingFirstOutput.delete(input.threadId);
+      }
+      const flushFirstOutput =
+        isFirstTurnOutputEvent(input.event) &&
+        awaitingFirstOutput.delete(input.threadId);
+      const delayMs =
+        flushFirstOutput || shouldFlushThreadEventImmediately(input.event)
+          ? 0
+          : isStreamDeltaEvent(input.event)
+            ? STREAM_DELTA_DEBOUNCE_MS
+            : DEFAULT_DEBOUNCE_MS;
       waitingDueAtMs = Math.min(waitingDueAtMs, now() + delayMs);
       scheduleFlush();
     },
@@ -332,6 +358,7 @@ export function createEventSink(options: CreateEventSinkOptions): EventSink {
     async dispose(): Promise<void> {
       disposed = true;
       clearScheduledFlush();
+      awaitingFirstOutput.clear();
       if (flushPromise !== null) {
         await flushPromise.catch(() => undefined);
       }

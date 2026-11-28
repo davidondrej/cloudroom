@@ -60,10 +60,6 @@ import { useThreadOpenTiming, watchPanelOpen } from "@/lib/perf";
 import type {
   ThreadSecondaryPanel as ThreadSecondaryPanelTab,
 } from "@/components/right-panel/store/tab-model";
-import {
-  PluginDetailPanelContext,
-  usePluginDetailPanelState,
-} from "@/components/plugin/plugin-detail-navigation";
 import { useForkThreadFromMessage } from "@/hooks/useForkThreadFromMessage";
 import { isThreadForkable } from "@cloudroom/client-core";
 import { useRequestEnvironmentAction } from "../../hooks/mutations/environment-mutations";
@@ -689,12 +685,9 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
       isCompactViewport: renderSecondaryPanelAsDrawer,
       threadId,
     });
-  const pluginDetails = usePluginDetailPanelState(threadId, isFocused);
-  const isWorkspacePanelOpen = renderSecondaryPanelAsDrawer
+  const isSecondaryPanelOpen = renderSecondaryPanelAsDrawer
     ? secondaryPanelDrawerVisibility.isDrawerVisible
     : isPersistedSecondaryPanelOpen;
-  const isSecondaryPanelOpen =
-    isWorkspacePanelOpen || pluginDetails.activePluginId !== null;
   const touchFixedPanelTabsState = useTouchFixedPanelTabsState(
     threadId,
     threadId,
@@ -1493,7 +1486,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     threadId,
   });
   const {
-    closePanel: closeWorkspacePanel,
+    closePanel: closeSecondaryPanel,
     openCommitDiff: openGitDiffCommitDestination,
     openCompactDrawer,
     openDiffFile: openGitDiffFileDestination,
@@ -1517,11 +1510,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     openPersistedWorkspaceFile,
     togglePersistedPanel: toggleDefaultPersistedSecondaryPanel,
   });
-  const dismissPluginDetails = pluginDetails.dismiss;
-  const closeSecondaryPanel = useCallback(() => {
-    dismissPluginDetails();
-    closeWorkspacePanel();
-  }, [dismissPluginDetails, closeWorkspacePanel]);
   const panelSnapshot = useRef({
     open: isSecondaryPanelOpen,
     state: fixedPanelTabsState.secondary,
@@ -1540,14 +1528,8 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         return JSON.stringify({ ...state, tabs: state.tabs.map((t) => t.kind) });
       });
     }
-    if (pluginDetails.activePluginId !== null) closeSecondaryPanel();
-    else toggleWorkspacePanel();
-  }, [
-    pluginDetails.activePluginId,
-    closeSecondaryPanel,
-    threadId,
-    toggleWorkspacePanel,
-  ]);
+    toggleWorkspacePanel();
+  }, [threadId, toggleWorkspacePanel]);
   const fixedTabDestinations = useMemo(
     () => [
       createThreadInfoFixedTabDestination(() =>
@@ -1942,10 +1924,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     [closeTerminal, removeFixedTerminalTab, threadId],
   );
   const handleCloseWindowRequest = useCallback(() => {
-    if (pluginDetails.activePluginId !== null) {
-      pluginDetails.close(pluginDetails.activePluginId);
-      return true;
-    }
     if (!isSecondaryPanelOpen) {
       return false;
     }
@@ -1968,7 +1946,6 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     closeTab,
     handleCloseTerminalTab,
     isSecondaryPanelOpen,
-    pluginDetails,
   ]);
   useAppCommandHandler("panel.toggle", () => {
     if (!isFocused) return false;
@@ -3419,9 +3396,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         <PluginThreadPanelNavigationProvider
           openThreadPanel={handleOpenTimelinePluginPanel}
         >
-          <PluginDetailPanelContext.Provider value={pluginDetails}>
-            {threadDetailContent}
-          </PluginDetailPanelContext.Provider>
+          {threadDetailContent}
         </PluginThreadPanelNavigationProvider>
       </ThreadProviderContext.Provider>
     </>

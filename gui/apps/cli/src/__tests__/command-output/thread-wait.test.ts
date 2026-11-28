@@ -103,7 +103,20 @@ describe("room-cli thread wait command output", () => {
       child("child-done", "idle"),
       child("child-failed", "error"),
     ]);
-    stubServerApi({ "v1.threads.$get": list });
+    // A silent child's line drops Codex's clipped 403 page (no </html>) but keeps what to do (#977, #2601).
+    // A page clipped with nothing after it (Pi's Mistral adapter) runs to the end of the text.
+    const page = `<!DOCTYPE html><html><head><title>Just a moment...</title><style>${"x".repeat(1_000)}...`;
+    stubServerApi({
+      "v1.threads.$get": list,
+      "v1.threads.:id.output.$get": async ({
+        param,
+      }: {
+        param: { id: string };
+      }) => ({
+        output: null,
+        error: `The provider has made no progress for 10 minutes, only 3 retries (last: ${param.id === "child-clipped" ? `HTTP 502: ${page}` : `Reconnecting... 2/5: unexpected status 403 Forbidden: ${page}, url: https://chatgpt.com/backend-api/codex/responses, cf-ray: 9a6f1c2d3e4b5a69-FRA, request id: req_1`}). It may be stalled. Stop the thread, then send the message again.`,
+      }),
+    });
     // A brief connection reset is retried instead of ending the wait (#2283).
     list.mockRejectedValueOnce(
       new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }),
@@ -116,13 +129,26 @@ describe("room-cli thread wait command output", () => {
       `${"failed".padEnd(11)}  @thread:child-failed  child-failed`,
     ]);
 
-    list.mockResolvedValue([child("child-busy", "active")]);
+    list.mockResolvedValue([
+      child("child-busy", "active"),
+      child("child-clipped", "active"),
+    ]);
     await expect(
       runCommand(
         ["thread", "wait", "parent", "--children", "--timeout", "0"],
         register,
       ),
     ).rejects.toThrow("process.exit:2");
+    const [warning, clipped] = collectLogLines(vi.mocked(console.log)).filter(
+      (line) => line.includes("no progress"),
+    );
+    expect(warning).not.toContain("xxx");
+    expect(warning).toMatch(
+      /request id: req_1\)\. It may be stalled\. Stop the thread, then send the message again\. \(room-cli thread stop child-busy\)$/u,
+    );
+    expect(clipped).toBe(
+      `             The provider has made no progress for 10 minutes, only 3 retries (last: HTTP 502: [HTML page "Just a moment..." omitted]). It may be stalled. Stop the thread, then send the message again. (room-cli thread stop child-clipped)`,
+    );
   });
 
   it("room-cli thread wait --status exits with timeout code when the status is not reached", async () => {

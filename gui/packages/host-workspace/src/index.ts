@@ -14,6 +14,7 @@ export {
   detectGitRepo,
   detectLinkedWorktree,
   detectGitRepoKind,
+  inspectGitRepoKind,
   fetchRemoteBranches,
   getCheckoutRef,
   getWorkspaceGitOperation,

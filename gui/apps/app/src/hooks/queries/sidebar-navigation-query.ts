@@ -5,6 +5,7 @@ import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@cloudroom/domain";
 import type { SidebarBootstrapResponse } from "@cloudroom/server-contract";
 import { pendingArchiveIdsAtom } from "@/hooks/cache-owners/thread-archive-cache";
 import {
+  listSidebarMentionableThreads,
   listSidebarNavigationThreads,
   mapSidebarNavigationThreads,
 } from "@/hooks/cache-owners/query-cache";
@@ -98,11 +99,17 @@ interface SidebarNavigationThreadSelection<T> {
 
 export function useSidebarNavigationThreadSelection<T>(
   select: (threads: ThreadListEntry[]) => T,
+  options?: { includeMentionableHidden?: boolean },
 ): SidebarNavigationThreadSelection<T> {
+  const includeMentionableHidden = options?.includeMentionableHidden ?? false;
   const selectFromNavigation = useCallback(
     (navigation: SidebarBootstrapResponse) =>
-      select(listSidebarNavigationThreads(navigation)),
-    [select],
+      select(
+        includeMentionableHidden
+          ? listSidebarMentionableThreads(navigation)
+          : listSidebarNavigationThreads(navigation),
+      ),
+    [includeMentionableHidden, select],
   );
   const result = useQuery<SidebarBootstrapResponse, Error, T>({
     queryKey: sidebarNavigationQueryKey(),

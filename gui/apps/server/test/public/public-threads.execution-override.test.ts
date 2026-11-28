@@ -1,5 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { getThread, getThreadExecutionOverride } from "@cloudroom/db";
+import {
+  getThread,
+  getThreadExecutionOverride,
+  listEvents,
+  setThreadExecutionOverride,
+} from "@cloudroom/db";
+import { turnScope } from "@cloudroom/domain";
 import {
   registerHostRpcResponder,
   registerProviderHostRpcResponder,
@@ -11,11 +17,14 @@ import {
   healthAnswer,
   modelList,
 } from "../helpers/provider-model-catalogs.js";
+import { availableModelFixture } from "../helpers/available-models.js";
 import {
   seedEnvironment,
   seedHostSession,
   seedProjectWithSource,
+  seedStoredEvent,
   seedThread,
+  seedThreadRuntimeState,
 } from "../helpers/seed.js";
 import { withTestHarness } from "../helpers/test-app.js";
 import type { TestAppHarness } from "../helpers/test-app.js";
@@ -250,6 +259,310 @@ describe("PATCH /threads/:id execution override", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  it("reconciles xhigh effort on a Local switch to Grok so ordinary and automated sends succeed (#2692)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedProviderThread(
+        harness,
+        "claude-code",
+      );
+      const sender = seedThread(harness.deps, {
+        projectId: thread.projectId,
+        environmentId: thread.environmentId,
+        providerId: "claude-code",
+      });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: thread.environmentId!,
+        model: "claude-opus-4-8",
+        reasoningLevel: "xhigh",
+        providerThreadId: "claude-1",
+        threadId: thread.id,
+      });
+      const startedLevels: string[] = [];
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: ({ command }) => {
+          if (command.type === "provider.health") return healthAnswer("ready");
+          if (command.type === "provider.list_models") {
+            return catalogAnswer([
+              availableModelFixture({
+                model: "grok-4.5",
+                reasoningLevels: ["low", "medium", "high"],
+                defaultReasoningLevel: "medium",
+              }),
+            ]);
+          }
+          if (command.type === "host.list_files")
+            return { ok: true, result: { files: [], truncated: false } };
+          if (command.type === "thread.stop") {
+            // Stopping saves the old agent's last reply, which the new agent's seed must include.
+            seedStoredEvent(harness.deps, {
+              threadId: thread.id,
+              sequence: 10,
+              type: "item/completed",
+              scope: turnScope("turn-1"),
+              itemKind: "agentMessage",
+              data: {
+                item: {
+                  id: "reply",
+                  type: "agentMessage",
+                  text: "Saved on stop",
+                },
+              },
+            });
+            return { ok: true, result: { providerCheckpointId: null } };
+          }
+          if (command.type === "thread.start") {
+            startedLevels.push(command.options.reasoningLevel);
+            return { ok: true, result: { providerThreadId: "grok-1" } };
+          }
+          return { ok: false, errorCode: "ENOENT", errorMessage: "missing" };
+        },
+      });
+
+      const prepareSpy = vi.spyOn(harness.db.$client, "prepare");
+      const switched = await patchThread(harness, thread.id, {
+        providerId: "acp-grok",
+        model: "grok-4.5",
+      });
+      expect(switched.status).toBe(200);
+      expect(
+        prepareSpy.mock.calls.filter(
+          ([source]) =>
+            typeof source === "string" &&
+            (source.startsWith(
+              'select "model_override", "reasoning_level_override" from "threads"',
+            ) ||
+              // The inherited effort comes from the history read, not a latest-turn read.
+              source.startsWith(
+                'select "created_at", "data", "sequence", "thread_id", "type" from "events"',
+              )),
+        ),
+      ).toHaveLength(0);
+      prepareSpy.mockRestore();
+      expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
+        modelOverride: "grok-4.5",
+        reasoningLevelOverride: "high",
+      });
+      const switchEvent = listEvents(harness.db, { threadId: thread.id }).find(
+        (event) => JSON.parse(event.data).operation === "harness_switch",
+      );
+      expect(switchEvent?.data).toContain("Saved on stop");
+
+      const send = (body: Record<string, unknown>) =>
+        harness.app.request(`/api/v1/threads/${thread.id}/send`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            mode: "steer-if-active",
+            input: [{ type: "text", text: "follow-up", mentions: [] }],
+            ...body,
+          }),
+        });
+
+      expect((await send({})).status).toBe(200);
+      expect(startedLevels).toEqual(["high"]);
+      const tell = await send({ senderThreadId: sender.id });
+      expect(tell.status).toBe(200);
+      expect(await readJson(tell)).toMatchObject({
+        queuedMessage: { reasoningLevel: "high" },
+      });
+      expect((await send({ reasoningLevel: "xhigh" })).status).toBe(400);
+    });
+  });
+
+  it("preserves explicit null, model-catalog levels, and saved effort on model-only sends (#2692)", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session, thread } = seedProviderThread(
+        harness,
+        "acp-cursor",
+      );
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: thread.environmentId!,
+        model: "glm-5",
+        reasoningLevel: "max",
+        providerThreadId: "cursor-1",
+        threadId: thread.id,
+      });
+      setThreadExecutionOverride(harness.db, {
+        threadId: thread.id,
+        modelOverride: null,
+        reasoningLevelOverride: "max",
+      });
+      const sentOptions: Array<{ model: string; reasoningLevel: string }> = [];
+      registerHostRpcResponder(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        handle: ({ command }) => {
+          if (command.type === "provider.health") return healthAnswer("ready");
+          if (command.type === "provider.list_models") {
+            return catalogAnswer(
+              command.providerId === "acp-grok"
+                ? [
+                    availableModelFixture({
+                      model: "grok-4.5",
+                      reasoningLevels: ["low", "medium", "high"],
+                      defaultReasoningLevel: "medium",
+                    }),
+                  ]
+                : [
+                    availableModelFixture({
+                      model: "glm-5",
+                      reasoningLevels: ["high", "max"],
+                      defaultReasoningLevel: "high",
+                    }),
+                    availableModelFixture({
+                      model: "gpt-5.6-sol",
+                      reasoningLevels: [
+                        "none",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                      ],
+                      defaultReasoningLevel: "high",
+                    }),
+                    availableModelFixture({
+                      model: "claude-opus-5",
+                      reasoningLevels: [
+                        "none",
+                        "low",
+                        "medium",
+                        "high",
+                        "xhigh",
+                        "max",
+                      ],
+                      defaultReasoningLevel: "high",
+                    }),
+                    availableModelFixture({
+                      model: "composer-2.5",
+                      reasoningLevels: ["medium"],
+                      defaultReasoningLevel: "medium",
+                    }),
+                  ],
+            );
+          }
+          if (command.type === "host.list_files")
+            return { ok: true, result: { files: [], truncated: false } };
+          if (command.type === "thread.stop")
+            return { ok: true, result: { providerCheckpointId: null } };
+          if (
+            command.type === "turn.submit" ||
+            command.type === "thread.start"
+          ) {
+            sentOptions.push({
+              model: command.options.model,
+              reasoningLevel: command.options.reasoningLevel,
+            });
+            return {
+              ok: true,
+              result: { turnId: "t2", providerThreadId: "cursor-1" },
+            };
+          }
+          return { ok: false, errorCode: "ENOENT", errorMessage: "missing" };
+        },
+      });
+      await harness.deps.lifecycleDedupers.providerModelCatalogs.read(
+        harness.deps,
+        {
+          cwd: null,
+          hostId: host.id,
+          provider: harness.deps.providerRegistry.get("acp-cursor")!.info,
+          access: { kind: "picker" },
+        },
+      );
+
+      // Model-only send runs composer-2.5 at medium without failing against glm-5 or overwriting saved max.
+      const tellRes = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            mode: "steer-if-active",
+            model: "composer-2.5",
+            input: [{ type: "text", text: "one-off", mentions: [] }],
+          }),
+        },
+      );
+      expect(tellRes.status).toBe(200);
+      expect(sentOptions).toEqual([
+        { model: "composer-2.5", reasoningLevel: "medium" },
+      ]);
+      expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
+        modelOverride: null,
+        reasoningLevelOverride: "max",
+      });
+
+      // Explicit reasoningLevel: null clears the override on harness switch.
+      const clearSwitch = await patchThread(harness, thread.id, {
+        providerId: "acp-grok",
+        model: "grok-4.5",
+        reasoningLevel: null,
+      });
+      expect(clearSwitch.status).toBe(200);
+      expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
+        modelOverride: "grok-4.5",
+        reasoningLevelOverride: null,
+      });
+
+      // Switching to a model catalog offering `none` succeeds even when the provider ladder omits `none`,
+      // stays `none` on flagless send, and stays `none` when changing only the model to another `none`-capable model.
+      const noneSwitch = await patchThread(harness, thread.id, {
+        providerId: "acp-cursor",
+        model: "gpt-5.6-sol",
+        reasoningLevel: "none",
+      });
+      expect(noneSwitch.status).toBe(200);
+      expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
+        modelOverride: "gpt-5.6-sol",
+        reasoningLevelOverride: "none",
+      });
+      const noneDefaults = await harness.app.request(
+        `/api/v1/threads/${thread.id}/default-execution-options`,
+      );
+      expect(await readJson(noneDefaults)).toMatchObject({
+        model: "gpt-5.6-sol",
+        reasoningLevel: "none",
+      });
+
+      const noneSend = await harness.app.request(
+        `/api/v1/threads/${thread.id}/send`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            mode: "steer-if-active",
+            input: [{ type: "text", text: "flagless", mentions: [] }],
+          }),
+        },
+      );
+      expect(noneSend.status).toBe(200);
+      expect(sentOptions).toEqual([
+        { model: "composer-2.5", reasoningLevel: "medium" },
+        { model: "gpt-5.6-sol", reasoningLevel: "none" },
+      ]);
+
+      const modelOnlySwitch = await patchThread(harness, thread.id, {
+        model: "claude-opus-5",
+      });
+      expect(modelOnlySwitch.status).toBe(200);
+      expect(getThreadExecutionOverride(harness.db, thread.id)).toEqual({
+        modelOverride: "claude-opus-5",
+        reasoningLevelOverride: "none",
+      });
+
+      const opusDefaults = await harness.app.request(
+        `/api/v1/threads/${thread.id}/default-execution-options`,
+      );
+      expect(await readJson(opusDefaults)).toMatchObject({
+        model: "claude-opus-5",
+        reasoningLevel: "none",
+      });
     });
   });
 });

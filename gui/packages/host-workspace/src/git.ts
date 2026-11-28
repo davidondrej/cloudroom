@@ -1,4 +1,6 @@
 import { execFile, spawn, type ExecFileException } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { gitSafetyArgs } from "bb-environment-provider-host/git";
@@ -6,7 +8,11 @@ import {
   createGitBranchQueries,
   resolvePreferredLocalDefaultBranch,
 } from "bb-environment-provider-host/git-branches";
-import type { GitCheckoutRef, WorkspaceGitOperation } from "@cloudroom/domain";
+import {
+  PLAIN_NON_GIT_DIRECTORY_REASON,
+  type GitCheckoutRef,
+  type WorkspaceGitOperation,
+} from "@cloudroom/domain";
 import {
   killProcessGroup,
   pathExists,
@@ -67,14 +73,11 @@ interface BranchRefsWithDefaults {
   remoteBranches: string[];
 }
 
-
 export interface GitCommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
 }
-
-
 
 type ActiveWorkspaceGitOperationKind = Exclude<
   WorkspaceGitOperation["kind"],
@@ -218,8 +221,6 @@ function createGitCommandCancelledError(
   );
 }
 
-
-
 function createGitCommandFailedError(
   args: string[],
   stderr: string,
@@ -320,7 +321,6 @@ export async function runGit(
   }
 }
 
-
 export async function getAbsoluteGitDir(
   cwd: string,
   options: GitProcessOptions = {},
@@ -357,8 +357,6 @@ export async function getGitCommonDir(
   return path.resolve(cwd, commonDir);
 }
 
-
-
 async function findWorkspaceGitOperationMarker(
   gitDir: string,
 ): Promise<WorkspaceGitOperationMarker | undefined> {
@@ -374,25 +372,124 @@ async function findWorkspaceGitOperationMarker(
 
 export type GitRepoKind = "work-tree" | "bare" | "none";
 
-export async function detectGitRepoKind(
+function fsErrorCode(error: unknown): string | undefined {
+  return error instanceof Error &&
+    "code" in error &&
+    typeof error.code === "string"
+    ? error.code
+    : undefined;
+}
+
+const BARE_GIT_REPOSITORY_REASON = "Path is a bare Git repository";
+
+function isGitRepoFailureStderr(stderr: string): boolean {
+  return /dubious ownership|unsafe repository|gitfile|not a git repository:/iu.test(
+    stderr,
+  );
+}
+
+// Git can refuse a bare repository (`safe.bareRepository=explicit`); its
+// HEAD file and objects folder still mark it as Git storage, not a plain folder.
+async function hasBareGitLayout(dir: string): Promise<boolean> {
+  const [head, objects] = await Promise.all([
+    fs.stat(path.join(dir, "HEAD")).catch(() => null),
+    fs.stat(path.join(dir, "objects")).catch(() => null),
+  ]);
+  return head?.isFile() === true && objects?.isDirectory() === true;
+}
+
+async function describeNonGitPathReason(
+  cwd: string,
+  gitStderr: string,
+): Promise<string> {
+  let stats;
+  try {
+    stats = await fs.stat(cwd);
+  } catch (error) {
+    const code = fsErrorCode(error);
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      return "Path does not exist";
+    }
+    return "Path is not accessible";
+  }
+  if (!stats.isDirectory()) {
+    return "Path is not a directory";
+  }
+  try {
+    await fs.access(cwd, fsConstants.R_OK | fsConstants.X_OK);
+  } catch {
+    return "Path is not accessible";
+  }
+  const startDir = await fs.realpath(cwd).catch(() => path.resolve(cwd));
+  let current = startDir;
+  while (true) {
+    try {
+      await fs.lstat(path.join(current, ".git"));
+      return "Git repository is unreadable or invalid";
+    } catch (error) {
+      const code = fsErrorCode(error);
+      if (code !== "ENOENT" && code !== "ENOTDIR") {
+        if (current === startDir) {
+          return "Path is not accessible";
+        }
+        break;
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+  if (isGitRepoFailureStderr(gitStderr)) {
+    return "Git repository is unreadable or invalid";
+  }
+  if (await hasBareGitLayout(startDir)) {
+    return BARE_GIT_REPOSITORY_REASON;
+  }
+  return PLAIN_NON_GIT_DIRECTORY_REASON;
+}
+
+async function probeGitRepoKind(
   cwd: string,
   options: GitTimeoutOptions = {},
-): Promise<GitRepoKind> {
+): Promise<{ kind: GitRepoKind; stderr: string }> {
   const result = await runGit(
     ["rev-parse", "--is-inside-work-tree", "--is-bare-repository"],
     { cwd, ...options, allowFailure: true },
   );
   if (result.exitCode !== 0) {
-    return "none";
+    return { kind: "none", stderr: result.stderr };
   }
   const [insideWorkTree, bare] = trimOutput(result.stdout).split("\n");
   if (insideWorkTree === "true") {
-    return "work-tree";
+    return { kind: "work-tree", stderr: "" };
   }
   if (bare === "true") {
-    return "bare";
+    return { kind: "bare", stderr: "" };
   }
-  return "none";
+  return { kind: "none", stderr: result.stderr };
+}
+
+export async function detectGitRepoKind(
+  cwd: string,
+  options: GitTimeoutOptions = {},
+): Promise<GitRepoKind> {
+  return (await probeGitRepoKind(cwd, options)).kind;
+}
+
+export async function inspectGitRepoKind(
+  cwd: string,
+  options: GitTimeoutOptions = {},
+): Promise<{ kind: "work-tree" | "bare" } | { kind: "none"; reason: string }> {
+  const probed = await probeGitRepoKind(cwd, options);
+  if (probed.kind !== "none") {
+    return { kind: probed.kind };
+  }
+  return {
+    kind: "none",
+    reason: await describeNonGitPathReason(cwd, probed.stderr),
+  };
 }
 
 export async function detectGitRepo(
@@ -480,8 +577,9 @@ export async function getCheckoutRef(
   cwd: string,
   options: GitTimeoutOptions = {},
 ): Promise<GitCheckoutRef> {
-  if (!(await detectGitSource(cwd, options))) {
-    return { kind: "unknown", reason: "Path is not a git repository" };
+  const repo = await inspectGitRepoKind(cwd, options);
+  if (repo.kind === "none") {
+    return { kind: "unknown", reason: repo.reason };
   }
 
   const [symbolicRef, headSha] = await Promise.all([
@@ -496,7 +594,10 @@ export async function getCheckoutRef(
   const branchName = trimOutput(symbolicRef.stdout);
   if (symbolicRef.exitCode === 0 && branchName) {
     if (headSha === null) {
-      return { kind: "unborn", branchName };
+      // An empty bare repository has no work tree to run in (#2704).
+      return repo.kind === "bare"
+        ? { kind: "unknown", reason: BARE_GIT_REPOSITORY_REASON }
+        : { kind: "unborn", branchName };
     }
     return { kind: "branch", branchName, headSha };
   }
@@ -695,14 +796,6 @@ export async function readWorkspaceGitState(
   };
 }
 
-
-
-
-
-
-
-
-
 const {
   readDefaultBranch,
   readDefaultBranchRefs,
@@ -797,8 +890,6 @@ export async function fetchRemoteBranches(
 
 /** Agents push straight to GitHub, so a local branch like `main` lags behind; compare against `origin/<branch>` when it
  *  exists. Returns a full ref, so tags can't shadow it and resolving it again changes nothing. */
-
-
 
 interface ReadGitBlobResult {
   contents: Buffer | null;
@@ -985,4 +1076,3 @@ export async function hasUncommittedChanges(
   );
   return status.stdout.trim().length > 0;
 }
-

@@ -751,10 +751,10 @@ export function registerActionsCommands(
         const threadId = requireThreadIdOrSelf(id, opts);
         const then = opts.then === false ? undefined : (opts.then ?? COMPACT_THEN);
         await createCliRoomSdk(getUrl()).threads.compact({ threadId, ...(then ? { then } : {}) });
-        if (outputJson(opts, { ok: true, threadId })) return;
-        console.log(
-          `Thread ${threadId} compacts now, or once its running turn ends${then ? ". Then it gets the follow-up, saying whether compaction worked" : ""}. If it is your own thread, end your turn now.`,
-        );
+        // Only requested: `ok` doesn't mean it compacted yet (#2424).
+        const note = `Thread ${threadId} compacts now, or once its running turn ends${then ? ". Then it gets the follow-up, saying whether compaction worked" : ""}. If it is your own thread, end your turn now.`;
+        if (outputJson(opts, { ok: true, threadId, note })) return;
+        console.log(note);
       }),
     );
 
@@ -974,7 +974,12 @@ async function describeFailedSend(
     );
   }
   // A 4xx is the server refusing the message; anything else (a tunnel 504 too) may follow acceptance.
-  if (error instanceof BbHttpError && error.status < 500) return error;
+  if (error instanceof BbHttpError && error.status < 500) {
+    // Its error ID finds the app log line that says which check refused it (#2755).
+    const errorId = (error.body as { errorId?: unknown } | null)?.errorId;
+    if (typeof errorId === "string") error.message += ` (error ID ${errorId}, in the Cloudroom app's log)`;
+    return error;
+  }
   const requestId = await retryId();
   const retry =
     requestId === undefined

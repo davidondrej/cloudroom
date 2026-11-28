@@ -602,6 +602,7 @@ type TurnEvent = {
     parentToolCallId?: string;
     clientRequestId?: string;
     requestId?: string;
+    retryOfRequestId?: string;
     queuedMessageId?: string;
     input?: unknown[];
   };
@@ -615,7 +616,8 @@ const queuedSentId = (id: string, content: unknown[]) => {
 };
 
 /** The IDs of what the thread's current root turn took: each request Core accepted into it, and the queued row it
- *  delivered with the content it carried (#1100). A loop stores one per run, so the turn its message started reports. */
+ *  delivered with the content it carried (#1100). A retry, such as one after a plan limit, adds the request it re-runs
+ *  (#2763). A loop stores one per run, so the turn its message started reports. */
 export async function currentTurnSentIds(
   room: AgentRunApi,
   threadId: string,
@@ -640,9 +642,13 @@ export async function currentTurnSentIds(
   );
   // A request read without its record could map to another run: incomplete evidence reports nothing.
   if (took.some((id) => !requests.has(id))) return [];
-  return took.flatMap((id) => {
-    const { queuedMessageId, input = [] } = requests.get(id)!;
+  const ids = (id: string) => {
+    const { queuedMessageId, input = [] } = requests.get(id) ?? {};
     return queuedMessageId ? [id, queuedSentId(queuedMessageId, input)] : [id];
+  };
+  return took.flatMap((id) => {
+    const original = requests.get(id)!.retryOfRequestId;
+    return original ? [...ids(id), ...ids(original)] : ids(id);
   });
 }
 

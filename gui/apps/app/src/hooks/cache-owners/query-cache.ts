@@ -1,8 +1,13 @@
-import type { QueryClient, QueryKey } from "@tanstack/react-query";
-import type {
-  Thread,
-  ThreadListEntry,
-  ThreadStatusChangeMetadata,
+import {
+  notifyManager,
+  type QueryClient,
+  type QueryKey,
+} from "@tanstack/react-query";
+import {
+  isMentionableHiddenThread,
+  type Thread,
+  type ThreadListEntry,
+  type ThreadStatusChangeMetadata,
 } from "@cloudroom/domain";
 import {
   applyToCachedThreadLists,
@@ -300,22 +305,49 @@ function mapSidebarNavigationProjectThreads(
   project: SidebarNavigationProject,
   mapper: SidebarNavigationThreadMapper,
 ): SidebarNavigationProject {
-  return {
-    ...project,
-    threads: mapper(project.threads),
-  };
+  const threads = mapper(project.threads);
+  return threads === project.threads
+    ? project
+    : {
+        ...project,
+        threads,
+      };
 }
 
 export function mapSidebarNavigationThreads(
   navigation: SidebarBootstrapResponse,
   mapper: SidebarNavigationThreadMapper,
 ): SidebarBootstrapResponse {
+  let projectsChanged = false;
+  const projects = navigation.projects.map((project) => {
+    const nextProject = mapSidebarNavigationProjectThreads(project, mapper);
+    if (nextProject !== project) {
+      projectsChanged = true;
+    }
+    return nextProject;
+  });
+  const personalProject = mapSidebarNavigationProjectThreads(
+    navigation.personalProject,
+    mapper,
+  );
+  const mentionableHiddenThreads =
+    navigation.mentionableHiddenThreads !== undefined
+      ? mapper(navigation.mentionableHiddenThreads)
+      : undefined;
+  if (
+    !projectsChanged &&
+    personalProject === navigation.personalProject &&
+    mentionableHiddenThreads === navigation.mentionableHiddenThreads
+  ) {
+    return navigation;
+  }
   return {
     ...navigation,
-    projects: navigation.projects.map((project) =>
-      mapSidebarNavigationProjectThreads(project, mapper),
-    ),
-    personalProject: mapSidebarNavigationProjectThreads(navigation.personalProject, mapper),
+    projects: projectsChanged ? projects : navigation.projects,
+    personalProject,
+    ...(mentionableHiddenThreads !== undefined
+      ? { mentionableHiddenThreads }
+      : {}),
   };
 }
 
@@ -323,9 +355,19 @@ export function applyToCachedSidebarNavigationThreads({
   mapper,
   queryClient,
 }: ApplyToCachedSidebarNavigationThreadsArgs): void {
+  const current = queryClient.getQueryData<SidebarBootstrapResponse>(
+    sidebarNavigationQueryKey(),
+  );
+  if (!current) {
+    return;
+  }
+  const next = mapSidebarNavigationThreads(current, mapper);
+  if (next === current) {
+    return;
+  }
   queryClient.setQueryData<SidebarBootstrapResponse>(
     sidebarNavigationQueryKey(),
-    (current) => current && mapSidebarNavigationThreads(current, mapper),
+    next,
   );
 }
 
@@ -352,6 +394,15 @@ export function listSidebarNavigationThreads(
   ];
 }
 
+export function listSidebarMentionableThreads(
+  navigation: SidebarBootstrapResponse,
+): ThreadListEntry[] {
+  return [
+    ...listSidebarNavigationThreads(navigation),
+    ...(navigation.mentionableHiddenThreads ?? []),
+  ];
+}
+
 export function getCachedSidebarNavigationThreads(
   queryClient: QueryClient,
 ): ThreadListEntry[] {
@@ -362,6 +413,18 @@ export function getCachedSidebarNavigationThreads(
     return [];
   }
   return listSidebarNavigationThreads(navigation);
+}
+
+export function getCachedSidebarMentionableThreads(
+  queryClient: QueryClient,
+): ThreadListEntry[] {
+  const navigation = queryClient.getQueryData<SidebarBootstrapResponse>(
+    sidebarNavigationQueryKey(),
+  );
+  if (!navigation) {
+    return [];
+  }
+  return listSidebarMentionableThreads(navigation);
 }
 
 export function findSidebarNavigationThreadPlaceholder(
@@ -629,7 +692,10 @@ export function optimisticallyInsertThread(
     queryClient.setQueryData<ThreadListEntry[]>(queryKey, upsertThread(data));
   }
 
-  if (thread.visibility === "hidden" || thread.archivedAt !== null) {
+  if (
+    thread.archivedAt !== null ||
+    (thread.visibility === "hidden" && !isMentionableHiddenThread(thread))
+  ) {
     return;
   }
 
@@ -639,6 +705,14 @@ export function optimisticallyInsertThread(
       if (!navigation) {
         return navigation;
       }
+      if (isMentionableHiddenThread(thread)) {
+        return {
+          ...navigation,
+          mentionableHiddenThreads: upsertThread(
+            navigation.mentionableHiddenThreads ?? [],
+          ),
+        };
+      }
       const updateProject = (
         project: SidebarNavigationProject,
       ): SidebarNavigationProject =>
@@ -646,6 +720,7 @@ export function optimisticallyInsertThread(
           ? mapSidebarNavigationProjectThreads(project, upsertThread)
           : project;
       return {
+        ...navigation,
         sections: navigation.sections,
         projects: navigation.projects.map(updateProject),
         personalProject: updateProject(navigation.personalProject),
@@ -730,23 +805,81 @@ export function updateCachedThreadListPendingInteractionState(
   });
 }
 
+function valuesShallowEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (
+    typeof left !== "object" ||
+    left === null ||
+    typeof right !== "object" ||
+    right === null ||
+    Array.isArray(left) ||
+    Array.isArray(right)
+  ) {
+    return false;
+  }
+  const leftObj = left as Record<string, unknown>;
+  const rightObj = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftObj);
+  const rightKeys = Object.keys(rightObj);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((key) => Object.is(leftObj[key], rightObj[key]));
+}
+
+function threadMatchesStatusPatch(
+  thread: ThreadListEntry,
+  statusChange: ThreadStatusChangeMetadata,
+): boolean {
+  const record = thread as Record<string, unknown>;
+  for (const [key, value] of Object.entries(statusChange)) {
+    if (!valuesShallowEqual(record[key], value)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function updateCachedThreadListStatusStates(
+  queryClient: QueryClient,
+  statusChangesByThreadId: ReadonlyMap<string, ThreadStatusChangeMetadata>,
+  options?: { keepNewer: boolean },
+): void {
+  if (statusChangesByThreadId.size === 0) {
+    return;
+  }
+  notifyManager.batch(() => {
+    applyToCachedThreadListsAndSidebarNavigation(queryClient, (list) => {
+      let nextList: ThreadListEntry[] | null = null;
+      for (let i = 0; i < list.length; i += 1) {
+        const thread = list[i]!;
+        const statusChange = statusChangesByThreadId.get(thread.id);
+        if (
+          !statusChange ||
+          (options?.keepNewer && thread.updatedAt > statusChange.updatedAt) ||
+          threadMatchesStatusPatch(thread, statusChange)
+        ) {
+          continue;
+        }
+        if (nextList === null) {
+          nextList = list.slice();
+        }
+        nextList[i] = { ...thread, ...statusChange };
+      }
+      return nextList ?? list;
+    });
+  });
+}
+
 export function updateCachedThreadListStatusState(
   queryClient: QueryClient,
   threadId: string,
   statusChange: ThreadStatusChangeMetadata,
   options?: { keepNewer: boolean },
 ): void {
-  const replaces = (thread: ThreadListEntry) =>
-    thread.id === threadId &&
-    !(options?.keepNewer && thread.updatedAt > statusChange.updatedAt);
-  applyToCachedThreadListsAndSidebarNavigation(queryClient, (list) => {
-    if (!list.some(replaces)) {
-      return list;
-    }
-    return list.map((thread) =>
-      replaces(thread) ? { ...thread, ...statusChange } : thread,
-    );
-  });
+  updateCachedThreadListStatusStates(
+    queryClient,
+    new Map([[threadId, statusChange]]),
+    options,
+  );
 }
 
 export function getFetchingThreadListQueries(queryClient: QueryClient) {

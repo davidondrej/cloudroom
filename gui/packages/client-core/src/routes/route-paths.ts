@@ -131,23 +131,20 @@ export function getPluginsRoutePath(): string {
 
 interface PluginDetailRoutePathArgs {
   pluginId: string;
-  view?: "installed";
 }
 
+/** A plugin's listing. An installed plugin redirects from here to its page in Settings. */
 export function getPluginDetailRoutePath({
   pluginId,
-  view,
 }: PluginDetailRoutePathArgs): string {
-  const path = `${PLUGINS_ROUTE_PATH}/${encodeURIComponent(pluginId)}`;
-  return view === "installed"
-    ? `${SETTINGS_PLUGINS_ROUTE_PATH}/${encodeURIComponent(pluginId)}?view=installed`
-    : path;
+  return `${PLUGINS_ROUTE_PATH}/${encodeURIComponent(pluginId)}`;
 }
 
+/** An installed plugin's one page: its switch, settings, release and capabilities. */
 export function getPluginConfigurationRoutePath(
   args: PluginDetailRoutePathArgs,
 ): string {
-  return `/settings/plugins/${encodeURIComponent(args.pluginId)}`;
+  return `${SETTINGS_PLUGINS_ROUTE_PATH}/${encodeURIComponent(args.pluginId)}`;
 }
 
 export function getAutomationsRoutePath(): string {

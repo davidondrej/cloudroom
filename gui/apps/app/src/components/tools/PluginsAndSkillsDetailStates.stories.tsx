@@ -29,7 +29,6 @@ import {
   CatalogPluginDetailBanner,
   PluginDetail,
   PluginDetailBanners,
-  PluginProvenancePill,
 } from "@/components/tools/PluginDetail";
 import {
   ProviderLogo,
@@ -582,27 +581,17 @@ function FailedReleaseLifecycle() {
   return <Plugin plugin={plugin} />;
 }
 
-function Plugin({
-  plugin,
-  isLoading = false,
-}: {
-  plugin: PluginListItem | null;
-  isLoading?: boolean;
-}) {
+function Plugin({ plugin }: { plugin: PluginListItem }) {
   return (
     <div className="flex min-w-0 flex-col">
-      {plugin === null ? null : (
-        <div className="-mx-4 md:-mx-5">
-          <PluginDetailBanners plugin={plugin} />
-        </div>
-      )}
+      <div className="-mx-4 md:-mx-5">
+        <PluginDetailBanners plugin={plugin} />
+      </div>
       <div className="pt-3 md:pt-4">
         <PluginDetail
-          isLoading={isLoading}
           plugin={plugin}
           pending={false}
           openSourceDisabled
-          onToggle={noop}
           onEdit={noop}
           onOpenSource={noop}
           onDelete={noop}
@@ -807,7 +796,11 @@ export function PluginDetailStates() {
         </State>
 
         <State name="Route loading" note="Before the plugin list resolves.">
-          <Plugin plugin={null} isLoading />
+          <ResourceListState
+            state="loading"
+            message="Loading plugin"
+            layout="detail"
+          />
         </State>
 
         <State
@@ -1174,12 +1167,16 @@ export function ResourceControlStates() {
         >
           <ControlRow
             state="Plugin · Cloudroom Official catalog"
-            control={<PluginProvenancePill plugin={CATALOG_PLUGIN} />}
+            control={
+              <ProvenancePill label={CATALOG_PLUGIN.publisherLabel ?? ""} />
+            }
             meaning="Published by bb and installed from the catalog."
           />
           <ControlRow
             state="Plugin · Cloudroom Official built-in"
-            control={<PluginProvenancePill plugin={BUNDLED_PLUGIN} />}
+            control={
+              <ProvenancePill label={BUNDLED_PLUGIN.publisherLabel ?? ""} />
+            }
             meaning="Ships with Cloudroom. The same badge communicates publisher; lifecycle differences remain in metadata and actions."
           />
           <ControlRow

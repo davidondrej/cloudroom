@@ -5,6 +5,7 @@ import {
   desc,
   eq,
   exists,
+  getTableColumns,
   inArray,
   isNotNull,
   isNull,
@@ -87,6 +88,8 @@ export type QueuedThreadMessageRow = typeof queuedThreadMessages.$inferSelect;
 export interface ClaimedQueuedThreadMessageRow extends QueuedThreadMessageRow {
   claimedAt: number;
   claimToken: string;
+  /** The thread a system notice is about, read with the claim (#2281). */
+  subjectThread: { parentThreadId: string | null; projectId: string } | null;
 }
 
 export interface QueuedMessageThreadRow {
@@ -223,7 +226,7 @@ function isQueuedThreadMessageClaimed(row: QueuedThreadMessageRow): boolean {
 }
 
 function requireClaimedQueuedThreadMessage(
-  row: QueuedThreadMessageRow | null,
+  row: (QueuedThreadMessageRow & { subjectThread: string | null }) | null,
 ): ClaimedQueuedThreadMessageRow | null {
   if (!row || row.claimedAt === null || row.claimToken === null) {
     return null;
@@ -232,6 +235,8 @@ function requireClaimedQueuedThreadMessage(
     ...row,
     claimedAt: row.claimedAt,
     claimToken: row.claimToken,
+    subjectThread:
+      row.subjectThread === null ? null : JSON.parse(row.subjectThread),
   };
 }
 
@@ -604,7 +609,16 @@ function claimQueuedThreadMessageInTransaction(
         isNull(queuedThreadMessages.claimToken),
       ),
     )
-    .returning()
+    .returning({
+      ...getTableColumns(queuedThreadMessages),
+      // In the claim itself, so its delivery check reads nothing more.
+      subjectThread: sql<string | null>`(
+        select json_object('parentThreadId', ${threads.parentThreadId}, 'projectId', ${threads.projectId})
+        from ${threads}
+        where ${threads.id} = case when json_valid(${queuedThreadMessages.systemNotice})
+          then json_extract(${queuedThreadMessages.systemNotice}, '$.subject.threadId') end
+      )`,
+    })
     .get();
   return requireClaimedQueuedThreadMessage(updated ?? null);
 }

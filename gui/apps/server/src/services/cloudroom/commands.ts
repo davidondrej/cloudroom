@@ -150,6 +150,8 @@ class CloudroomService {
   set childTurnEnded(fn) { this.host.hooks.childTurnEnded = fn; }
   get moveRequest() { return this.host.hooks.moveRequest; }
   set moveRequest(fn) { this.host.hooks.moveRequest = fn; }
+  get childTold() { return this.host.hooks.childTold; }
+  set childTold(fn) { this.host.hooks.childTold = fn; }
 
   // Runtime & connections
   me() { return this.rt.me(); }
@@ -224,7 +226,7 @@ class CloudroomService {
 
   // Messaging, queue & controls
   create(request: CreateThreadRequest, awaitingCore?: boolean, fork?: { sourceThreadId: string; endSequence: number }) { return this.messaging.create(request, awaitingCore, fork); }
-  keyList(threadId: string) { return this.messaging.keyList(threadId); }
+  keyList(threadId: string) { return this.rt.keyList(threadId); }
   threadStatus(threadId: string) { return this.messaging.threadStatus(threadId); }
   updateReasoningOverride(thread: Thread, reasoningLevel: ReasoningLevel | null) { return this.messaging.updateReasoningOverride(thread, reasoningLevel); }
   changeModel(thread: Thread, model: string, reasoningLevel: ReasoningLevel | null, checkIdleSession?: () => void) { return this.messaging.changeModel(thread, model, reasoningLevel, checkIdleSession); }

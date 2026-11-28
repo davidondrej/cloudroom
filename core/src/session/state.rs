@@ -514,6 +514,9 @@ impl Local {
                     && !session.receipts.contains_key(&receipt.request_id)
                 {
                     if receipt.command == "stop" {
+                        let agent = super::thread::agent_stop(&receipt.request_id);
+                        session.agent_paused =
+                            agent && (session.agent_paused || !session.queue_paused);
                         session.queue_paused = true;
                     }
                     // Only a resume without `keep_paused` lifts the pause; older journals never have it.

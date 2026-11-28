@@ -168,6 +168,8 @@ it("restores shared child loops and keeps the Core restore queued until its sand
     awake = false;
   });
   vi.spyOn(service.sandboxes, "followsThreads").mockResolvedValue(true);
+  // The website's awake list says what connection() answers: idle unwatched threads only reconnect to awake sandboxes.
+  vi.spyOn(service.sandboxes, "isAwake").mockImplementation(() => awake);
   vi.spyOn(service.sandboxes, "restore").mockImplementation(
     async (_, session) => {
       restorations.push(session!);

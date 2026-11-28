@@ -2,6 +2,19 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 174
+
+The Director learns from any chat (2026-11-28)
+
+### Changes
+
+- The Director now learns from yes, no, and corrections you give in plain chat, and explains how it works the first time you open it.
+- Director settings got simpler: a clear on/off switch, pings as often as every minute, up to 5 threads per ping, a warning when its model is too weak, and a window that fits any zoom.
+- Each plugin now has one page in Settings, and paused loops get a Fix button that hands the error to an agent.
+- Fewer freezes: a server stall every 30 seconds and a burst of Cloud reconnects that locked up the app are fixed, and thread switching is smoother.
+- Cloud subagents can message their parent thread on your computer, and the cloud icon is electric lime again.
+- Old Claude Code threads keep working: their sessions are now kept for 10 years instead of 30 days.
+
 ## 173
 
 Speed, Speed, Speed. (2026-11-27)

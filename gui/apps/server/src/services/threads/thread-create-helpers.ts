@@ -4,7 +4,6 @@ import {
   events,
   getEnvironment,
   getThreadSectionById,
-  getProjectSourceByHost,
   getProject,
   getThread,
   isSqliteForeignKeyConstraint,
@@ -21,6 +20,10 @@ import {
 } from "@cloudroom/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import {
+  getCachedProjectSourceByHost,
+  type CheckoutInspectionCache,
+} from "../environments/provider-availability.js";
 import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import { uploadedAttachmentName } from "../projects/attachments.js";
 import type {
@@ -68,13 +71,20 @@ export function requireSourceForHost(
   deps: Pick<AppDeps, "db">,
   projectId: string,
   hostId: string,
+  checkoutInspectionCache?: CheckoutInspectionCache,
 ): LocalPathProjectSource {
-  const source = getProjectSourceByHost(deps.db, projectId, hostId);
+  const source = getCachedProjectSourceByHost(deps.db, {
+    ...(checkoutInspectionCache !== undefined
+      ? { cache: checkoutInspectionCache }
+      : {}),
+    hostId,
+    projectId,
+  });
   if (!source || source.type !== "local_path") {
     throw new ApiError(
       409,
       "invalid_request",
-      "No project source configured for this host",
+      `No project source configured for this host. Add one with \`room-cli project source add ${projectId} --machine ${hostId} --path <path>\`.`,
     );
   }
   return source;
@@ -252,6 +262,7 @@ export function createThreadRecord(
       providerId: args.request.providerId,
       title: args.request.title ?? null,
       titleFallback: args.request.titleFallback,
+      pinned: args.request.pinned,
       sectionId,
       parentThreadId: args.request.parentThreadId ?? null,
       sourceThreadId: args.request.sourceThreadId ?? null,

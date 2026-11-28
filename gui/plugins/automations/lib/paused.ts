@@ -31,3 +31,25 @@ export function failurePause(
     ? { failures: Number(cloud[1]), reason: error.slice(cloud[0].length) }
     : null;
 }
+
+/** Prompt sent to a new thread started from a paused loop's Fix button (David, 2026-11-27). */
+export function buildFixLoopPrompt(loop: {
+  name: string;
+  id: string;
+  cloud: boolean;
+  reason: string;
+}): string {
+  const where = loop.cloud ? "Cloud" : "Local";
+  const name = loop.name.replace(/[\s"]+/gu, " ").trim();
+  const reason = loop.reason.replace(/\s+/gu, " ").trim();
+  return [
+    `Fix my paused ${where} loop "${name}" (${loop.id}).`,
+    `Error: ${reason}`,
+    "",
+    "Inspect the loop and its latest failed run with `room-cli loop`.",
+    "If the fix is obvious, apply it.",
+    "Verify it works.",
+    "Resume the loop.",
+    "If it needs a secret or a decision, stop and tell me.",
+  ].join("\n");
+}

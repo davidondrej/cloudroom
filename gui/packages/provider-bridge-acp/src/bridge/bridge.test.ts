@@ -2014,6 +2014,24 @@ describe("acp bridge", () => {
     },
   );
 
+  const compactionLimit = "The compaction request cannot be reduced further without losing the latest exchange or checkpoint";
+  it.each([
+    { dialectId: "opencode", message: compactionLimit, hint: true },
+    { dialectId: "opencode", message: "Internal error: Session too large to compact - context exceeds model limit even after stripping media", hint: true },
+    { dialectId: undefined, message: compactionLimit, hint: false },
+    { dialectId: "opencode", message: "Input file is too large to compact", hint: false },
+  ])("hints a new thread only for OpenCode's compaction limit error (#2780): %o", async ({ dialectId, message, hint }) => {
+    const envVars = { FAKE_ACP_CLOSED_STREAM_FILE: join(workspaceDir, "closed"), FAKE_ACP_CLOSED_STREAM_ERROR: JSON.stringify({ code: -32603, message }) };
+    const { providerThreadId } = await startThread({ envVars, ...(dialectId ? { dialectId } : {}) });
+    for (const [index, text] of ["one", "two"].entries()) {
+      sendTurnRequest("turn/start", providerThreadId, { input: [{ type: "text", text, mentions: [] }] });
+      await waitFor(() => threadEventsOfType("turn/completed")[index], text);
+    }
+    expect(notifications("error")[0]?.params).toMatchObject({
+      message: hint ? expect.stringMatching(/^This chat is too long.*child\)\. (?:The compaction request cannot|Internal error: Session too large)/) : message,
+    });
+  });
+
   it("authenticates ACP sessions with cached tokens when advertised", async () => {
     const { providerThreadId } = await startThread({
       envVars: { FAKE_ACP_AUTH_METHODS: "cached_token" },

@@ -11,7 +11,7 @@ import {
   type PluginListRow,
 } from "./plugin-browse-discovery";
 
-type OpenPlugin = (pluginId: string, trigger: HTMLButtonElement) => void;
+import type { OpenPlugin } from "./BrowsePluginsTab";
 type Actions = {
   onInstall: (initial: AddPluginInitial) => void;
   onOpenPlugin: OpenPlugin;
@@ -266,7 +266,11 @@ export function PluginsFeatured({
               type="button"
               aria-label={`Open ${row.title} details`}
               onClick={(event) =>
-                onOpenPlugin(row.pluginId, event.currentTarget)
+                onOpenPlugin(
+                  row.pluginId,
+                  event.currentTarget,
+                  row.entry?.marketplace,
+                )
               }
               className="absolute inset-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             />

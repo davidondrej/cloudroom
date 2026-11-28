@@ -29,6 +29,7 @@ import {
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { failurePause, type FailurePause } from "./lib/paused.js";
+import { loginOf } from "./paused-notice.js";
 import {
   Select,
   SelectContent,
@@ -560,6 +561,8 @@ export function LoopDialog({
   onPriorityChange,
   onEnabledChange,
   onRun,
+  onFix,
+  fixing = false,
   onDelete,
   onSave,
   onClose,
@@ -571,6 +574,8 @@ export function LoopDialog({
   onPriorityChange: (priority: Priority) => void;
   onEnabledChange: (enabled: boolean) => void;
   onRun: () => void;
+  onFix?: () => void;
+  fixing?: boolean;
   onDelete: () => void;
   onSave: (changes: LoopDialogChanges) => Promise<boolean>;
   onClose: () => void;
@@ -1069,17 +1074,33 @@ export function LoopDialog({
             </div>
           </div>
 
-          {loop.webhook ? null : (
-            <div className="pb-1 pt-3 md:px-5 md:pb-5">
-              <Button
-                type="button"
-                variant="secondary"
-                className="w-full"
-                onClick={onRun}
-              >
-                <Icon name="Play" className="size-3.5" aria-hidden />
-                Run now
-              </Button>
+          {loop.webhook && !(loop.paused && onFix && !loginOf({ kind: loop.cloud ? "cloud" : "local", reason: loop.paused.reason })) ? null : (
+            <div className="flex gap-2 pb-1 pt-3 md:px-5 md:pb-5">
+              {loop.paused && onFix && !loginOf({ kind: loop.cloud ? "cloud" : "local", reason: loop.paused.reason }) ? (
+                <Button
+                  type="button"
+                  className={loop.webhook ? "w-full" : "flex-1"}
+                  disabled={fixing}
+                  onClick={onFix}
+                >
+                  {fixing ? "Starting…" : "Fix"}
+                </Button>
+              ) : null}
+              {loop.webhook ? null : (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  className={
+                    loop.paused && onFix && !loginOf({ kind: loop.cloud ? "cloud" : "local", reason: loop.paused.reason })
+                      ? "flex-1"
+                      : "w-full"
+                  }
+                  onClick={onRun}
+                >
+                  <Icon name="Play" className="size-3.5" aria-hidden />
+                  Run now
+                </Button>
+              )}
             </div>
           )}
         </aside>
@@ -1148,6 +1169,8 @@ export function CloudLoopDialog({
   priority,
   onPriorityChange,
   actions,
+  onFix,
+  fixing = false,
   onClose,
 }: {
   automation: CloudAutomation;
@@ -1155,6 +1178,8 @@ export function CloudLoopDialog({
   priority: Priority;
   onPriorityChange: (priority: Priority) => void;
   actions: CloudAutomationActions;
+  onFix?: () => void;
+  fixing?: boolean;
   onClose: () => void;
 }) {
   const loop = useMemo<LoopDialogLoop>(
@@ -1222,6 +1247,7 @@ export function CloudLoopDialog({
         actions.onEnabledChange(automation, enabled)
       }
       onRun={() => actions.onRun(automation)}
+      {...(onFix ? { onFix, fixing } : {})}
       onDelete={() => actions.onDelete(automation)}
       onSave={(changes) => {
         const cloudChanges: CloudAutomationChanges = {};

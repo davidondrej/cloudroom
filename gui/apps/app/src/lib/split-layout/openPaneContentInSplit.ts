@@ -48,13 +48,3 @@ export function openPaneContentInSplit({
   if (next !== layout) store.set(splitLayoutAtom, next);
   void navigate(route, existing !== null ? { replace: true } : undefined);
 }
-
-export function holdsPluginDetailPane(
-  layout: SplitLayout | null,
-  pluginId: string,
-): boolean {
-  if (layout === null) return false;
-  return (
-    findPaneByContent(layout.root, { kind: "plugin-detail", pluginId }) !== null
-  );
-}

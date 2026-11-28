@@ -24,6 +24,7 @@ import {
   isArchivedThreadListQueryKey,
   updateCachedThreadListPendingInteractionState,
   updateCachedThreadListStatusState,
+  updateCachedThreadListStatusStates,
 } from "./query-cache";
 import { bumpDiffPatchFreshnessGeneration } from "./environment-diff-patch-cache-owner";
 import { removeLiveThreadsFromCachedLists } from "./thread-archive-cache";
@@ -332,18 +333,17 @@ function keepPatchOverInFlightLists(
     if (action.type !== "success") {
       return;
     }
+    const statusPatches = new Map<string, ThreadStatusChangeMetadata>();
     for (const [patchedThreadId, listPatch] of patches) {
       if (listPatch === ARCHIVED_THREAD_LIST_PATCH) {
         removeLiveThreadFromCachedLists(queryClient, patchedThreadId);
         continue;
       }
-      updateCachedThreadListStatusState(
-        queryClient,
-        patchedThreadId,
-        listPatch,
-        { keepNewer: true },
-      );
+      statusPatches.set(patchedThreadId, listPatch);
     }
+    updateCachedThreadListStatusStates(queryClient, statusPatches, {
+      keepNewer: true,
+    });
   });
   listPatchUnsubscribers.set(queryClient, unsubscribe);
 }
@@ -1179,6 +1179,22 @@ function patchThreadListPendingInteractionState({
     hasPendingInteraction,
   );
 }
+
+export function applyBatchedThreadListStatusPatches(
+  queryClient: QueryClient,
+  statusPatches: ReadonlyMap<string, ThreadStatusChangeMetadata>,
+): void {
+  if (statusPatches.size === 0) {
+    return;
+  }
+  updateCachedThreadListStatusStates(queryClient, statusPatches);
+  for (const [threadId, statusChange] of statusPatches) {
+    keepPatchOverInFlightLists(queryClient, threadId, statusChange);
+  }
+}
+
+export const REALTIME_THREAD_LIST_STATUS_PATCH_HANDLER =
+  patchThreadListStatusState;
 
 function patchThreadListStatusState(
   context: ThreadRealtimeDirtyContext,

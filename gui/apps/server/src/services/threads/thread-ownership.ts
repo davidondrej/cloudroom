@@ -4,6 +4,7 @@ import {
   getThread,
   listQueuedThreadMessages,
   listUnarchivedAssignedChildThreads,
+  type ClaimedQueuedThreadMessageRow,
   type DbNotifier,
   type DbTransaction,
   unarchiveThread,
@@ -13,7 +14,6 @@ import type {
   PromptInput,
   QueuedMessageSystemNotice,
   SystemMessageKind,
-  SystemMessageSubject,
   Thread,
 } from "@cloudroom/domain";
 import { renderTemplate } from "@cloudroom/templates";
@@ -24,6 +24,7 @@ import {
   buildParentSystemThreadMention,
   parentSystemThreadLabel,
   queueParentSystemMessage,
+  UnsentParentSystemMessageError,
 } from "./parent-system-messages.js";
 import { systemMessageKindForTemplate } from "./system-message-kind.js";
 import {
@@ -40,15 +41,6 @@ interface ThreadLabelSource {
 type ThreadOwnershipTemplateId =
   | "systemMessageThreadOwnershipAssigned"
   | "systemMessageThreadOwnershipRemoved";
-
-interface QueueParentSystemMessageBestEffortArgs {
-  childThread: ThreadLabelSource & Pick<Thread, "archivedAt">;
-  input: PromptInput[];
-  parentThreadId: string;
-  reason: "assigned" | "removed";
-  templateId: ThreadOwnershipTemplateId;
-  threadName: string;
-}
 
 interface HandleThreadOwnershipChangeArgs {
   previousThread: Thread;
@@ -70,6 +62,27 @@ interface ThreadOwnershipTransactionDeps {
 }
 
 const THREAD_OWNERSHIP_MENTION_SLOT = "__BB_THREAD_OWNERSHIP_MENTION__";
+
+/**
+ * What a parent was last told about a child (true: "now a child"), as
+ * "parent:child", while notices about it are on their way, with the child as
+ * committed by a move not yet told. One run at a time tells the parent until
+ * that matches the child's parent (#2281).
+ */
+const ownershipNoticeRuns = new Map<
+  string,
+  { child: Thread | null; running: boolean; told: boolean }
+>();
+
+/** Whether the child's parent, as read now, is still as the notice says. */
+function ownershipNoticeHolds(
+  child: Pick<Thread, "parentThreadId"> | null,
+  parentThreadId: string,
+  kind: SystemMessageKind,
+): boolean {
+  const isChild = child?.parentThreadId === parentThreadId;
+  return isChild === (kind === "ownership-assigned");
+}
 
 /** A queued ownership notice about this child, unless the user edited it. */
 function ownershipNoticeAbout(
@@ -99,48 +112,113 @@ function ownershipNoticeAbout(
   return row.content === JSON.stringify(queued) ? notice.kind : null;
 }
 
-async function queueParentSystemMessageBestEffort(
+/**
+ * A queued ownership notice, unedited, whose change was undone before it was
+ * delivered: sending it would wake the parent for something untrue (#2281).
+ */
+export function isUndoneQueuedOwnershipNotice(
+  row: Pick<
+    ClaimedQueuedThreadMessageRow,
+    "content" | "subjectThread" | "systemNotice" | "threadId"
+  >,
+  { kind, subject }: QueuedMessageSystemNotice,
+): boolean {
+  if (
+    (kind !== "ownership-assigned" && kind !== "ownership-removed") ||
+    subject?.kind !== "thread"
+  ) {
+    return false;
+  }
+  // The claim read the child, so a drain of many notices reads none (#2281).
+  const child = row.subjectThread;
+  return (
+    child !== null &&
+    ownershipNoticeAbout(row, {
+      ...child,
+      id: subject.threadId,
+      title: null,
+    }) !== null &&
+    !ownershipNoticeHolds(child, row.threadId, kind)
+  );
+}
+
+/**
+ * Tells a parent the child's ownership until what it was last told matches the
+ * child's parent. A move while a notice is on its way is left to this run,
+ * which tells the parent once it settles, so a notice undone meanwhile (dropped
+ * right before it is written) is never sent and a lasting change still is.
+ */
+async function tellParentOwnership(
   deps: LoggedPendingInteractionWorkSessionDeps,
-  args: QueueParentSystemMessageBestEffortArgs,
+  parentThreadId: string,
+  childThreadId: string,
 ): Promise<void> {
-  try {
-    const kind = systemMessageKindForTemplate(args.templateId);
-    // A notice about this child still queued for the parent is a change it
-    // hasn't heard yet. This change undoes or repeats it, so neither wakes the
-    // parent: the next notice it gets matches the relationship (#2281).
-    const queued = listQueuedThreadMessages(deps.db, args.parentThreadId)
-      .filter((row) => ownershipNoticeAbout(row, args.childThread))
-      .at(-1);
-    if (queued) {
-      if (ownershipNoticeAbout(queued, args.childThread) !== kind) {
-        deleteQueuedThreadMessage(deps.db, deps.hub, queued.id);
-      }
-      return;
-    }
-    // An archived child needs nothing from its parent, so moving one (say, a
-    // retired parent's 50) tells neither parent; its own history keeps it (#2639).
-    if (args.childThread.archivedAt !== null) return;
-    const subject: SystemMessageSubject = {
-      kind: "thread",
-      threadId: args.childThread.id,
-      threadName: args.threadName,
-    };
-    await queueParentSystemMessage(deps, {
-      input: args.input,
-      parentThreadId: args.parentThreadId,
-      systemMessageKind: kind,
-      systemMessageSubject: subject,
-    });
-  } catch (error) {
+  const key = `${parentThreadId}:${childThreadId}`;
+  const run = ownershipNoticeRuns.get(key);
+  if (!run || run.running) return;
+  run.running = true;
+  const logFailure = (err: unknown) =>
     deps.logger.error(
-      {
-        childThreadId: args.childThread.id,
-        parentThreadId: args.parentThreadId,
-        reason: args.reason,
-        err: error,
-      },
+      { childThreadId, parentThreadId, err },
       "Failed to queue parent ownership system message",
     );
+  try {
+    // Starts from the committed move; one made meanwhile brings another pass.
+    for (let child = run.child; child !== null; child = run.child) {
+      run.child = null;
+      const isChild = child.parentThreadId === parentThreadId;
+      if (isChild === run.told) return;
+      const told = run.told;
+      run.told = isChild;
+      const templateId = isChild
+        ? "systemMessageThreadOwnershipAssigned"
+        : "systemMessageThreadOwnershipRemoved";
+      const kind = systemMessageKindForTemplate(templateId);
+      // A notice about this child still queued for the parent is a change it
+      // hasn't heard yet. This change undoes or repeats it, so neither wakes the
+      // parent: the next notice it gets matches the relationship (#2281).
+      const queued = listQueuedThreadMessages(deps.db, parentThreadId)
+        .filter((row) => ownershipNoticeAbout(row, child))
+        .at(-1);
+      if (queued) {
+        if (ownershipNoticeAbout(queued, child) !== kind) {
+          deleteQueuedThreadMessage(deps.db, deps.hub, queued.id);
+        }
+        return; // Nothing yielded since the move, so the parent is up to date.
+      }
+      // An archived child needs nothing from its parent, so moving one (say, a
+      // retired parent's 50) tells neither parent; its own history keeps it (#2639).
+      if (child.archivedAt !== null) return;
+      try {
+        await queueParentSystemMessage(deps, {
+          input: buildThreadOwnershipSystemInput(templateId, child),
+          parentThreadId,
+          systemMessageKind: kind,
+          systemMessageSubject: {
+            kind: "thread",
+            threadId: child.id,
+            threadName: parentSystemThreadLabel(child),
+          },
+          stillAccurate: () =>
+            ownershipNoticeHolds(
+              getThread(deps.db, child.id),
+              parentThreadId,
+              kind,
+            ),
+        });
+      } catch (error) {
+        if (error instanceof UnsentParentSystemMessageError) {
+          run.told = told; // Undone meanwhile: nothing was sent.
+          run.child = getThread(deps.db, child.id);
+          continue;
+        }
+        logFailure(error); // Counted as told: a change since gets its own.
+      }
+    }
+  } catch (error) {
+    logFailure(error); // Best effort: the move is committed either way.
+  } finally {
+    ownershipNoticeRuns.delete(key);
   }
 }
 
@@ -176,31 +254,27 @@ export async function handleThreadOwnershipChange(
     nextParentThreadId: args.updatedThread.parentThreadId,
   });
 
-  if (args.updatedThread.parentThreadId) {
-    await queueParentSystemMessageBestEffort(deps, {
-      childThread: args.updatedThread,
-      parentThreadId: args.updatedThread.parentThreadId,
-      input: buildThreadOwnershipSystemInput(
-        "systemMessageThreadOwnershipAssigned",
-        args.updatedThread,
-      ),
-      reason: "assigned",
-      templateId: "systemMessageThreadOwnershipAssigned",
-      threadName: parentSystemThreadLabel(args.updatedThread),
-    });
+  // Each parent was last told the relationship before this change, unless a
+  // run for it is still on its way, which knows what it told and tells this
+  // move once its notice settles.
+  const parentThreadIds = [
+    args.updatedThread.parentThreadId,
+    args.previousThread.parentThreadId,
+  ].filter((id): id is string => id !== null);
+  for (const parentThreadId of parentThreadIds) {
+    const key = `${parentThreadId}:${args.updatedThread.id}`;
+    const run = ownershipNoticeRuns.get(key);
+    if (run) run.child = args.updatedThread;
+    else {
+      ownershipNoticeRuns.set(key, {
+        child: args.updatedThread,
+        running: false,
+        told: args.previousThread.parentThreadId === parentThreadId,
+      });
+    }
   }
-  if (args.previousThread.parentThreadId) {
-    await queueParentSystemMessageBestEffort(deps, {
-      childThread: args.updatedThread,
-      parentThreadId: args.previousThread.parentThreadId,
-      input: buildThreadOwnershipSystemInput(
-        "systemMessageThreadOwnershipRemoved",
-        args.updatedThread,
-      ),
-      reason: "removed",
-      templateId: "systemMessageThreadOwnershipRemoved",
-      threadName: parentSystemThreadLabel(args.updatedThread),
-    });
+  for (const parentThreadId of parentThreadIds) {
+    await tellParentOwnership(deps, parentThreadId, args.updatedThread.id);
   }
 }
 

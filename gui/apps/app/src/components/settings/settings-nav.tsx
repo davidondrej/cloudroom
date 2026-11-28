@@ -11,6 +11,7 @@ import {
 } from "@/lib/route-paths";
 import {
   isSettingsSectionId,
+  pluginHasSettingsTab,
   SETTINGS_NAV_SECTIONS,
   type SettingsNavSection,
   type SettingsSectionId,
@@ -57,12 +58,14 @@ export function useSettingsNavState(): SettingsNavState {
     SETTINGS_SECTION_ROUTE_PATH,
     location.pathname,
   );
-  const pluginMatch = matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname);
-  const isInstalledDetail =
-    new URLSearchParams(location.search).get("view") === "installed";
-  const activePluginId = isInstalledDetail
-    ? null
-    : (pluginMatch?.params.pluginId ?? null);
+  const routePluginId =
+    matchPath(SETTINGS_PLUGIN_ROUTE_PATH, location.pathname)?.params.pluginId ??
+    null;
+  // A plugin with its own Settings tab opens there. Every other plugin opens in the Installed list.
+  const activePluginId =
+    routePluginId !== null && pluginHasSettingsTab(routePluginId)
+      ? routePluginId
+      : null;
   const machineMatch = matchPath(
     SETTINGS_MACHINE_ROUTE_PATH,
     location.pathname,
@@ -77,7 +80,7 @@ export function useSettingsNavState(): SettingsNavState {
   const hasUnknownSection =
     sectionParam !== undefined && !isSettingsSectionId(sectionParam);
   const activeSection: SettingsSectionId | null =
-    isInstalledDetail && pluginMatch !== null
+    routePluginId !== null && activePluginId === null
       ? "plugins"
       : activeMachineId !== null
         ? "machines"

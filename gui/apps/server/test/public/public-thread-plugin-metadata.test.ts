@@ -247,6 +247,11 @@ describe("public thread plugin metadata routes", () => {
         status: 404,
         body: { code: "thread_not_found", message: "Thread not found" },
       };
+      // A change refused as not found also names its log line (#2755).
+      const changeNotFound = {
+        ...notFound,
+        body: { ...notFound.body, errorId: expect.any(String) },
+      };
 
       expect(await getMetadata(harness, thread.id, "linear")).toEqual(notFound);
       expect(
@@ -254,7 +259,7 @@ describe("public thread plugin metadata routes", () => {
           pluginId: "linear",
           set: { a: 1 },
         }),
-      ).toEqual(notFound);
+      ).toEqual(changeNotFound);
       expect(readStoredMetadataJson(harness, thread.id, "linear")).toBe(
         undefined,
       );

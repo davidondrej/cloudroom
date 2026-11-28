@@ -1,16 +1,13 @@
 import { useSyncExternalStore, type ReactNode } from "react";
 import {
   ResourceActivitySection,
-  ResourceDetailConfigurationSection,
   ResourceDetailPage,
   ResourceDetailReleaseSection,
   ResourceDetailStack,
   ResourceInstallControl,
-  ResourceListState,
   ResourceOverflowMenu,
   type ResourceOverflowMenuItem,
 } from "@cloudroom/shared-ui/resource-list";
-import { Switch } from "@cloudroom/shared-ui/switch";
 import {
   Tooltip,
   TooltipContent,
@@ -19,9 +16,7 @@ import {
 } from "@cloudroom/shared-ui/tooltip";
 import { formatHomePathForDisplay } from "@cloudroom/shared-ui/lib/utils";
 import { Icon } from "@cloudroom/shared-ui/icon";
-import { Link } from "react-router";
-import { getPluginConfigurationRoutePath } from "@/lib/route-paths";
-import { PluginSettingsPage } from "@/components/plugin/PluginSettings";
+import { PluginSettingsContent } from "@/components/plugin/PluginSettings";
 import { CheckPluginUpdatesButton } from "@/components/plugin/management/CheckPluginUpdatesButton";
 import {
   PluginDetailReleaseControl,
@@ -31,7 +26,6 @@ import {
 import {
   CatalogEntryIconChip,
   formatAbsoluteDate,
-  PluginLogo,
   pluginInstallCountPresentation,
 } from "@/components/plugin/management/plugin-ui";
 import {
@@ -39,9 +33,10 @@ import {
   PluginMarketplaceHeaderMetadata,
   PluginMarketplaceListingSections,
   PluginMoreFromAuthorSection,
-  PluginOverviewLead,
 } from "@/components/plugin/management/PluginMarketplaceListing";
 import { pluginRuntimeStatusPresentation } from "@/components/plugin/management/plugin-status";
+import { PluginAuthorLink } from "@/components/plugin/management/PluginAuthorLink";
+import { pluginImprovedByCloudroom } from "@/components/plugin/management/plugin-marketplace-author";
 import {
   PluginHealthBanner,
   PluginIncludes,
@@ -53,7 +48,6 @@ import {
   PluginDetailTable,
 } from "@/components/tools/plugin-detail-table";
 import { PluginBannerBar } from "@/components/tools/plugin-detail-banner";
-import { ProvenancePill } from "@/components/tools/ProvenancePill";
 import {
   usePluginSource,
   type PluginCatalogSearchEntry,
@@ -64,13 +58,7 @@ import {
   subscribePluginFrontendDiagnostics,
   type PluginFrontendDiagnostic,
 } from "@/lib/plugin-frontend";
-import { usePluginSlots } from "@/lib/plugin-slots";
 import { useClipboardCopy } from "@/lib/clipboard";
-
-export function PluginProvenancePill({ plugin }: { plugin: PluginListItem }) {
-  const label = plugin.publisherLabel;
-  return label === null ? null : <ProvenancePill label={label} />;
-}
 
 export function pluginIsLocalSource(plugin: PluginListItem): boolean {
   return plugin.source.startsWith("path:");
@@ -127,7 +115,7 @@ export function CatalogPluginDetail({
   entry: PluginCatalogSearchEntry;
   onInstall: (entry: PluginCatalogSearchEntry) => void;
   catalogEntries: readonly PluginCatalogSearchEntry[];
-  onOpenPlugin: (pluginId: string) => void;
+  onOpenPlugin: (pluginId: string, marketplace?: string) => void;
 }) {
   const count = pluginInstallCountPresentation(entry.installs);
   return (
@@ -218,11 +206,9 @@ export function PluginDetailBanners({ plugin }: { plugin: PluginListItem }) {
 }
 
 export function PluginDetail({
-  isLoading,
   plugin,
   pending,
   openSourceDisabled,
-  onToggle,
   onEdit,
   onOpenSource,
   onDelete,
@@ -231,46 +217,21 @@ export function PluginDetail({
   onOpenPlugin,
   settings,
 }: {
-  /** Settings → Plugins: draw the plugin's settings in the page instead of linking to them. */
+  /** Extra settings the app adds for this plugin, drawn under the plugin's own. */
   settings?: ReactNode;
-  isLoading: boolean;
-  plugin: PluginListItem | null;
+  plugin: PluginListItem;
   pending: boolean;
   openSourceDisabled: boolean;
-  onToggle: (plugin: PluginListItem) => void;
   onEdit: (plugin: PluginListItem) => void;
   onOpenSource: (plugin: PluginListItem) => void;
   onDelete: (plugin: PluginListItem) => void;
   catalogEntry?: PluginCatalogSearchEntry;
   catalogEntries: readonly PluginCatalogSearchEntry[];
-  onOpenPlugin: (pluginId: string) => void;
+  onOpenPlugin: (pluginId: string, marketplace?: string) => void;
 }) {
-  const { settingsSections } = usePluginSlots();
-  const sourceQuery = usePluginSource(plugin?.id ?? "", {
-    enabled: plugin !== null && pluginHasUpdateSurfaces(plugin),
+  const sourceQuery = usePluginSource(plugin.id, {
+    enabled: pluginHasUpdateSurfaces(plugin),
   });
-  if (isLoading) {
-    return (
-      <ResourceListState
-        state="loading"
-        message="Loading plugins"
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-      />
-    );
-  }
-
-  if (plugin === null) {
-    return (
-      <ResourceListState
-        state="empty"
-        message="Plugin not found."
-        layout="detail"
-        maxWidthClassName="max-w-5xl"
-      />
-    );
-  }
-
   const hasUpdateManagement = pluginHasUpdateSurfaces(plugin);
   const canEditSource = pluginIsLocalSource(plugin);
   const updatesWithRoom = plugin.source.startsWith("builtin:");
@@ -289,10 +250,6 @@ export function PluginDetail({
     (plugin.updateState.availableVersion !== null ||
       plugin.updateState.blockedVersion !== null ||
       plugin.updateState.lastFailure !== null);
-  const hasConfiguration =
-    plugin.hasSettings ||
-    settingsSections.some((section) => section.pluginId === plugin.id);
-
   const pluginName = plugin.name ?? plugin.id;
   const overflowItems: ResourceOverflowMenuItem[] = [
     ...(canEditSource
@@ -328,23 +285,6 @@ export function PluginDetail({
       onSelect: () => onDelete(plugin),
     },
   ];
-  const overflowMenu = (
-    <ResourceOverflowMenu
-      label={`${pluginName} actions`}
-      items={overflowItems}
-    />
-  );
-  const marketplaceListing =
-    catalogEntry === undefined ? null : (
-      <>
-        <PluginMarketplaceListingSections entry={catalogEntry} />
-        <PluginMoreFromAuthorSection
-          entry={catalogEntry}
-          catalogEntries={catalogEntries}
-          onOpenPlugin={onOpenPlugin}
-        />
-      </>
-    );
   const releaseAndCapabilities = (
     <>
       <ResourceDetailReleaseSection
@@ -375,16 +315,26 @@ export function PluginDetail({
               <PluginDetailReleaseStatus plugin={plugin} />
             </PluginDetailFieldRow>
           ) : null}
-          {settings !== undefined && plugin.publisherLabel !== null ? (
+          {plugin.publisherLabel !== null ? (
             <PluginDetailFieldRow label="Publisher" labelClassName="font-medium">
               {plugin.publisherLabel}
             </PluginDetailFieldRow>
           ) : null}
-          {settings !== undefined ? (
-            <PluginDetailFieldRow label="Location" labelClassName="font-medium">
-              <PluginPath path={plugin.rootDir} />
+          {catalogEntry !== undefined &&
+          catalogEntry.author !== null &&
+          !pluginImprovedByCloudroom(catalogEntry) ? (
+            <PluginDetailFieldRow label="Author" labelClassName="font-medium">
+              <PluginAuthorLink
+                entry={catalogEntry}
+                className="rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {catalogEntry.author.name}
+              </PluginAuthorLink>
             </PluginDetailFieldRow>
           ) : null}
+          <PluginDetailFieldRow label="Location" labelClassName="font-medium">
+            <PluginPath path={plugin.rootDir} />
+          </PluginDetailFieldRow>
         </PluginDetailTable>
       </ResourceDetailReleaseSection>
       <PluginIncludes plugin={plugin} />
@@ -400,93 +350,35 @@ export function PluginDetail({
       ) : null}
     </>
   );
-  if (settings !== undefined) {
-    return (
-      <PluginSettingsPage
-        pluginId={plugin.id}
-        headerActions={overflowMenu}
-        detailSections={
-          <>
-            {marketplaceListing}
-            {releaseAndCapabilities}
-          </>
-        }
-      >
-        {settings}
-      </PluginSettingsPage>
-    );
-  }
   return (
-    <ResourceDetailPage
-      maxWidthClassName="max-w-5xl"
-      leading={<PluginLogo plugin={plugin} className="size-4" />}
-      title={pluginName}
-      titleMeta={
-        <span className="flex flex-wrap items-center gap-1.5">
-          <PluginProvenancePill plugin={plugin} />
+    <PluginSettingsContent
+      plugin={plugin}
+      headerActions={
+        <ResourceOverflowMenu
+          label={`${pluginName} actions`}
+          items={overflowItems}
+        />
+      }
+      detailSections={
+        <>
           {catalogEntry === undefined ? null : (
-            <PluginMarketplaceCategoryPill entry={catalogEntry} />
+            <>
+              <PluginMarketplaceListingSections
+                entry={catalogEntry}
+                lead={false}
+              />
+              <PluginMoreFromAuthorSection
+                entry={catalogEntry}
+                catalogEntries={catalogEntries}
+                onOpenPlugin={onOpenPlugin}
+              />
+            </>
           )}
-        </span>
+          {releaseAndCapabilities}
+        </>
       }
-      metadata={
-        <div className="space-y-1">
-          {catalogEntry === undefined ? null : (
-            <PluginMarketplaceHeaderMetadata entry={catalogEntry} />
-          )}
-          <PluginPath path={plugin.rootDir} />
-        </div>
-      }
-      lifecycleControl={
-        plugin.alwaysEnabled ? (
-          <span className="rounded-full bg-surface-recessed px-2.5 py-1 text-xs font-medium text-muted-foreground">
-            Built in · Always on
-          </span>
-        ) : (
-          <Switch
-            checked={plugin.enabled}
-            disabled={pending}
-            aria-label={`${plugin.enabled ? "Disable" : "Enable"} ${pluginName}`}
-            onCheckedChange={() => onToggle(plugin)}
-          />
-        )
-      }
-      overflowMenu={overflowMenu}
     >
-      <ResourceDetailStack>
-        {marketplaceListing ?? (
-          <section data-resource-detail-section="overview">
-            <PluginOverviewLead
-              description={
-                plugin.description ?? "This plugin does not describe itself."
-              }
-            />
-          </section>
-        )}
-        {hasConfiguration ? (
-          <ResourceDetailConfigurationSection
-            id="configuration"
-            className="scroll-mt-4"
-            label="Configuration"
-          >
-            <p className="max-w-none text-sm leading-relaxed text-muted-foreground">
-              This plugin is configured from{" "}
-              <Link
-                to={getPluginConfigurationRoutePath({ pluginId: plugin.id })}
-                className="inline-flex items-center gap-0.5 rounded-sm underline underline-offset-2 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              >
-                its Settings page
-                <Icon
-                  name="ChevronRight"
-                  className="size-3.5 no-underline"
-                  aria-hidden
-                />
-              </Link>
-            </p>
-          </ResourceDetailConfigurationSection>
-        ) : null}
-        {releaseAndCapabilities}
-      </ResourceDetailStack>
-    </ResourceDetailPage>
+      {settings}
+    </PluginSettingsContent>
   );
 }

@@ -11,6 +11,7 @@ import { invalidatePluginList } from "@/hooks/cache-owners/plugin-cache-owner";
 import type { PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
 import { pluginRowSignal } from "./plugin-status";
+import { pluginSettingsGroup } from "@/components/settings/settings-sections";
 import { PluginLogo, UPDATE_ICON_STYLE } from "./plugin-ui";
 
 /** The installed plugins as sidebar rows: icon and name. The selected one opens beside the list. */
@@ -58,13 +59,18 @@ export function InstalledPluginRow({
   }, [selected]);
   const signal = pluginRowSignal(plugin);
   const name = plugin.name ?? plugin.id;
+  const group = pluginSettingsGroup(plugin.id);
   return (
     <Button
       ref={rowRef}
       size="sm"
       variant="ghost"
       data-testid={`plugin-row-${plugin.id}`}
-      aria-label={`${name} plugin details`}
+      aria-label={
+        group === undefined
+          ? `${name} plugin details`
+          : `${name}, opens in Settings → ${group.label}`
+      }
       aria-current={selected ? "page" : undefined}
       className={cn(
         PROJECT_LIST_ACTION_BUTTON_CLASS,
@@ -109,6 +115,12 @@ export function InstalledPluginRow({
           aria-label="Update available"
         />
       ) : null}
+      {group === undefined ? null : (
+        <span className="flex shrink-0 items-center text-2xs text-subtle-foreground">
+          {group.label}
+          <Icon name="ChevronRight" className="size-3" aria-hidden />
+        </span>
+      )}
     </Button>
   );
 }

@@ -1,4 +1,7 @@
-import { reasoningLevelValues } from "@cloudroom/domain";
+import {
+  ACP_AGENT_MANAGED_REASONING_EFFORT,
+  reasoningLevelValues,
+} from "@cloudroom/domain";
 import type { AvailableModel, ReasoningLevel, ServiceTier } from "@cloudroom/domain";
 import type { AcpConfigOption, AcpSessionModels } from "../wire.js";
 
@@ -8,12 +11,7 @@ interface RawAgentModel {
 }
 
 export const ACP_NATIVE_REASONING_EFFORTS: AvailableModel["supportedReasoningEfforts"] =
-  [
-    {
-      reasoningEffort: "medium",
-      description: "Reasoning effort is managed by the connected ACP agent.",
-    },
-  ];
+  [ACP_AGENT_MANAGED_REASONING_EFFORT];
 
 export interface AcpNativeReasoningSupport {
   supportedReasoningEfforts: AvailableModel["supportedReasoningEfforts"];

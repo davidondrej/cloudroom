@@ -47,12 +47,13 @@ import {
   automationProjectLabel,
   CREATE_AUTOMATION_PROMPT,
   type AutomationCollectionMode,
+  type FixLoopTarget,
   type LoopReviewState,
 } from "./overview-view";
 import { PERSONAL_PROJECT_ID } from "./lib/format-schedule";
 import { loopsChanged, PausedLoopsLabel, usePlanLoopsChanged } from "./paused-notice";
 import { ScanCard } from "./scan-card";
-import { failurePause } from "./lib/paused.js";
+import { buildFixLoopPrompt, failurePause } from "./lib/paused.js";
 import type { LoopTemplate } from "./templates";
 import type {
   LoopTarget,
@@ -626,16 +627,56 @@ function OverviewView({
   onCloseRoute: () => void;
 }) {
   const navigate = useBbNavigate();
+  const sdk = useSdk();
   const { entries, error, refetch } = useOverview();
   const cloud = useCloudAutomations();
   const review = useReview();
   const mutations = useMutations();
+  const [fixingKey, setFixingKey] = useState<string | null>(null);
   const reloadCloud = cloud.reload;
   const templates = useTemplates(
     useCallback(() => {
       refetch();
       void reloadCloud();
     }, [refetch, reloadCloud]),
+  );
+
+  const fixLoop = useCallback(
+    (target: FixLoopTarget) => {
+      if (fixingKey !== null) return;
+      const knownProjects = new Set<string>([
+        ...(entries ?? []).map((entry) => entry.project.id),
+        ...(templates.projects ?? []).map((project) => project.id),
+      ]);
+      const projectId =
+        target.projectId &&
+        (target.projectId === PERSONAL_PROJECT_ID ||
+          knownProjects.has(target.projectId))
+          ? target.projectId
+          : PERSONAL_PROJECT_ID;
+      setFixingKey(target.key);
+      void sdk.threads
+        .spawn({
+          projectId,
+          executionTarget: "local",
+          environment: { type: "project-default" },
+          title: `Fix: ${target.name}`,
+          prompt: buildFixLoopPrompt(target),
+        })
+        .then(
+          (thread) => {
+            onCloseRoute();
+            navigate.toThread(thread.id);
+          },
+          (spawnError: unknown) => {
+            toast.error(`Couldn't start fix thread: ${errorText(spawnError)}`);
+          },
+        )
+        .finally(() => {
+          setFixingKey((current) => (current === target.key ? null : current));
+        });
+    },
+    [entries, fixingKey, navigate, onCloseRoute, sdk, templates.projects],
   );
 
   const changeEnabled = useCallback(
@@ -681,6 +722,8 @@ function OverviewView({
       onOpenDetail={onOpenDetail}
       onEnabledChange={changeEnabled}
       onPriorityChange={changePriority}
+      onFixLoop={fixLoop}
+      fixingKey={fixingKey}
       onCreateViaChat={createViaChat}
       activeMode={activeMode}
       onModeChange={onModeChange}
@@ -700,6 +743,8 @@ function OverviewView({
                   context={context}
                   priority={priority}
                   onPriorityChange={onPriorityChange}
+                  onFixLoop={fixLoop}
+                  fixingKey={fixingKey}
                   onClose={onCloseRoute}
                 />
               ),
@@ -775,12 +820,16 @@ function LocalLoopDialog({
   context,
   priority,
   onPriorityChange,
+  onFixLoop,
+  fixingKey,
   onClose,
 }: {
   route: DetailRoute;
   context: LoopDialogContext;
   priority: Priority;
   onPriorityChange: (priority: Priority) => void;
+  onFixLoop: (target: FixLoopTarget) => void;
+  fixingKey: string | null;
   onClose: () => void;
 }) {
   const rpc = useRpc<typeof automationRpcContract>();
@@ -968,6 +1017,20 @@ function LocalLoopDialog({
         onPriorityChange={onPriorityChange}
         onEnabledChange={(enabled) => void runAction(enabled ? "resume" : "pause")}
         onRun={() => void runAction("run")}
+        {...(loop.paused
+          ? {
+              onFix: () =>
+                onFixLoop({
+                  key: `local:${readable.id}`,
+                  id: readable.id,
+                  name: readable.name,
+                  cloud: false,
+                  projectId: readable.projectId,
+                  reason: loop.paused!.reason,
+                }),
+              fixing: fixingKey === `local:${readable.id}`,
+            }
+          : {})}
         onDelete={() => setDeleteOpen(true)}
         onSave={save}
         onClose={onClose}

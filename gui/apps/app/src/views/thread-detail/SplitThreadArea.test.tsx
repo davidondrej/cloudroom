@@ -2295,4 +2295,53 @@ describe("SplitThreadArea", () => {
       );
     });
   });
+
+  it("keeps up to 4 single-pane threads alive via Activity and evicts the LRU thread on the 5th switch", async () => {
+    function NavHarness() {
+      const navigate = useNavigate();
+      return (
+        <>
+          <SplitThreadArea />
+          {["thr-2", "thr-3", "thr-4", "thr-5"].map((id) => (
+            <button
+              key={id}
+              type="button"
+              data-testid={`go-${id}`}
+              onClick={() => navigate(threadPath(id))}
+            >
+              {id}
+            </button>
+          ))}
+        </>
+      );
+    }
+    const store = createStore();
+    render(
+      <TooltipProvider delayDuration={0}>
+        <JotaiProvider store={store}>
+          <QueryClientProvider client={queryClient}>
+            <MemoryRouter initialEntries={[threadPath("thr-1")]}>
+              <NavHarness />
+            </MemoryRouter>
+          </QueryClientProvider>
+        </JotaiProvider>
+      </TooltipProvider>,
+    );
+
+    expect(await screen.findByTestId("pane-thr-1")).toBeTruthy();
+
+    for (const id of ["thr-2", "thr-3", "thr-4"]) {
+      fireEvent.click(screen.getByTestId(`go-${id}`));
+      expect(await screen.findByTestId(`pane-${id}`)).toBeTruthy();
+    }
+
+    expect(screen.getByTestId("pane-thr-1").style.display).toBe("none");
+    expect(screen.getByTestId("pane-thr-4").style.display).toBe("");
+
+    fireEvent.click(screen.getByTestId("go-thr-5"));
+    expect(await screen.findByTestId("pane-thr-5")).toBeTruthy();
+    expect(screen.queryByTestId("pane-thr-1")).toBeNull();
+    expect(screen.getByTestId("pane-thr-2").style.display).toBe("none");
+    expect(screen.getByTestId("pane-thr-5").style.display).toBe("");
+  });
 });
