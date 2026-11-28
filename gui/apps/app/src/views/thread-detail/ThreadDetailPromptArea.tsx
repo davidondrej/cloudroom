@@ -396,7 +396,7 @@ async function runWhileFollowUpShortcutSending(
 }
 
 import { showCloudSignIn, useCloudLocked } from "@/hooks/useCloudLocked";
-import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, cloudroomRequestId, cloudroomRequestEntry, clearCloudroomRequestId, cloudReasoningLevels, cloudOpenCodeCatalog, partitionCloudOpenCodeModelOptions, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
+import { useCloudroomThread, useSetCloudReasoning, useCloudroomThreadWorkspace, useCloudroomConnection, useRetryCloudStart, useTeleportThread, useTeleportLocal, useTeleportDirection, createCloudroomRequestId, clearCloudroomRequestId, cloudReasoningLevels, cloudOpenCodeCatalog, partitionCloudOpenCodeModelOptions, cloudServiceTierSupported, cloudUltraFastSupported, cloudFeatureSupported, cloudCanRunHarness, cloudHarness } from "@/hooks/queries/cloudroom-queries";
 import { reasoningLevelSchema, reconcileReasoningLevel } from "@cloudroom/domain";
 import { reasoningLevelLabel } from "@/lib/reasoning-labels";
 import { useCopyCommand } from "@/hooks/useCopyCommand";
@@ -511,10 +511,14 @@ export function ThreadDetailPromptArea({
   });
   // The model or agent being switched to: shown and sent at once while the switch finishes in the background.
   // Read from the shared mutation cache, so a reopened thread still sees a switch started before.
-  const pendingSwitch = useMutationState({
+  const pendingSwitchEntry = useMutationState({
     filters: { mutationKey: ["thread-update", thread.id], exact: true, status: "pending" },
-    select: (mutation) => mutation.state.variables as UpdateThreadRequest | undefined,
-  }).filter((variables) => typeof variables?.model === "string").at(-1);
+    select: (mutation) => ({
+      variables: mutation.state.variables as UpdateThreadRequest | undefined,
+      submittedAt: mutation.state.submittedAt,
+    }),
+  }).filter((entry) => typeof entry.variables?.model === "string").at(-1);
+  const pendingSwitch = pendingSwitchEntry?.variables;
   const saveReasoning = useUpdateThread({
     threadId: thread.id,
     errorMessage: "Failed to save thread execution settings.",
@@ -522,7 +526,15 @@ export function ThreadDetailPromptArea({
   });
   const isExecutionUpdatePending =
     useIsMutating({ mutationKey: ["thread-update", thread.id] }) > 0;
-  const cloudReasoning = pendingSwitch?.reasoningLevel ?? (setCloudReasoning.isPending ? setCloudReasoning.variables : undefined) ?? cloudState.data?.reasoning ?? "medium";
+  const isHarnessSwitchPending =
+    pendingSwitch?.providerId !== undefined &&
+    pendingSwitch.providerId !== thread.providerId;
+  const pendingCloudReasoning = setCloudReasoning.isPending ? setCloudReasoning.variables : undefined;
+  const cloudReasoning =
+    pendingCloudReasoning !== undefined &&
+    (setCloudReasoning.submittedAt ?? 0) >= (pendingSwitchEntry?.submittedAt ?? 0)
+      ? pendingCloudReasoning
+      : (pendingSwitch?.reasoningLevel ?? pendingCloudReasoning ?? cloudState.data?.reasoning ?? "medium");
   const cloudModel = pendingSwitch?.model ?? cloudState.data?.model;
   const retryCloudStart = useRetryCloudStart(thread.id);
   const defaultExecutionOptionsQuery = useThreadDefaultExecutionOptions(
@@ -928,6 +940,8 @@ export function ThreadDetailPromptArea({
     sendMessage.isPending ||
     createQueuedMessage.isPending ||
     isFollowUpShortcutSending;
+  // Sends clear the draft synchronously and serialize per thread, so waiting on a switch never locks the composer.
+  const isComposerSubmitting = moving || isFollowUpShortcutSending;
   const handleStopThread = useCallback(() => {
     stopThread.mutate(thread.id);
   }, [stopThread, thread.id]);
@@ -1006,7 +1020,7 @@ export function ThreadDetailPromptArea({
   const hasPromptDraftInput = currentPromptDraftInput.length > 0;
   const canSubmitModifierShortcut = canSubmitFollowUpShortcut({
     hasPromptDraftInput,
-    isFollowUpSubmitting,
+    isFollowUpSubmitting: isComposerSubmitting,
     isQueueMutationPending,
     queuedMessageCount: queuedMessages.length,
     runtimeDisplayStatus,
@@ -1099,22 +1113,27 @@ export function ThreadDetailPromptArea({
       mode: steer && thread.status === "active" ? "steer-if-active" as const : "queue-if-active" as const,
     };
     const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
-    let pinned: ReturnType<typeof cloudroomRequestEntry>;
+    draftEdits.commit();
+    let pinned: { key: string; value: string } | undefined;
+    let releaseRequestId: (() => void) | undefined;
     try {
-      const requestId = await cloudroomRequestId(thread.id, request);
-      pinned = cloudroomRequestEntry(thread.id);
+      const { requestId, entry, release } = await createCloudroomRequestId(thread.id, request);
+      pinned = entry;
+      releaseRequestId = release;
       await sendMessage.mutateAsync({
         ...request, requestId,
         ...(remoteMac && canRecoverCloudSend(submittedInput) ? { recoverCloudDelivery: true } : {}),
       });
       clearCloudroomRequestId(thread.id, requestId);
-      draftEdits.commit();
       return true;
     } catch (error) {
+      draftEdits.rollback();
       // Unless surely refused, it waits as a failed message that keeps its request ID: never resent on its own.
       promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(error), request: pinned });
       showMutationErrorToast({ error, fallbackMessage: "Cloud message was not confirmed", lifecycleOperation: "send_message" });
       return false;
+    } finally {
+      releaseRequestId?.();
     }
   }, [remoteMac, cloudFastSupported, cloudModel, cloudReasoning, movingToLocal, promptDraft, sendMessage, serviceTier, thread.id, thread.status]);
 
@@ -1136,6 +1155,7 @@ export function ThreadDetailPromptArea({
     const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
 
+    let committedDraftEdits = false;
     try {
       if (isQueuingMessage) {
         const request = buildCreateQueuedFollowUpRequest({
@@ -1144,8 +1164,9 @@ export function ThreadDetailPromptArea({
           execution: followUpExecutionSelection,
         });
         if (request) {
-          await createQueuedMessage.mutateAsync(request);
           draftEdits.commit();
+          committedDraftEdits = true;
+          await createQueuedMessage.mutateAsync(request);
         }
       } else {
         const request = buildAutoFollowUpRequest({
@@ -1154,12 +1175,14 @@ export function ThreadDetailPromptArea({
           execution: followUpExecutionSelection,
         });
         if (request) {
-          await sendMessage.mutateAsync(request);
           draftEdits.commit();
+          committedDraftEdits = true;
+          await sendMessage.mutateAsync(request);
         }
       }
       return true;
     } catch (nextError) {
+      if (committedDraftEdits) draftEdits.rollback();
       promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
       showMutationErrorToast({
         error: nextError,
@@ -1279,11 +1302,12 @@ export function ThreadDetailPromptArea({
     });
     if (!request) return;
     const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
+    draftEdits.commit();
     dismissBottomAttachmentFailures();
     try {
       await createQueuedMessage.mutateAsync({ ...request, hardQueue: true });
-      draftEdits.commit();
     } catch (nextError) {
+      draftEdits.rollback();
       promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
       showMutationErrorToast({
         error: nextError,
@@ -1326,6 +1350,7 @@ export function ThreadDetailPromptArea({
       }
       const clearedSubmittedDraft =
         promptDraft.clearIfCurrentMatches(submittedDraft);
+      draftEdits.commit();
       dismissBottomAttachmentFailures();
       try {
         await sendMessage.mutateAsync({
@@ -1335,8 +1360,8 @@ export function ThreadDetailPromptArea({
             : { sendAt: submitOptions.sendAt }),
           ...(pluginSubmission === undefined ? {} : { pluginSubmission }),
         });
-        draftEdits.commit();
       } catch (scheduleError) {
+        draftEdits.rollback();
         if (clearedSubmittedDraft) {
           promptDraft.restoreFailedSend(submittedDraft, { cleared: true, refused: isDefiniteRejection(scheduleError) });
         }
@@ -1368,9 +1393,7 @@ export function ThreadDetailPromptArea({
       return;
     }
     if (isCloud && currentPromptDraftInput.length > 0) {
-      await runWhileFollowUpShortcutSending(setIsFollowUpShortcutSending, async () => {
-        await sendCloudDraft(true);
-      });
+      await sendCloudDraft(true);
       return;
     }
 
@@ -1389,14 +1412,15 @@ export function ThreadDetailPromptArea({
 
     if (shortcutRequest.kind === "draft") {
       const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
+      draftEdits.commit();
       dismissBottomAttachmentFailures();
       await runWhileFollowUpShortcutSending(
         setIsFollowUpShortcutSending,
         async () => {
           try {
             await sendMessage.mutateAsync(shortcutRequest.request);
-            draftEdits.commit();
           } catch (nextError) {
+            draftEdits.rollback();
             promptDraft.restoreFailedSend(submittedDraft, { cleared, refused: isDefiniteRejection(nextError) });
             showMutationErrorToast({
               error: nextError,
@@ -1553,7 +1577,7 @@ export function ThreadDetailPromptArea({
         onSelectEntry: promptDraft.setDraft,
         resetKey: thread.id,
       },
-      isFollowUpSubmitting: isFollowUpSubmitting || moving,
+      isFollowUpSubmitting: isComposerSubmitting,
       message: currentPromptDraft.text,
       mentionRanges: currentPromptDraft.mentions,
       onChangeMessage: handleBottomComposerMessageChange,
@@ -1582,7 +1606,7 @@ export function ThreadDetailPromptArea({
       handleBottomComposerMessageChange,
       handleBottomComposerModifierSubmit,
       handleBottomComposerSubmit,
-      isFollowUpSubmitting,
+      isComposerSubmitting,
       moving,
       promptHistoryDrafts,
       promptPlaceholder,
@@ -1692,7 +1716,7 @@ export function ThreadDetailPromptArea({
   ]);
   const bottomExecutionConfig = useMemo(
     () => ({
-      disabled: isExecutionUpdatePending,
+      disabled: isHarnessSwitchPending,
       providerRouting:
         thread.environmentId === null
           ? executionOptionsRouting
@@ -1745,7 +1769,7 @@ export function ThreadDetailPromptArea({
       providerOptions,
       followUpReasoningLevel,
       reasoningOptions,
-      isExecutionUpdatePending,
+      isHarnessSwitchPending,
       handleReasoningChange,
       pendingSwitch?.providerId,
       selectedModel,
@@ -2283,8 +2307,6 @@ export function ThreadDetailPromptArea({
             sendDisabled={
               submitMode.kind === "blocked" ||
               runtimeDisplayStatus === "waiting-for-host" ||
-              isFollowUpSubmitting ||
-              isExecutionUpdatePending ||
               isQueueMutationPending ||
               moving
             }
@@ -2313,8 +2335,6 @@ export function ThreadDetailPromptArea({
       handleToggleBannerSection,
       handleUnarchiveCurrentThread,
       environmentGoneStatus,
-      isFollowUpSubmitting,
-      isExecutionUpdatePending,
       isUnarchiveCurrentThreadPending,
       isQueueMutationPending,
       moving,
@@ -2360,10 +2380,13 @@ export function ThreadDetailPromptArea({
       />
     );
   }, [activePendingInteraction, shouldHideComposer, thread.id]);
-  // A chat-card request (a GPU) shows at the end of the chat (ThreadDetailView) and leaves the composer in place.
+  // A chat-card request (GPU, browser control setup) shows at the end of the chat (ThreadDetailView) and leaves the composer in place.
   const pendingInteractionInChat =
     activePendingInteraction?.origin?.kind === "plugin" &&
-    isChatCardPluginInteraction(activePendingInteraction.origin.pluginId);
+    isChatCardPluginInteraction(
+      activePendingInteraction.origin.pluginId,
+      activePendingInteraction.origin.rendererId,
+    );
   const pendingInteractionStack = useMemo(
     () => (
       <>

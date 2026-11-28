@@ -188,9 +188,10 @@ fn prompt_items(input: &Value) -> Vec<Value> {
     items
 }
 
+// serviceTierForTurn takes Codex's own tier id: it drops "fast" and samples at the default tier (#1851).
 fn service_tier_for_turn(input: &Value) -> &'static str {
     match input["service_tier"].as_str() {
-        Some("fast") => "fast",
+        Some("fast") => "priority",
         Some("ultrafast") => "ultrafast",
         _ => "default",
     }
@@ -892,5 +893,13 @@ mod tests {
         assert!(ended("cyberPolicy"));
         assert!(ended("misalignmentPolicyViolation"));
         assert!(!ended("serverOverloaded"));
+    }
+
+    #[test]
+    fn fast_turns_ask_codex_for_priority() {
+        assert_eq!(
+            service_tier_for_turn(&json!({"service_tier":"fast"})),
+            "priority"
+        );
     }
 }

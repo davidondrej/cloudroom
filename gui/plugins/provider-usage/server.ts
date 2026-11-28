@@ -26,11 +26,22 @@ import {
 
 const SAVED_MEASUREMENTS_KEY = "measurements:v1";
 const CLAUDE_PROVIDER_ID = "claude-code";
-const CLAUDE_RETRY_BASE_MS = 35_000;
-const CLAUDE_RETRY_JITTER_MS = 5_000;
-const CLAUDE_RETRY_MAX_ATTEMPTS = 3;
-const CLAUDE_IDLE_RECOVERY_COOLDOWN_MS = 60_000;
+// Claude /api/oauth/usage throttles hard per token; poll on a randomized 15–45 min cadence.
+const CLAUDE_POLL_MIN_MS = 15 * 60_000;
+const CLAUDE_POLL_MAX_MS = 45 * 60_000;
+const CLAUDE_MIN_GAP_MS = 5 * 60_000;
+const CLAUDE_POST_TURN_MIN_MS = 15_000;
+const CLAUDE_POST_TURN_MAX_MS = 45_000;
 const USAGE_UPDATED_EVENT = "usage-updated";
+const ACCOUNT_PROVIDERS = [
+  "claude-code",
+  "codex",
+  "acp-cursor",
+  "acp-antigravity",
+] as const;
+
+const randomDelay = (minMs: number, maxMs: number): number =>
+  minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
 
 function rollExpiredWindows(
   measurement: UsageMeasurement,
@@ -232,44 +243,98 @@ function accountUsage(
 }
 
 export default function providerUsagePlugin(room: BbPluginApi): void {
-  const mergeAccounts = async (
-    machines: UsageMachine[],
-    providers: Provider[],
-    refreshClaude: boolean,
-    skipLocalClaude: boolean,
-  ): Promise<void> => {
-    const sources = (
+  type AccountListEntry = {
+    providerId: (typeof ACCOUNT_PROVIDERS)[number];
+    accounts: z.infer<typeof accountViewsSchema>;
+    ok: boolean;
+  };
+
+  const discoverAccountSources = async () =>
+    (
       await room.sdk.plugins
         .experimental_discoverRpc({ method: ACCOUNTS_LIST_METHOD })
         .catch(() => [])
     ).filter((source) => source.method === ACCOUNTS_LIST_METHOD);
-    for (const source of sources)
-      for (const providerId of [
-        "claude-code",
-        "codex",
-        "acp-cursor",
-        "acp-antigravity",
-      ]) {
-        const raw: unknown = await room.sdk.plugins
-          .callRpc({
-            pluginId: source.pluginId,
-            method: ACCOUNTS_LIST_METHOD,
-            input:
-              providerId === "claude-code" && refreshClaude
-                ? {
-                    provider: providerId,
-                    refresh: true,
-                    ...(skipLocalClaude ? { skipLocal: true } : {}),
-                  }
-                : { provider: providerId },
-            outputSchema: accountViewsSchema,
-            signal: AbortSignal.timeout(providerId === "claude-code" && refreshClaude ? 40_000 : 10_000),
-          })
-          .catch(() => []);
-        const parsed = accountViewsSchema.safeParse(raw);
-        const accounts = (parsed.success ? parsed.data : []).filter(
-          (account) => !account.needsSignIn,
+
+  const fetchAccountProvider = async (
+    pluginId: string,
+    providerId: (typeof ACCOUNT_PROVIDERS)[number],
+    refreshClaude: boolean,
+    skipLocalClaude: boolean,
+  ): Promise<AccountListEntry> => {
+    try {
+      const raw: unknown = await room.sdk.plugins.callRpc({
+        pluginId,
+        method: ACCOUNTS_LIST_METHOD,
+        input:
+          providerId === CLAUDE_PROVIDER_ID && refreshClaude
+            ? {
+                provider: providerId,
+                refresh: true,
+                ...(skipLocalClaude ? { skipLocal: true } : {}),
+              }
+            : { provider: providerId },
+        outputSchema: accountViewsSchema,
+        signal: AbortSignal.timeout(
+          providerId === CLAUDE_PROVIDER_ID && refreshClaude ? 40_000 : 10_000,
+        ),
+      });
+      const parsed = accountViewsSchema.safeParse(raw);
+      if (!parsed.success) return { providerId, accounts: [], ok: false };
+      return {
+        providerId,
+        accounts: parsed.data.filter((account) => !account.needsSignIn),
+        ok: true,
+      };
+    } catch {
+      return { providerId, accounts: [], ok: false };
+    }
+  };
+
+  const listAllAccounts = async (): Promise<{
+    sources: Awaited<ReturnType<typeof discoverAccountSources>>;
+    bySource: Map<string, AccountListEntry[]>;
+  }> => {
+    const sources = await discoverAccountSources();
+    const bySource = new Map<string, AccountListEntry[]>();
+    await Promise.all(
+      sources.map(async (source) => {
+        const entries = await Promise.all(
+          ACCOUNT_PROVIDERS.map((providerId) =>
+            fetchAccountProvider(source.pluginId, providerId, false, false),
+          ),
         );
+        bySource.set(source.pluginId, entries);
+      }),
+    );
+    return { sources, bySource };
+  };
+
+  const hasActiveAddedClaude = (
+    bySource: Map<string, AccountListEntry[]>,
+  ): boolean => {
+    for (const entries of bySource.values()) {
+      const claude = entries.find((e) => e.providerId === CLAUDE_PROVIDER_ID);
+      if (
+        claude?.accounts.some(
+          (account) => account.id !== "local" && account.inUse === true,
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const applyAccounts = (
+    machines: UsageMachine[],
+    providers: Provider[],
+    bySource: Map<string, AccountListEntry[]>,
+    skipLocalClaude: boolean,
+    observedAtByProviderId: ReadonlyMap<string, number>,
+  ): void => {
+    for (const entries of bySource.values())
+      for (const { providerId, accounts } of entries) {
         // The name the user gave "This Mac" belongs to this computer's own login, not another machine's.
         const mac = accounts.find((account) => account.id === "local");
         const localEntry = (machine: UsageMachine, entry: UsageProvider) => {
@@ -280,21 +345,38 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
             !mac.email ||
             !measuredEmail ||
             mac.email.trim().toLowerCase() === measuredEmail.trim().toLowerCase();
+          const macNewest = mac.windows.reduce(
+            (max, window) => Math.max(max, window.checkedAt ?? 0),
+            0,
+          );
+          const nativeObservedAt = observedAtByProviderId.get(entry.id) ?? 0;
+          const preferNative =
+            skipLocalClaude ||
+            (entry.usage?.status === "ok" &&
+              nativeObservedAt > 0 &&
+              nativeObservedAt >= macNewest);
           return {
             ...entry,
             accountLabel: (sameLogin ? mac.name : null) ?? entry.accountLabel,
-            usage: providerId === "claude-code" && mac.email && (mac.inUse || mac.limitedUntil)
-              ? accountUsage(
-                  skipLocalClaude ? { ...mac, windows: [], credits: null } : mac,
-                  entry.usage,
-                )
-              : entry.usage,
+            usage:
+              providerId === CLAUDE_PROVIDER_ID &&
+              mac.email &&
+              (mac.inUse || mac.limitedUntil)
+                ? accountUsage(
+                    preferNative
+                      ? { ...mac, windows: [], credits: null }
+                      : mac,
+                    entry.usage,
+                  )
+                : entry.usage,
           };
         };
         if (!accounts.some((account) => account.id !== "local")) {
           for (const machine of machines)
             machine.providers = machine.providers.map((entry) =>
-              entry.providerId === providerId ? localEntry(machine, entry) : entry,
+              entry.providerId === providerId
+                ? localEntry(machine, entry)
+                : entry,
             );
           continue;
         }
@@ -311,18 +393,30 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
             local ??
             (metadata ? normalizedProvider(metadata, undefined) : null);
           if (base === null) continue;
-          const entries = accounts.flatMap((account): UsageProvider[] => {
+          const mapped = accounts.flatMap((account): UsageProvider[] => {
             if (account.id === "local")
               return local
-                ? [localEntry(machine, { ...local, accountId: "local", inUse: account.inUse })]
+                ? [
+                    localEntry(machine, {
+                      ...local,
+                      accountId: "local",
+                      inUse: account.inUse,
+                    }),
+                  ]
                 : [];
-            return [{
-              ...base, id: `accounts:${account.id}`, accountLabel: account.name ?? account.email,
-              accountId: account.id, inUse: account.inUse, usage: accountUsage(account),
-            }];
+            return [
+              {
+                ...base,
+                id: `accounts:${account.id}`,
+                accountLabel: account.name ?? account.email,
+                accountId: account.id,
+                inUse: account.inUse,
+                usage: accountUsage(account),
+              },
+            ];
           });
-          if (index < 0) machine.providers.push(...entries);
-          else machine.providers.splice(index, 1, ...entries);
+          if (index < 0) machine.providers.push(...mapped);
+          else machine.providers.splice(index, 1, ...mapped);
         }
       }
   };
@@ -341,18 +435,27 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     string,
     { value: UsageMeasurement; loadedAt: number }
   >();
+  const claudeSchedule = new Map<
+    string,
+    { lastAttemptAt: number; nextPollAt: number }
+  >();
   const failures = new Set<string>();
   const pending = new Map<
     string,
     { force: boolean; promise: Promise<UsageMeasurement> }
   >();
-  const claudeRetries = new Map<
-    string,
-    { attempts: number; timer: ReturnType<typeof setTimeout> | null }
-  >();
-  const lastIdleRecoveryAt = new Map<string, number>();
+  const pendingClaudePostTurnHosts = new Set<string | null>();
+  let primaryHostId: string | null = null;
+  let claudePollTimer: ReturnType<typeof setTimeout> | null = null;
+  let claudePostTurnTimer: ReturnType<typeof setTimeout> | null = null;
   const keyOf = (pluginId: string, resourceId: string) =>
     JSON.stringify([pluginId, resourceId]);
+  const markClaudeAttempt = (key: string, now = Date.now()) => {
+    claudeSchedule.set(key, {
+      lastAttemptAt: now,
+      nextPollAt: now + randomDelay(CLAUDE_POLL_MIN_MS, CLAUDE_POLL_MAX_MS),
+    });
+  };
 
   let hydrated: Promise<void> | null = null;
   let lastSavedJson = "";
@@ -396,40 +499,6 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
       .then(() => kv.set(SAVED_MEASUREMENTS_KEY, saved))
       .catch(() => {});
   };
-  const clearClaudeRetry = (key: string): void => {
-    const state = claudeRetries.get(key);
-    if (state?.timer) clearTimeout(state.timer);
-    claudeRetries.delete(key);
-  };
-  const scheduleClaudeRetry = (pluginId: string, resourceId: string): void => {
-    if (disposed) return;
-    const key = keyOf(pluginId, resourceId);
-    const state = claudeRetries.get(key) ?? { attempts: 0, timer: null };
-    if (state.timer !== null || state.attempts >= CLAUDE_RETRY_MAX_ATTEMPTS)
-      return;
-    const delay =
-      CLAUDE_RETRY_BASE_MS * 2 ** state.attempts +
-      Math.floor(Math.random() * CLAUDE_RETRY_JITTER_MS);
-    state.attempts += 1;
-    const timer = setTimeout(() => {
-      state.timer = null;
-      if (disposed || !failures.has(key)) {
-        claudeRetries.delete(key);
-        return;
-      }
-      void fetchResource(pluginId, resourceId, false)
-        .then(() => {
-          claudeRetries.delete(key);
-          room.realtime?.publish(USAGE_UPDATED_EVENT, {});
-        })
-        .catch(() => {
-          if (failures.has(key)) scheduleClaudeRetry(pluginId, resourceId);
-        });
-    }, delay);
-    timer.unref?.();
-    state.timer = timer;
-    claudeRetries.set(key, state);
-  };
 
   const fetchResource = async (
     pluginId: string,
@@ -442,6 +511,9 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
       if (!force || running.force) return running.promise;
       await running.promise.catch(() => undefined);
       return fetchResource(pluginId, resourceId, force);
+    }
+    if (resourceMeta.get(key)?.providerId === CLAUDE_PROVIDER_ID) {
+      markClaudeAttempt(key);
     }
     const promise = room.sdk.plugins
       .callRpc({
@@ -457,7 +529,6 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
           throw new Error("Usage could not be refreshed.");
         measurements.set(key, { value, loadedAt: Date.now() });
         failures.delete(key);
-        clearClaudeRetry(key);
         persistMeasurements();
         return value;
       })
@@ -465,23 +536,84 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     pending.set(key, { force, promise });
     return promise;
   };
+
+  const refreshInBackground = (
+    pluginId: string,
+    resourceId: string,
+    force: boolean,
+  ): void => {
+    if (disposed) return;
+    const key = keyOf(pluginId, resourceId);
+    if (pending.has(key)) return;
+    const before = measurements.get(key)?.value;
+    const hadFailure = failures.has(key);
+    void fetchResource(pluginId, resourceId, force)
+      .then((next) => {
+        if (disposed) return;
+        if (hadFailure || JSON.stringify(next) !== JSON.stringify(before)) {
+          room.realtime?.publish(USAGE_UPDATED_EVENT, {});
+        }
+      })
+      .catch(() => {
+        if (disposed) return;
+        failures.add(key);
+        if (!hadFailure) room.realtime?.publish(USAGE_UPDATED_EVENT, {});
+      });
+  };
+
+  const refreshHostClaudeIfActive = async (
+    hostIds?: ReadonlySet<string | null>,
+  ) => {
+    if (disposed) return;
+    const { bySource } = await listAllAccounts();
+    const addedClaudeActive = hasActiveAddedClaude(bySource);
+    const now = Date.now();
+    for (const [key, meta] of resourceMeta) {
+      if (meta.providerId !== CLAUDE_PROVIDER_ID) continue;
+      if (hostIds && meta.hostId && !hostIds.has(meta.hostId)) continue;
+      if (addedClaudeActive && meta.hostId === primaryHostId) continue;
+      const lastCheckedAt = Math.max(
+        claudeSchedule.get(key)?.lastAttemptAt ?? 0,
+        measurements.get(key)?.loadedAt ?? 0,
+      );
+      if (lastCheckedAt > 0 && now - lastCheckedAt < CLAUDE_MIN_GAP_MS) continue;
+      refreshInBackground(meta.pluginId, meta.resourceId, false);
+    }
+  };
+
+  const scheduleClaudePoll = (): void => {
+    if (disposed) return;
+    if (claudePollTimer !== null) clearTimeout(claudePollTimer);
+    claudePollTimer = setTimeout(() => {
+      claudePollTimer = null;
+      if (disposed) return;
+      void refreshHostClaudeIfActive().catch(() => {});
+      scheduleClaudePoll();
+    }, randomDelay(CLAUDE_POLL_MIN_MS, CLAUDE_POLL_MAX_MS));
+    claudePollTimer.unref?.();
+  };
+  scheduleClaudePoll();
+
   const readUsage = async (request: UsageRequest): Promise<UsageSnapshot> => {
     await hydrateMeasurements();
     const hostId = request.machineIds?.find((id) => !id.startsWith("source:"));
-    const [hosts, sources, usageProviders, config] = await Promise.all([
-      room.sdk.hosts
-        .list()
-        .then((hosts) => hosts.filter((host) => host.type !== "ephemeral")),
-      room.sdk.plugins.experimental_discoverRpc({ method: usageListMethod }),
-      room.sdk.providers
-        .list(
-          hostId === undefined
-            ? { capability: "usage" }
-            : { capability: "usage", hostId },
-        )
-        .catch(() => []),
-      room.sdk.system.config().catch(() => null),
-    ]);
+    const [hosts, sources, usageProviders, config, initialAccounts] =
+      await Promise.all([
+        room.sdk.hosts
+          .list()
+          .then((hosts) => hosts.filter((host) => host.type !== "ephemeral")),
+        room.sdk.plugins.experimental_discoverRpc({ method: usageListMethod }),
+        room.sdk.providers
+          .list(
+            hostId === undefined
+              ? { capability: "usage" }
+              : { capability: "usage", hostId },
+          )
+          .catch(() => []),
+        room.sdk.system.config().catch(() => null),
+        listAllAccounts(),
+      ]);
+    primaryHostId = config?.primaryHostId ?? primaryHostId;
     hosts.sort(
       (a, b) =>
         Number(b.id === config?.primaryHostId) -
@@ -490,35 +622,33 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
     for (const id of inventories.keys())
       if (!sources.some((source) => source.pluginId === id))
         inventories.delete(id);
-    for (let offset = 0; offset < sources.length; offset += 3) {
-      await Promise.all(
-        sources.slice(offset, offset + 3).map(async (source) => {
-          try {
-            const inventory = await room.sdk.plugins.callRpc({
-              pluginId: source.pluginId,
-              method: usageListMethod,
-              input: {},
-              outputSchema: usageSourceRpcContract[usageListMethod].output,
-              signal: AbortSignal.timeout(45_000),
-            });
-            inventories.set(source.pluginId, {
-              pluginId: source.pluginId,
-              label: inventory.label ?? null,
-              resources: inventory.resources,
-              error: null,
-            });
-          } catch {
-            const previous = inventories.get(source.pluginId);
-            inventories.set(source.pluginId, {
-              pluginId: source.pluginId,
-              label: previous?.label ?? null,
-              resources: previous?.resources ?? [],
-              error: "Usage resources could not be listed.",
-            });
-          }
-        }),
-      );
-    }
+    await Promise.all(
+      sources.map(async (source) => {
+        try {
+          const inventory = await room.sdk.plugins.callRpc({
+            pluginId: source.pluginId,
+            method: usageListMethod,
+            input: {},
+            outputSchema: usageSourceRpcContract[usageListMethod].output,
+            signal: AbortSignal.timeout(45_000),
+          });
+          inventories.set(source.pluginId, {
+            pluginId: source.pluginId,
+            label: inventory.label ?? null,
+            resources: inventory.resources,
+            error: null,
+          });
+        } catch {
+          const previous = inventories.get(source.pluginId);
+          inventories.set(source.pluginId, {
+            pluginId: source.pluginId,
+            label: previous?.label ?? null,
+            resources: previous?.resources ?? [],
+            error: "Usage resources could not be listed.",
+          });
+        }
+      }),
+    );
     // A source may report a provider without native usage (Kimi). Look up
     // just its name and icon: the registry answers without checking any host.
     const others = [
@@ -567,14 +697,14 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         !erroredPlugins.has(owner)
       ) {
         measurements.delete(key);
+        claudeSchedule.delete(key);
         failures.delete(key);
         resourceMeta.delete(key);
-        lastIdleRecoveryAt.delete(key);
-        clearClaudeRetry(key);
         evicted = true;
       }
     }
     if (evicted) persistMeasurements();
+    const addedClaudeActive = hasActiveAddedClaude(initialAccounts.bySource);
     const selected = [...inventories.values()].flatMap((source) =>
       source.resources
         .filter((resource) => {
@@ -582,6 +712,15 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
             resource.scope.kind === "shared"
               ? `source:${source.pluginId}`
               : resource.scope.hostId;
+          // Skip fetching "This Mac" Claude when an added account is active and overrides it.
+          if (
+            addedClaudeActive &&
+            resource.providerId === CLAUDE_PROVIDER_ID &&
+            resource.scope.kind === "host" &&
+            resource.scope.hostId === config?.primaryHostId
+          ) {
+            return false;
+          }
           // A provider or a machine selection triggers fetches; neither means
           // inventory only, so background refreshes never fetch every source.
           return (
@@ -601,42 +740,120 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         })
         .map((resource) => ({ source, resource })),
     );
+    const refreshClaude =
+      request.force &&
+      (request.providerId === null ||
+        request.providerId === CLAUDE_PROVIDER_ID) &&
+      hosts.some(
+        (host) =>
+          request.machineIds === null || request.machineIds.includes(host.id),
+      );
+    // When an added Claude account is active, refresh it in parallel with the other providers.
+    const parallelClaudeAccountsPromise =
+      refreshClaude && addedClaudeActive
+        ? Promise.all(
+            initialAccounts.sources.map(async (source) => ({
+              pluginId: source.pluginId,
+              entry: await fetchAccountProvider(
+                source.pluginId,
+                CLAUDE_PROVIDER_ID,
+                true,
+                false,
+              ),
+            })),
+          )
+        : null;
     let primaryClaudeRefreshed = false;
-    for (let offset = 0; offset < selected.length; offset += 3) {
-      await Promise.all(
-        selected.slice(offset, offset + 3).map(async ({ source, resource }) => {
-          const key = keyOf(source.pluginId, resource.id);
-          const cached = measurements.get(key);
-          if (
-            !request.force &&
-            cached &&
-            Date.now() - cached.loadedAt < request.maxAgeMs
-          )
+    const now = Date.now();
+    const hasAnyCached = selected.some(({ source, resource }) =>
+      measurements.has(keyOf(source.pluginId, resource.id)),
+    );
+    await Promise.all(
+      selected.map(async ({ source, resource }) => {
+        const key = keyOf(source.pluginId, resource.id);
+        const cached = measurements.get(key);
+        if (!request.force && cached) {
+          if (resource.providerId === CLAUDE_PROVIDER_ID) {
+            const schedule = claudeSchedule.get(key);
+            if (cached.loadedAt === 0) {
+              if (schedule && now - schedule.lastAttemptAt < CLAUDE_MIN_GAP_MS) {
+                return;
+              }
+            } else {
+              const dueAt =
+                schedule?.nextPollAt ?? cached.loadedAt + CLAUDE_POLL_MIN_MS;
+              const lastAttemptAt = Math.max(
+                schedule?.lastAttemptAt ?? 0,
+                cached.loadedAt,
+              );
+              if (now < dueAt || now - lastAttemptAt < CLAUDE_MIN_GAP_MS) {
+                return;
+              }
+            }
+          } else if (now - cached.loadedAt < request.maxAgeMs) {
             return;
+          }
+          // Stale-while-revalidate: return cached bars immediately and refresh in background.
+          refreshInBackground(source.pluginId, resource.id, false);
+          return;
+        }
+        if (!request.force && resource.providerId === CLAUDE_PROVIDER_ID) {
+          const schedule = claudeSchedule.get(key);
+          if (schedule && now - schedule.lastAttemptAt < CLAUDE_MIN_GAP_MS) {
+            return;
+          }
+        }
+        if (!request.force && hasAnyCached) {
+          refreshInBackground(source.pluginId, resource.id, false);
+          return;
+        }
+        try {
+          await fetchResource(source.pluginId, resource.id, request.force);
           if (
-            !request.force &&
             resource.providerId === CLAUDE_PROVIDER_ID &&
-            claudeRetries.get(key)?.timer != null
-          )
-            return;
-          if (request.force && resource.providerId === CLAUDE_PROVIDER_ID) {
-            clearClaudeRetry(key);
+            resource.scope.kind === "host" &&
+            resource.scope.hostId === config?.primaryHostId
+          ) {
+            primaryClaudeRefreshed = true;
           }
-          try {
-            await fetchResource(source.pluginId, resource.id, request.force);
-            if (
-              resource.providerId === CLAUDE_PROVIDER_ID &&
-              resource.scope.kind === "host" &&
-              resource.scope.hostId === config?.primaryHostId
-            ) {
-              primaryClaudeRefreshed = true;
-            }
-          } catch {
-            failures.add(key);
-            if (resource.providerId === CLAUDE_PROVIDER_ID) {
-              scheduleClaudeRetry(source.pluginId, resource.id);
-            }
-          }
+        } catch {
+          failures.add(key);
+        }
+      }),
+    );
+    const accountsBySource = initialAccounts.bySource;
+    let claudeAccountsRefreshFailed = false;
+    const applyRefreshedClaudeAccounts = (
+      pluginId: string,
+      entry: AccountListEntry,
+    ) => {
+      if (!entry.ok) {
+        claudeAccountsRefreshFailed = true;
+        return;
+      }
+      const current = accountsBySource.get(pluginId) ?? [];
+      accountsBySource.set(
+        pluginId,
+        current.map((item) =>
+          item.providerId === CLAUDE_PROVIDER_ID ? entry : item,
+        ),
+      );
+    };
+    if (parallelClaudeAccountsPromise !== null) {
+      const refreshed = await parallelClaudeAccountsPromise;
+      for (const { pluginId, entry } of refreshed) {
+        applyRefreshedClaudeAccounts(pluginId, entry);
+      }
+    } else if (refreshClaude) {
+      await Promise.all(
+        initialAccounts.sources.map(async (source) => {
+          const entry = await fetchAccountProvider(
+            source.pluginId,
+            CLAUDE_PROVIDER_ID,
+            true,
+            primaryClaudeRefreshed,
+          );
+          applyRefreshedClaudeAccounts(source.pluginId, entry);
         }),
       );
     }
@@ -677,6 +894,7 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
         candidates.push({ source, resource, machineId });
       }
     }
+    const observedAtByProviderId = new Map<string, number>();
     for (const machine of machines) {
       const visible = selectUsageResources(
         candidates.filter((candidate) => candidate.machineId === machine.id),
@@ -691,22 +909,39 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
       for (const { source, resource } of visible) {
         const key = keyOf(source.pluginId, resource.id);
         const cached = measurements.get(key);
-        machine.providers.push(
-          resourceProvider(
-            resource,
-            cached ? rollExpiredWindows(cached.value) : undefined,
-            source.pluginId,
-            providers,
-          ),
+        const providerEntry = resourceProvider(
+          resource,
+          cached ? rollExpiredWindows(cached.value) : undefined,
+          source.pluginId,
+          providers,
         );
-        if (source.error !== null || failures.has(key))
+        const observedAt = cached
+          ? (cached.value.observedAt ?? cached.loadedAt)
+          : 0;
+        if (observedAt > 0) observedAtByProviderId.set(providerEntry.id, observedAt);
+        machine.providers.push(providerEntry);
+        const ignoredLocalClaude =
+          addedClaudeActive &&
+          resource.providerId === CLAUDE_PROVIDER_ID &&
+          machine.primary === true;
+        if (source.error !== null || (!ignoredLocalClaude && failures.has(key)))
           machine.error = "Some usage could not be refreshed.";
       }
+      if (
+        claudeAccountsRefreshFailed &&
+        !machine.id.startsWith("source:") &&
+        (request.machineIds === null || request.machineIds.includes(machine.id))
+      ) {
+        machine.error = "Some usage could not be refreshed.";
+      }
     }
-    const refreshClaude = request.force && (request.providerId === null || request.providerId === "claude-code") &&
-      machines.some((machine) => !machine.id.startsWith("source:") &&
-        (request.machineIds === null || request.machineIds.includes(machine.id)));
-    await mergeAccounts(machines, providers, refreshClaude, primaryClaudeRefreshed);
+    applyAccounts(
+      machines,
+      providers,
+      accountsBySource,
+      primaryClaudeRefreshed,
+      observedAtByProviderId,
+    );
     const providerOrder = new Map(
       providers.map((provider, index) => [provider.id, index]),
     );
@@ -721,40 +956,38 @@ export default function providerUsagePlugin(room: BbPluginApi): void {
   room.rpc.register(providerUsageRpcContract, { getUsage: readUsage });
   const markDirty = (
     event?: { thread?: { providerId?: string; host?: { id?: string } | null } },
-    recoverClaude = false,
+    scheduleClaude = false,
   ) => {
     const providerId = event?.thread?.providerId;
+    if (providerId === CLAUDE_PROVIDER_ID) {
+      if (!scheduleClaude || disposed) return;
+      pendingClaudePostTurnHosts.add(event?.thread?.host?.id ?? null);
+      if (claudePostTurnTimer !== null) return;
+      claudePostTurnTimer = setTimeout(() => {
+        claudePostTurnTimer = null;
+        const hostsToCheck = new Set(pendingClaudePostTurnHosts);
+        pendingClaudePostTurnHosts.clear();
+        void refreshHostClaudeIfActive(
+          hostsToCheck.has(null) ? undefined : hostsToCheck,
+        ).catch(() => {});
+      }, randomDelay(CLAUDE_POST_TURN_MIN_MS, CLAUDE_POST_TURN_MAX_MS));
+      claudePostTurnTimer.unref?.();
+      return;
+    }
     for (const [key, entry] of measurements) {
       const meta = resourceMeta.get(key);
+      if (meta?.providerId === CLAUDE_PROVIDER_ID) continue;
       if (!providerId || !meta || meta.providerId === providerId) {
         entry.loadedAt = 0;
       }
-    }
-    if (!recoverClaude || providerId !== CLAUDE_PROVIDER_ID || disposed) return;
-    const threadHostId = event?.thread?.host?.id ?? null;
-    const now = Date.now();
-    for (const key of [...failures]) {
-      const meta = resourceMeta.get(key);
-      if (meta?.providerId !== CLAUDE_PROVIDER_ID) continue;
-      if (threadHostId && meta.hostId && meta.hostId !== threadHostId) continue;
-      if (claudeRetries.get(key)?.timer != null) continue;
-      if (now - (lastIdleRecoveryAt.get(key) ?? 0) < CLAUDE_IDLE_RECOVERY_COOLDOWN_MS)
-        continue;
-      lastIdleRecoveryAt.set(key, now);
-      void fetchResource(meta.pluginId, meta.resourceId, true)
-        .then(() => {
-          room.realtime?.publish(USAGE_UPDATED_EVENT, {});
-        })
-        .catch(() => {
-          if (failures.has(key))
-            scheduleClaudeRetry(meta.pluginId, meta.resourceId);
-        });
     }
   };
   room.events.on("thread.idle", (event) => markDirty(event, true));
   room.events.on("thread.failed", (event) => markDirty(event, false));
   room.onDispose(() => {
     disposed = true;
-    for (const key of [...claudeRetries.keys()]) clearClaudeRetry(key);
+    pendingClaudePostTurnHosts.clear();
+    if (claudePollTimer !== null) clearTimeout(claudePollTimer);
+    if (claudePostTurnTimer !== null) clearTimeout(claudePostTurnTimer);
   });
 }

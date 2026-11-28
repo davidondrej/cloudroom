@@ -163,7 +163,19 @@ const UNREDACTABLE_LINE = '{"redacted":"unparseable"}';
 
 function redactCredentials(value: unknown, inEnvMap: boolean): unknown {
   if (Array.isArray(value)) {
-    return value.map((entry) => redactCredentials(entry, false));
+    return value.map((entry) => {
+      // ACP represents an MCP server's environment as name/value pairs.
+      if (
+        inEnvMap &&
+        typeof entry?.name === "string" &&
+        SECRET_ENV_KEY.test(entry.name) &&
+        typeof entry.value === "string" &&
+        entry.value !== ""
+      ) {
+        entry = { ...entry, value: REDACTED };
+      }
+      return redactCredentials(entry, false);
+    });
   }
   if (typeof value !== "object" || value === null) {
     return value;

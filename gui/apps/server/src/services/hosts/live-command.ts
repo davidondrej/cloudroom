@@ -21,9 +21,11 @@ import {
   type LiveHostCommandSuccessResultReportForType,
 } from "../../internal/command-result-side-effects.js";
 import { handleLiveCommandResultSideEffects } from "../../internal/command-results.js";
+import { HostOnlineRpcCancelledError } from "../../ws/hub.js";
 import { NotificationBuffer } from "../lib/notification-buffer.js";
 import {
   callHostOnlineRpcForWork,
+  isHostOnlineRpcCancelledError,
   isHostUnavailableApiError,
 } from "./online-rpc.js";
 
@@ -51,7 +53,10 @@ interface RunLiveHostCommandArgs<TType extends HostDaemonSettledCommandType> {
   command: Extract<HostDaemonCommand, { type: TType }>;
   execution?: HostDaemonCommandExecutionRecord;
   hostId: string;
+  onSent?: () => void;
   preserveOnHostUnavailable?: boolean;
+  signal?: AbortSignal;
+  thread?: ReturnType<typeof getThread>;
   timeoutMs: number;
 }
 
@@ -247,11 +252,17 @@ export async function runLiveHostCommand<
   deps: CommandResultSideEffectsDeps,
   args: RunLiveHostCommandArgs<TType>,
 ): Promise<HostDaemonCommandResult<TType>> {
+  if (args.signal?.aborted) {
+    throw new HostOnlineRpcCancelledError();
+  }
   if ("threadId" in args.command && typeof args.command.threadId === "string") {
     const { threadId } = args.command;
     if (THREAD_START_COMMANDS.has(args.command.type))
       threadStartsSent.set(threadId, countThreadStartsSent(threadId) + 1);
-    const thread = getThread(deps.db, args.command.threadId);
+    const thread =
+      args.thread !== undefined
+        ? args.thread
+        : getThread(deps.db, args.command.threadId);
     if (thread) {
       const transfer = teleportProgress(deps.db, thread.id);
       const requested: HostDaemonCommand = args.command;
@@ -289,6 +300,8 @@ export async function runLiveHostCommand<
     const result = await call(deps, {
       command,
       hostId: args.hostId,
+      ...(args.onSent ? { onSent: args.onSent } : {}),
+      ...(args.signal ? { signal: args.signal } : {}),
       timeoutMs: args.timeoutMs,
     });
     await applyLiveHostCommandReport(deps, {
@@ -306,8 +319,9 @@ export async function runLiveHostCommand<
     const normalized =
       error instanceof Error ? error : new Error(String(error));
     if (
-      args.preserveOnHostUnavailable === true &&
-      isHostUnavailableApiError(normalized)
+      isHostOnlineRpcCancelledError(normalized) ||
+      (args.preserveOnHostUnavailable === true &&
+        isHostUnavailableApiError(normalized))
     ) {
       throw normalized;
     }

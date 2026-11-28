@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { getAppSettings } from "@cloudroom/db";
 import type { DiscoveredSkill, SkillRootKind } from "@cloudroom/host-daemon-contract";
 import type {
   SkillProvider,
@@ -222,8 +223,11 @@ export async function listProjectSkills(
   deps: AppDeps,
   args: { workspace: CommandWorkspace },
 ): Promise<SkillSummary[]> {
+  // Agents removed in Settings (ADR 0327) leave My Skills too: their leftover skill folders are not the user's skills.
+  const removed = new Set(getAppSettings(deps.db).hiddenProviderIds);
   const skillProviders = deps.providerRegistry
     .list()
+    .filter((registration) => !removed.has(registration.info.id))
     .filter(providerHasNativeRootSurface);
   const [perProvider, sharedSkills] = await Promise.all([
     Promise.all(

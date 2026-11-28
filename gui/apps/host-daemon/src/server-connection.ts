@@ -815,6 +815,17 @@ export class ServerConnection {
         const thresholdMs = session.leaseTimeoutMs / 2;
         if (gapMs > session.leaseTimeoutMs) {
           this.lastHeartbeatAcknowledgedAt = now;
+        } else if (
+          gapMs > session.heartbeatIntervalMs &&
+          this.lastHeartbeatAcknowledgedAt !== null
+        ) {
+          // Local event-loop delay prevents reading already-buffered acks
+          // before the timers phase runs, so exclude our own stall time.
+          this.lastHeartbeatAcknowledgedAt = Math.min(
+            now,
+            this.lastHeartbeatAcknowledgedAt +
+              (gapMs - session.heartbeatIntervalMs),
+          );
         }
         const resumedAfterSuspension = isLikelySystemSuspensionDelay({
           gapMs,

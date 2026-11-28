@@ -122,7 +122,7 @@ const machineSweepOperations = new WeakMap<
 
 const MACHINE_CREATE_FAILURE_CLEANUP_GRACE_MS = 30_000;
 const OFFLINE_CLEANUP_MESSAGE =
-  "This machine is offline, so its environments can't be removed. Reconnect it, then retry cleanup.";
+  "This machine is offline, so its environments can't be removed. Reconnect it, or forget it if it's gone for good.";
 
 function runTrackedOperation(args: {
   map: Map<string, ActiveOperation>;
@@ -1156,6 +1156,31 @@ export async function retryMachineCleanup(
       "Cleanup can only be retried after machine teardown fails",
     );
   }
+  updateHost(deps.db, deps.hub, hostId, { removeRetryAt: Date.now() });
+  await sweepProviderMachine(deps, hostId);
+}
+
+// A machine gone for good can't remove its environments, so forgetting retires
+// them here only and finishes removal. Its files stay on it (#1937).
+export async function forgetMachine(deps: Deps, hostId: string): Promise<void> {
+  const row = getHost(deps.db, hostId);
+  if (row === null || row.destroyedAt !== null) {
+    throw new ApiError(404, "host_not_found", "Host not found");
+  }
+  if (
+    row.machineProviderId === null ||
+    row.type !== "persistent" ||
+    row.phase !== "removing" ||
+    row.teardownStatus !== "failed" ||
+    deps.hub.hasDaemonForHost(hostId)
+  ) {
+    throw new ApiError(
+      409,
+      "machine_forget_refused",
+      "Only an offline machine whose cleanup failed can be forgotten",
+    );
+  }
+  markHostEnvironmentsDestroyed(deps.db, deps.hub, hostId);
   updateHost(deps.db, deps.hub, hostId, { removeRetryAt: Date.now() });
   await sweepProviderMachine(deps, hostId);
 }

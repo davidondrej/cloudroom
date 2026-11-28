@@ -3,9 +3,11 @@ import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import semverCompare from "semver/functions/compare.js";
-import semverValid from "semver/functions/valid.js";
 import { z } from "zod";
+import {
+  compare as semverCompare,
+  valid as semverValid,
+} from "@cloudroom/domain/semver";
 import {
   execPortableFile,
   killProcessGroup,

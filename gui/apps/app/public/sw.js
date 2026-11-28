@@ -58,6 +58,10 @@ async function page(request) {
     response.ok &&
     (response.headers.get("content-type") ?? "").startsWith("text/html")
   ) {
+    // Edge-served fallback when the Mac is off: keep the cached Mac shell if present, else serve edge HTML without overwriting SHELL.
+    if (response.headers.get("x-cloudroom-edge-fallback") === "1") {
+      return (await shell.match("/")) ?? response;
+    }
     await shell.put("/", response.clone());
     return response;
   }

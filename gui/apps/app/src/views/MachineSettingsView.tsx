@@ -13,6 +13,7 @@ import { MachineLifecycleActions } from "@/components/machines/MachineLifecycleA
 import {
   MachineRemoveDialog,
   machineRemovalConsequences,
+  machineRemoveLabel,
 } from "@/components/machines/MachineRemoveDialog";
 import { MachineStatusDot } from "@/components/machines/MachineStatusDot";
 import {
@@ -537,7 +538,7 @@ export function MachineSettingsView() {
                 disabled={isPrimary}
                 onClick={() => setRemoveOpen(true)}
               >
-                Remove machine
+                {machineRemoveLabel(host)}
               </Button>
             </SettingsRow>
           </SettingsRowList>

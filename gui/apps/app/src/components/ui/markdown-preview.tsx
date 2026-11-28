@@ -133,7 +133,7 @@ import {
 } from "@/lib/localhost-link-rewrite-preference";
 import { resolveRouteHref } from "@/lib/route-paths";
 import { cn } from "@cloudroom/shared-ui/lib/utils";
-import remarkDirective from "remark-directive";
+import remarkDirective from "./markdown-directive.js";
 import { PromptMentionPill } from "@/components/thread/timeline/ConversationMessageMentions.js";
 import {
   RawThreadMentionBatchProvider,

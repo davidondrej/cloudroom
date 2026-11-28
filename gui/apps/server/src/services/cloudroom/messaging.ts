@@ -293,7 +293,16 @@ export class CloudMessaging {
     const known = sandbox ? await this.rt.savedCapabilities() : this.rt.lastCapabilities;
     const asleep = sandbox !== null && !this.rt.sandboxes.isAwake(sandbox);
     const live = async () => this.rt.capabilities(await this.rt.client(saved, false));
-    const catalog = checkIdleSession && !asleep ? await live() : known;
+    const knownProfile = known ? harnessProfile(known, thread.providerId) : undefined;
+    const knownHasModel = !checkIdleSession || Boolean(knownProfile?.models?.some((item) => item.model === model));
+    // Reuse the cached catalog so switching stays local (~3ms); delivery rolls back if an older Core refuses.
+    const catalog = known && knownHasModel
+      ? known
+      : !asleep
+        ? checkIdleSession
+          ? await live()
+          : await live().catch(() => known)
+        : known;
     if (!catalog) return false;
     const profile = harnessProfile(catalog, thread.providerId);
     if (!profile?.set_model) return false;
@@ -308,7 +317,7 @@ export class CloudMessaging {
       }
       if (current.model === model) return true;
       if (current.model !== saved.model) throw new ApiError(409, "thread_changed", "Another model was selected. Try again.");
-    } else if (!asleep && !await this.switchesModels(saved.coreUrl, thread.providerId, live).catch(() => false)) return false;
+    }
     const current = this.queue.currentReasoning(thread.id, saved);
     const levels = reasoningLevels(thread.providerId, model, catalog) as ReasoningLevel[] | undefined;
     const reasoning = reasoningLevelSchema.parse(reasoningLevel ?? (levels?.length ? reconcileReasoningLevel(current as ReasoningLevel, levels) : current));

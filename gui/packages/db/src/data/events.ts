@@ -757,6 +757,8 @@ function parseDaemonThreadEvent(input: AppendDaemonEventInput): ThreadEvent | nu
 export function appendDaemonEventsInTransaction(
   db: DbTransaction,
   eventInputs: readonly AppendDaemonEventInput[],
+  /** A settled item whose stored end was only provisional: its event counts. */
+  mayResettle?: (input: AppendDaemonEventInput & { itemId: string }) => boolean,
 ): AppendDaemonEventsResult {
   if (eventInputs.length === 0) {
     return {
@@ -790,6 +792,17 @@ export function appendDaemonEventsInTransaction(
       .filter((row) => isTerminalItemEventType(row.type))
       .map(buildItemLifecycleKey),
   );
+  for (const input of eventInputs) {
+    if (
+      input.itemId !== null &&
+      isTerminalItemEventType(input.type) &&
+      mayResettle?.({ ...input, itemId: input.itemId })
+    ) {
+      settledItemKeys.delete(
+        buildItemLifecycleKey({ itemId: input.itemId, threadId: input.threadId }),
+      );
+    }
+  }
   const now = Date.now();
   for (const [index, input] of eventInputs.entries()) {
     const turnStartDisposition = resolveDaemonTurnStartDisposition(

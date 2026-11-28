@@ -1,11 +1,12 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ThreadQueuedMessage } from "@cloudroom/domain";
+import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import type { ReasoningLevel, ThreadQueuedMessage } from "@cloudroom/domain";
 import type {
   CreateQueuedMessageRequest,
   SendQueuedMessageMode,
   SendQueuedMessageResponse,
   ThreadQueuedMessageListResponse,
   UpdateQueuedMessageRequest,
+  UpdateThreadRequest,
 } from "@cloudroom/server-contract";
 import type { AppCreateThreadRequest } from "@cloudroom/client-core";
 import { BbHttpError, sdk } from "@/lib/sdk";
@@ -21,6 +22,7 @@ import {
   THREAD_STOP_MUTATION_KEY,
   waitForThreadExecutionSave,
 } from "./thread-state-mutations";
+import { threadReasoningSaveKey } from "../queries/query-keys";
 import {
   applyCreateThreadResult,
   applyQueuedMessageCreateResult,
@@ -160,6 +162,74 @@ export function useCreateThread() {
   });
 }
 
+const threadSendQueues = new Map<string, Promise<unknown>>();
+
+function hasPendingExecutionSave(queryClient: QueryClient, threadId: string): boolean {
+  const cache = queryClient.getMutationCache();
+  return (
+    cache.findAll({ mutationKey: ["thread-update", threadId], exact: true, status: "pending" }).length > 0 ||
+    cache.findAll({ mutationKey: threadReasoningSaveKey(threadId), exact: true, status: "pending" }).length > 0
+  );
+}
+
+/** Captures the latest saved model/reasoning from switches that landed while a queued send waited. */
+function latestExecutionUpdateSince(
+  queryClient: QueryClient,
+  threadId: string,
+  since: number,
+): { model?: string; reasoningLevel?: ReasoningLevel } {
+  const cache = queryClient.getMutationCache();
+  const settled = [
+    ...cache.findAll({ mutationKey: ["thread-update", threadId], exact: true, status: "success" }),
+    ...cache.findAll({ mutationKey: threadReasoningSaveKey(threadId), exact: true, status: "success" }),
+  ]
+    .filter((mutation) => mutation.state.submittedAt >= since)
+    .sort((a, b) => a.state.submittedAt - b.state.submittedAt);
+  let model: string | undefined;
+  let reasoningLevel: ReasoningLevel | undefined;
+  for (const mutation of settled) {
+    const vars = mutation.state.variables as UpdateThreadRequest | ReasoningLevel | undefined;
+    if (typeof vars === "string") {
+      reasoningLevel = vars;
+    } else if (vars && typeof vars === "object") {
+      if (typeof vars.model === "string") model = vars.model;
+      if (typeof vars.reasoningLevel === "string") reasoningLevel = vars.reasoningLevel;
+    }
+  }
+  return { model, reasoningLevel };
+}
+
+/** Runs follow-up sends and queue writes for one thread in submit order, without locking the composer. */
+function enqueueThreadSend<T>(
+  queryClient: QueryClient,
+  threadId: string,
+  task: (updated: { model?: string; reasoningLevel?: ReasoningLevel }) => Promise<T>,
+): Promise<T> {
+  // Capture the active switch and Stop timestamp at submit time so queued sends also abort on failure or Stop.
+  const submitTime = Date.now();
+  const initialExecutionReady = waitForThreadExecutionSave(queryClient, threadId);
+  void initialExecutionReady.catch(() => {});
+  const previous = threadSendQueues.get(threadId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    await initialExecutionReady;
+    while (hasPendingExecutionSave(queryClient, threadId)) {
+      await waitForThreadExecutionSave(queryClient, threadId);
+    }
+    return task(latestExecutionUpdateSince(queryClient, threadId, submitTime));
+  });
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  threadSendQueues.set(threadId, settled);
+  void settled.finally(() => {
+    if (threadSendQueues.get(threadId) === settled) {
+      threadSendQueues.delete(threadId);
+    }
+  });
+  return next;
+}
+
 export function useSendThreadMessage() {
   const queryClient = useQueryClient();
 
@@ -183,26 +253,28 @@ export function useSendThreadMessage() {
       senderThreadId,
       pluginSubmission,
       executionInputSources,
-    }: SendThreadMessageMutationRequest) => {
-      await waitForThreadExecutionSave(queryClient, id);
-      const send = () => sdk.threads.send({
-        threadId: id,
-        ...(requestId ? { requestId } : {}),
-        input,
-        model,
-        serviceTier,
-        reasoningLevel,
-        permissionMode,
-        ...(sendAt === undefined ? {} : { sendAt }),
-        ...(pluginSubmission === undefined ? {} : { pluginSubmission }),
-        executionInputSources,
-        mode,
-        ...(senderThreadId !== undefined ? { senderThreadId } : {}),
-        // Only the message boxes send through here; scripts and agents can still be held as repeats (#264).
-        fromComposer: true,
-      });
-      return recoverCloudDelivery && requestId ? recoverRemoteCloudSend(id, requestId, send) : send();
-    },
+    }: SendThreadMessageMutationRequest) =>
+      enqueueThreadSend(queryClient, id, async (updated) => {
+        const resolvedModel = model !== undefined ? (updated.model ?? model) : model;
+        const resolvedReasoning = reasoningLevel !== undefined ? (updated.reasoningLevel ?? reasoningLevel) : reasoningLevel;
+        const send = () => sdk.threads.send({
+          threadId: id,
+          ...(requestId ? { requestId } : {}),
+          input,
+          model: resolvedModel,
+          serviceTier,
+          reasoningLevel: resolvedReasoning,
+          permissionMode,
+          ...(sendAt === undefined ? {} : { sendAt }),
+          ...(pluginSubmission === undefined ? {} : { pluginSubmission }),
+          executionInputSources,
+          mode,
+          ...(senderThreadId !== undefined ? { senderThreadId } : {}),
+          // Only the message boxes send through here; scripts and agents can still be held as repeats (#264).
+          fromComposer: true,
+        });
+        return recoverCloudDelivery && requestId ? recoverRemoteCloudSend(id, requestId, send) : send();
+      }),
     onMutate: async (variables): Promise<SendThreadMessageTransaction> =>
       beginSendThreadMessageTransaction({
         queryClient,
@@ -268,21 +340,21 @@ export function useCreateThreadQueuedMessage() {
       senderThreadId,
       executionInputSources,
       hardQueue,
-    }: CreateThreadQueuedMessageMutationRequest): Promise<ThreadQueuedMessage> => {
-      await waitForThreadExecutionSave(queryClient, id);
-      return sdk.threads.queuedMessages.create({
-        threadId: id,
-        input,
-        model,
-        serviceTier,
-        reasoningLevel,
-        permissionMode,
-        executionInputSources,
-        ...(senderThreadId !== undefined ? { senderThreadId } : {}),
-        ...(hardQueue === true ? { hardQueue } : {}),
-        fromComposer: true,
-      });
-    },
+    }: CreateThreadQueuedMessageMutationRequest): Promise<ThreadQueuedMessage> =>
+      enqueueThreadSend(queryClient, id, async (updated) =>
+        sdk.threads.queuedMessages.create({
+          threadId: id,
+          input,
+          model: model !== undefined ? (updated.model ?? model) : model,
+          serviceTier,
+          reasoningLevel: reasoningLevel !== undefined ? (updated.reasoningLevel ?? reasoningLevel) : reasoningLevel,
+          permissionMode,
+          executionInputSources,
+          ...(senderThreadId !== undefined ? { senderThreadId } : {}),
+          ...(hardQueue === true ? { hardQueue } : {}),
+          fromComposer: true,
+        }),
+      ),
     onMutate: async (variables): Promise<CreateQueuedMessageTransaction> =>
       beginCreateQueuedMessageTransaction({
         queryClient,
@@ -358,12 +430,14 @@ export function useSendThreadQueuedMessage() {
       lifecycleOperation: "send_queued_message",
       showErrorToast: false,
     },
-    mutationFn: ({
+    mutationFn: async ({
       id,
       mode,
       queuedMessageId,
     }: SendThreadQueuedMessageMutationRequest): Promise<SendQueuedMessageResponse> =>
-      sdk.threads.queuedMessages.send({ threadId: id, queuedMessageId, mode }),
+      enqueueThreadSend(queryClient, id, async () =>
+        sdk.threads.queuedMessages.send({ threadId: id, queuedMessageId, mode }),
+      ),
     onMutate: async (variables): Promise<RemoveQueuedMessageTransaction> =>
       beginSendQueuedMessageTransaction({
         queryClient,

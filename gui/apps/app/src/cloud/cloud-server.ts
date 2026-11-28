@@ -9,6 +9,7 @@ import {
   CloudError,
   SignedOutError,
   type CloudCreate,
+  type CloudProjectSummary,
   type CloudThreadSummary,
 } from "./cloud-api";
 import { macOnline, markMacOff, SAVED_API, startupMac } from "./cloud-mode";
@@ -37,8 +38,12 @@ const UI_PREFERENCE = /^\/api\/v1\/preferences\/ui\/([^/]+)$/;
 const PLUGIN_ASSET = /^\/api\/v1\/plugins\/[^/]+\/assets\//;
 const CLOUD_THREAD = /^\/api\/v1\/cloudroom\/threads\/(thr_[a-z0-9]+)(\/.*)?$/;
 const LIST_TTL_MS = 30_000;
-// No socket tells a Mac-off phone about new or archived threads, so its sidebar reloads the list this often.
+const PROJECTS_TTL_MS = 60_000;
+// Safety-net sidebar refresh when the live /__cloud/events socket is closed or unavailable.
 const SIDEBAR_REFRESH_MS = 60_000;
+const SIGNAL_DEBOUNCE_MS = 400;
+const READ_STORAGE_KEY = "cloudroom:mac-off-read-v1";
+const READ_MAX_ENTRIES = 500;
 const WAKE_MS = 90_000;
 const FIRST_ROWS_MS = 1500;
 const SAVED_TIMEOUT_MS = 700;
@@ -65,49 +70,137 @@ const empty = () => new Response(null, { status: 204 });
 const needsMac = (message = NEEDS_MAC) =>
   json({ message, ok: false, error: { code: "needs_mac", message } }, 422);
 
-const newProject = (id: string | null, name: string | null): Project => ({
+const newProject = (
+  id: string | null,
+  name: string | null,
+  cloudProject?: CloudProjectSummary,
+): Project => ({
   id: id ?? PERSONAL_PROJECT_ID,
   kind: id === null ? "personal" : "standard",
-  name: name ?? "Personal",
-  gitRemoteUrl: null,
+  name: name ?? cloudProject?.name ?? "Personal",
+  gitRemoteUrl: cloudProject?.repository ?? null,
   createdAt: 0,
   updatedAt: 0,
   sources: [],
-  defaultExecutionOptions: null,
+  defaultExecutionOptions: cloudProject?.default_harness
+    ? {
+        providerId: cloudProject.default_harness,
+        ...(cloudProject.default_model
+          ? { model: cloudProject.default_model }
+          : {}),
+        ...(cloudProject.default_reasoning
+          ? { reasoningLevel: cloudProject.default_reasoning }
+          : {}),
+      }
+    : null,
   threads: [],
 });
+
+interface ReadState {
+  baseline: number;
+  read: Record<string, number>;
+}
+
+function loadReadState(): ReadState {
+  const now = Date.now();
+  try {
+    const raw = window.localStorage.getItem(READ_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { baseline?: unknown; read?: unknown };
+      const baseline =
+        typeof parsed.baseline === "number" && Number.isFinite(parsed.baseline)
+          ? parsed.baseline
+          : now;
+      const read: Record<string, number> = {};
+      if (parsed.read && typeof parsed.read === "object") {
+        for (const [k, v] of Object.entries(
+          parsed.read as Record<string, unknown>,
+        )) {
+          if (typeof v === "number" && Number.isFinite(v)) read[k] = v;
+        }
+      }
+      return { baseline, read };
+    }
+  } catch {
+    // Ignore storage errors (private mode / tests).
+  }
+  const initial: ReadState = { baseline: now, read: {} };
+  saveReadState(initial);
+  return initial;
+}
+
+function saveReadState(state: ReadState): void {
+  try {
+    const entries = Object.entries(state.read);
+    const trimmed =
+      entries.length > READ_MAX_ENTRIES
+        ? Object.fromEntries(
+            entries
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, READ_MAX_ENTRIES),
+          )
+        : state.read;
+    window.localStorage.setItem(
+      READ_STORAGE_KEY,
+      JSON.stringify({ baseline: state.baseline, read: trimmed }),
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+const parseMs = (iso: string | null | undefined): number => {
+  if (!iso) return 0;
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const statusFromSummary = (
+  summary: CloudThreadSummary | undefined,
+): "active" | "error" | "idle" => {
+  if (summary?.turn_state === "working") return "active";
+  if (summary?.turn_state === "error") return "error";
+  return "idle";
+};
 
 const cloudEntry = (
   thread: CloudThreadSummary,
   projectId: string,
   parentThreadId: string | null,
+  lastReadAt: number,
 ): ThreadEntry => {
-  const at = thread.woke_at ? Date.parse(thread.woke_at) : 0;
+  const wokeAt = parseMs(thread.woke_at);
+  const lastTurnAt = parseMs(thread.last_turn_at);
+  // Prefer actual turn completion time for unread/attention; fall back to woke_at only for older Cores without last_turn_at.
+  const attentionAt = lastTurnAt || wokeAt;
+  const at = Math.max(wokeAt, lastTurnAt);
+  const pinnedAt = parseMs(thread.pinned_at) || null;
+  const status = statusFromSummary(thread);
   return {
     id: thread.thread_id,
     projectId,
     environmentId: null,
     executionTarget: "cloud",
-    providerId: "claude-code",
+    providerId: thread.harness || "claude-code",
     title: thread.title,
     titleFallback: null,
     sectionId: null,
-    status: "idle",
+    status,
     parentThreadId,
     sourceThreadId: null,
     originKind: null,
     originPluginId: null,
     visibility: "visible",
     archivedAt: null,
-    pinnedAt: null,
+    pinnedAt,
     deletedAt: null,
-    lastReadAt: Date.now(),
-    latestAttentionAt: at,
-    createdAt: at,
+    lastReadAt,
+    latestAttentionAt: attentionAt,
+    createdAt: wokeAt || at,
     updatedAt: at,
     queuedWork: "none",
     pinSortKey: null,
-    hasPendingInteraction: false,
+    hasPendingInteraction: thread.turn_state === "waiting",
     activity: {
       activeBackgroundAgentCount: 0,
       activeBackgroundCommandCount: 0,
@@ -424,10 +517,14 @@ class CloudThread {
 
 class CloudServer {
   private readonly threads = new Map<string, CloudThread>();
-  private readonly readAt = new Map<string, number>();
+  private readonly readState: ReadState = loadReadState();
+  private readonly summaryById = new Map<string, CloudThreadSummary>();
+  private readonly unpinnedIds = new Set<string>();
   private readonly tabs = new Map<string, Json>();
   private busy = 0;
   private warmedAt = 0;
+  private unsubscribeEvents: (() => void) | null = null;
+  private signalTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly preferences: Json = {};
   private readonly savedCopies = new Map<
     string,
@@ -435,6 +532,10 @@ class CloudServer {
   >();
   private list: { at: number; value: Promise<CloudThreadSummary[]> } | null =
     null;
+  private projectsList: {
+    at: number;
+    value: Promise<CloudProjectSummary[]>;
+  } | null = null;
 
   constructor(private readonly network: typeof fetch) {}
 
@@ -482,20 +583,49 @@ class CloudServer {
         checkMac(Math.min(delay * 2, MAC_CHECK_MAX_MS));
       }, delay);
     checkMac(MAC_CHECK_MS);
-    // A tick keeps the 30 s list cache, so one firing just after a resume reads nothing new.
+    // Safety-net refresh if the live /__cloud/events socket drops or isn't supported yet.
     setInterval(() => {
       if (document.visibilityState === "visible") this.refreshSidebar();
     }, SIDEBAR_REFRESH_MS);
+    const connectEvents = () => {
+      this.unsubscribeEvents?.();
+      this.unsubscribeEvents = cloudApi.subscribeEvents(() =>
+        this.scheduleSidebarRefresh(),
+      );
+    };
+    if (document.visibilityState === "visible") connectEvents();
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState !== "visible") {
+        this.unsubscribeEvents?.();
+        this.unsubscribeEvents = null;
         for (const thread of this.threads.values()) thread.pause();
         return;
       }
       reloadIfMacBack();
+      connectEvents();
       this.list = null;
       this.refreshSidebar();
       for (const thread of this.threads.values()) thread.refresh();
     });
+  }
+
+  private scheduleSidebarRefresh() {
+    clearTimeout(this.signalTimer);
+    this.signalTimer = setTimeout(() => {
+      this.list = null;
+      this.refreshSidebar();
+    }, SIGNAL_DEBOUNCE_MS);
+  }
+
+  private readAtFor(id: string): number {
+    return Object.hasOwn(this.readState.read, id)
+      ? this.readState.read[id]!
+      : this.readState.baseline;
+  }
+
+  private markRead(id: string, at: number): void {
+    this.readState.read[id] = at;
+    saveReadState(this.readState);
   }
 
   private refreshSidebar() {
@@ -511,6 +641,8 @@ class CloudServer {
     if (request.method === "GET") {
       if (path === "/api/v1/sidebar-bootstrap")
         return json(await this.sidebar());
+      if (path === "/api/v1/projects")
+        return json(await this.projectsEndpoint(url));
       if (path === "/api/v1/cloudroom/account")
         return json(await this.account());
       if (path === "/api/v1/hosts") return json(await this.hosts(url));
@@ -525,7 +657,16 @@ class CloudServer {
       return (await this.copy(request)) ?? needsMac();
     }
     const onMac =
-      thread && (thread[2] === "/send" || thread[2] === "/stop")
+      thread &&
+      [
+        "",
+        "/send",
+        "/stop",
+        "/archive-all",
+        "/unarchive",
+        "/pin",
+        "/unpin",
+      ].includes(thread[2] ?? "")
         ? await this.onMac(thread[1])
         : null;
     if (onMac) return onMac;
@@ -542,6 +683,7 @@ class CloudServer {
         requestId,
         await this.usageSurface(),
       );
+      this.markRead(thread[1], Date.now());
       return json(
         queuedMessage
           ? { ok: true, delivery: "queued", queuedMessage }
@@ -549,13 +691,95 @@ class CloudServer {
       );
     }
     if (thread && (thread[2] === "/read" || thread[2] === "/unread")) {
-      this.readAt.set(thread[1], thread[2] === "/read" ? Date.now() : 0);
+      this.markRead(thread[1], thread[2] === "/read" ? Date.now() : 0);
       return this.threadGet(thread[1], "", url);
     }
     if (thread && thread[2] === "/stop") {
       await cloudApi.stop(thread[1]);
       this.thread(thread[1]).listenIfLoaded();
       return json({ ok: true, cancelledRetries: 0 });
+    }
+    if (thread && thread[2] === "/archive-all" && request.method === "POST") {
+      const includeLive = url.searchParams.get("includeLive") !== "false";
+      const result = await cloudApi.archive(thread[1], includeLive);
+      const archivedThreadIds = result.archivedThreadIds?.length
+        ? result.archivedThreadIds
+        : [thread[1]];
+      for (const id of archivedThreadIds) this.summaryById.delete(id);
+      this.list = null;
+      this.refreshSidebar();
+      return json({
+        ok: true,
+        archivedThreadIds,
+        ...(result.keptLiveThreadIds?.length
+          ? { keptLiveThreadIds: result.keptLiveThreadIds }
+          : {}),
+      });
+    }
+    if (thread && thread[2] === "/unarchive" && request.method === "POST") {
+      await cloudApi.unarchive(thread[1]);
+      this.list = null;
+      this.refreshSidebar();
+      return json({ ok: true, unarchivedThreadIds: [thread[1]] });
+    }
+    if (
+      thread &&
+      (thread[2] === "/pin" || thread[2] === "/unpin") &&
+      request.method === "POST"
+    ) {
+      const pinned = thread[2] === "/pin";
+      await cloudApi.pin(thread[1], pinned);
+      if (pinned) this.unpinnedIds.delete(thread[1]);
+      else this.unpinnedIds.add(thread[1]);
+      const summary = this.summaryById.get(thread[1]);
+      if (summary) summary.pinned_at = pinned ? new Date().toISOString() : null;
+      this.list = null;
+      this.refreshSidebar();
+      return this.threadGet(thread[1], "", url);
+    }
+    if (thread && (thread[2] ?? "") === "" && request.method === "PATCH") {
+      const body = object(await request.json().catch(() => null));
+      const title =
+        typeof body.title === "string" && body.title.trim()
+          ? body.title.trim()
+          : undefined;
+      const model =
+        typeof body.model === "string" && body.model.trim()
+          ? body.model.trim()
+          : undefined;
+      const reasoning =
+        typeof body.reasoningLevel === "string" && body.reasoningLevel.trim()
+          ? body.reasoningLevel.trim()
+          : undefined;
+      if (!title && !model && !reasoning) return needsMac();
+      if (title) {
+        await cloudApi.rename(thread[1], title);
+        const summary = this.summaryById.get(thread[1]);
+        if (summary) summary.title = title;
+      }
+      if (model || reasoning) {
+        await cloudApi.setModel(thread[1], {
+          ...(model ? { model } : {}),
+          ...(reasoning ? { reasoning } : {}),
+        });
+        const summary = this.summaryById.get(thread[1]);
+        if (summary) {
+          if (model) summary.model = model;
+          if (reasoning) summary.reasoning = reasoning;
+        }
+      }
+      this.list = null;
+      this.refreshSidebar();
+      return this.threadGet(thread[1], "", url);
+    }
+    if (thread && (thread[2] ?? "") === "" && request.method === "DELETE") {
+      await cloudApi.delete(thread[1]);
+      this.summaryById.delete(thread[1]);
+      this.threads.get(thread[1])?.pause();
+      this.threads.delete(thread[1]);
+      this.list = null;
+      this.refreshSidebar();
+      return json({ ok: true });
     }
     if (thread && thread[2] === "/tabs" && request.method === "PUT") {
       const body = object(await request.json().catch(() => null));
@@ -623,7 +847,6 @@ class CloudServer {
       "sourceThreadId",
       "parentThreadId",
       "sendAt",
-      "baseBranch",
       "pluginSubmission",
     ];
     const startNeedsMac = `Starting a new thread needs your ${COMPUTER} for now.`;
@@ -642,6 +865,7 @@ class CloudServer {
       reasoning: optional(body.reasoningLevel),
       service_tier: optional(body.serviceTier),
       target: optional(body.cloudTarget),
+      base_branch: optional(body.baseBranch),
       surface: await this.usageSurface(),
     }).catch((failure: unknown) => {
       if (!(failure instanceof CloudError)) throw failure;
@@ -650,14 +874,21 @@ class CloudServer {
         : json({ message: failure.message }, failure.status);
     });
     if (thread instanceof Response) return thread;
+    this.summaryById.set(thread.thread_id, { ...thread, turn_state: "working" });
     this.list = null;
+    this.markRead(thread.thread_id, Date.now());
     return json(
       this.live({
         activeBackgroundAgentCount: 0,
         canSpawnChild: false,
         projectCopy: null,
-        ...cloudEntry(thread, body.projectId, null),
-        providerId: optional(body.providerId) ?? "claude-code",
+        ...cloudEntry(
+          { ...thread, turn_state: "working" },
+          body.projectId,
+          null,
+          Date.now(),
+        ),
+        providerId: optional(body.providerId) ?? thread.harness ?? "claude-code",
         queuedMessageCount: 0,
       }),
       201,
@@ -733,29 +964,91 @@ class CloudServer {
   }
 
   private live(entry: ThreadEntry): ThreadEntry {
+    const summary = this.summaryById.get(entry.id);
     const status = this.status(entry.id);
-    const readAt = this.readAt.get(entry.id);
+    const readAt = this.readAtFor(entry.id);
+    const cachedPin = typeof entry.pinnedAt === "number" ? entry.pinnedAt : null;
+    // Preserve Mac pins when website pinned_at is null, unless explicitly unpinned in this Mac-off session.
+    const pinnedAt = this.unpinnedIds.has(entry.id)
+      ? null
+      : parseMs(summary?.pinned_at) || cachedPin;
+    const summaryLastTurn = parseMs(summary?.last_turn_at);
+    const summaryWoke = parseMs(summary?.woke_at);
+    // Avoid marking threads unread on simple wakes when last_turn_at is available.
+    const summaryAttention = summaryLastTurn || summaryWoke;
+    const attentionAt = Math.max(
+      summaryAttention,
+      typeof entry.latestAttentionAt === "number" ? entry.latestAttentionAt : 0,
+    );
+    const hasPendingInteraction =
+      summary?.turn_state !== undefined
+        ? summary.turn_state === "waiting" && status !== "active"
+        : Boolean(entry.hasPendingInteraction);
     return {
       ...entry,
+      ...(summary?.title ? { title: summary.title } : {}),
+      ...(summary?.harness ? { providerId: summary.harness } : {}),
+      pinnedAt,
       status,
+      hasPendingInteraction,
+      latestAttentionAt: attentionAt,
+      updatedAt: Math.max(
+        summaryLastTurn,
+        summaryWoke,
+        attentionAt,
+        typeof entry.updatedAt === "number" ? entry.updatedAt : 0,
+      ),
       runtime: { displayStatus: status, hostReconnectGraceExpiresAt: null },
-      ...(readAt === undefined ? {} : { lastReadAt: readAt }),
+      lastReadAt: readAt,
     };
   }
 
-  private status(id: string): "active" | "idle" {
-    return this.threads.get(id)?.events.working ? "active" : "idle";
+  private status(id: string): "active" | "error" | "idle" {
+    const open = this.threads.get(id);
+    if (open?.events.working) return "active";
+    return statusFromSummary(this.summaryById.get(id));
   }
 
   private cloudThreads(): Promise<CloudThreadSummary[]> {
     if (!this.list || Date.now() - this.list.at > LIST_TTL_MS) {
-      const value = cloudApi.threads();
+      const value = cloudApi.threads().then((items) => {
+        this.summaryById.clear();
+        for (const item of items) this.summaryById.set(item.thread_id, item);
+        return items;
+      });
       this.list = { at: Date.now(), value };
       value.catch(() => {
         this.list = null;
       });
     }
     return this.list.value;
+  }
+
+  private cloudProjects(): Promise<CloudProjectSummary[]> {
+    if (
+      !this.projectsList ||
+      Date.now() - this.projectsList.at > PROJECTS_TTL_MS
+    ) {
+      const value = cloudApi.projects();
+      this.projectsList = { at: Date.now(), value };
+      value.catch(() => {
+        this.projectsList = null;
+      });
+    }
+    return this.projectsList.value;
+  }
+
+  private async projectsEndpoint(url: URL): Promise<unknown[]> {
+    const sidebar = await this.sidebar();
+    const includeThreads = (url.searchParams.get("include") ?? "")
+      .split(",")
+      .includes("threads");
+    const includePersonal = url.searchParams.get("includePersonal") === "true";
+    const list = includePersonal
+      ? [sidebar.personalProject, ...sidebar.projects]
+      : sidebar.projects;
+    if (includeThreads) return list;
+    return list.map(({ threads: _threads, ...project }) => project);
   }
 
   private async copy(
@@ -812,9 +1105,10 @@ class CloudServer {
   }
 
   private async sidebar(): Promise<Sidebar> {
-    const [saved, cloud] = await Promise.all([
+    const [saved, cloud, syncedProjects] = await Promise.all([
       this.saved("/api/v1/sidebar-bootstrap"),
       this.cloudThreads(),
+      this.cloudProjects(),
     ]);
     const ids = new Set(cloud.map((thread) => thread.thread_id));
     const keep = (project: Project): Project => ({
@@ -828,6 +1122,19 @@ class CloudServer {
     const projects = new Map(
       (sidebar?.projects ?? []).map((project) => [project.id, keep(project)]),
     );
+    // Merge synced Cloudroom projects so fresh Mac-off phones see every project even without a Mac cache.
+    for (const synced of syncedProjects) {
+      if (synced.project_id === personal.id) continue;
+      const existing = projects.get(synced.project_id);
+      if (!existing) {
+        projects.set(
+          synced.project_id,
+          newProject(synced.project_id, synced.name, synced),
+        );
+      } else if (!existing.gitRemoteUrl && synced.repository) {
+        existing.gitRemoteUrl = synced.repository;
+      }
+    }
     const known = new Set(
       [personal, ...projects.values()].flatMap((project) =>
         project.threads.map((entry) => entry.id),
@@ -866,6 +1173,7 @@ class CloudServer {
             thread,
             project.id,
             parent && ids.has(parent) ? parent : null,
+            this.readAtFor(thread.thread_id),
           ),
         ),
       );
@@ -1044,6 +1352,25 @@ class CloudServer {
         },
       });
     }
+    if (rest === "/default-execution-options") {
+      const summary = this.summaryById.get(id);
+      const saved = await this.saved(`/api/v1/threads/${id}/default-execution-options`);
+      const model =
+        this.threads.get(id)?.events.model ||
+        summary?.model ||
+        (typeof saved?.model === "string" ? saved.model : "");
+      if (!model) return json(saved ?? null);
+      return json({
+        serviceTier: "default",
+        permissionMode: "full",
+        source: "override",
+        ...saved,
+        model,
+        reasoningLevel:
+          summary?.reasoning ||
+          (typeof saved?.reasoningLevel === "string" ? saved.reasoningLevel : "high"),
+      });
+    }
     if (rest === "/queued-messages")
       return json(this.threads.get(id)?.queued() ?? []);
     if (rest === "/interactions") return json([]);
@@ -1062,9 +1389,23 @@ class CloudServer {
   }
 
   private async cloudThreadGet(id: string, rest: string): Promise<Response> {
+    if (rest === "/running") {
+      const running: string[] = [];
+      if (this.status(id) === "active") running.push(id);
+      for (const summary of this.summaryById.values()) {
+        if (
+          summary.parent_thread_id === id &&
+          this.status(summary.thread_id) === "active"
+        ) {
+          running.push(summary.thread_id);
+        }
+      }
+      return json({ running });
+    }
     const saved = await this.saved(`/api/v1/cloudroom/threads/${id}${rest}`);
     if (rest === "") {
-      const model = this.threads.get(id)?.events.model;
+      const summary = this.summaryById.get(id);
+      const model = this.threads.get(id)?.events.model || summary?.model || "";
       return json({
         authRequired: false,
         starting: false,
@@ -1081,6 +1422,7 @@ class CloudServer {
         pendingDelivery: 0,
         ...saved,
         ...(model ? { model } : {}),
+        ...(summary?.reasoning ? { reasoning: summary.reasoning } : {}),
       });
     }
     if (rest === "/share") return json(saved);

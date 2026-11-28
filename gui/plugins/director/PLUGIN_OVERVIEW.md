@@ -6,7 +6,7 @@ The Director keeps your other agents moving. It is a normal thread that wakes on
 - An automatic ping you turn on yourself, once an hour by default. Each ping checks up to 5 stopped threads (configurable, 1–20; 1 at a time while learning).
 - No model turn when nothing has stopped.
 - A learning mode. For its first 50 turns the Director asks before it acts, and it remembers each correction you give it. A meter shows how far along it is. Lessons are saved with your Cloudroom account, so they follow you to every computer.
-- Settings for the interval, max threads per ping, both prompts, the harness, model and effort, which projects it watches, and its icon and color.
+- Settings for the interval, max threads per ping, auto-compact threshold (default 50%, 30%–95%), both prompts, the harness, model and effort, which projects it watches, and its icon and color.
 - The same settings from the terminal: `room-cli director`, `room-cli director set <setting> <value>`.
 
 ## How it works

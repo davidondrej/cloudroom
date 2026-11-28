@@ -1,4 +1,4 @@
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import {
   roomDesktopVersionFeedSchema,
   type RoomDesktopInfo,

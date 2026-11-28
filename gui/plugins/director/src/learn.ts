@@ -62,6 +62,10 @@ ${ANSWERS}`;
 
 /** Added to the Director's instructions while it learns, so plain chat is the same dry run as a ping. */
 export const LEARNING_MODE = `\n\nLearning mode is on until the meter is full ("taught" in \`room-cli director status\`). It is a dry run, in plain chat too: before you message, retry or change another thread, say what you would do and why, then stop and wait for my answer. Every answer teaches you something, so record it.
+Aim for variety over easy approvals.
+Pick threads your lessons do not cover yet.
+Seek unfamiliar or borderline cases.
+Make a real best guess on gray areas instead of defaulting to "leave it".
 ${ANSWERS}`;
 
 /** After learning mode the Director acts alone, and still remembers corrections. */

@@ -7,10 +7,28 @@ import {
   DialogTitle,
 } from "@cloudroom/shared-ui/dialog";
 import { ConfirmDeleteDialog } from "@/components/dialogs/ConfirmDeleteDialog";
-import { useRemoveHost } from "@/hooks/mutations/host-mutations";
+import { useForgetHost, useRemoveHost } from "@/hooks/mutations/host-mutations";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
 
+// An offline machine stuck in cleanup can only be forgotten (#1937).
+export function canForgetMachine(host: Host): boolean {
+  return (
+    host.type === "persistent" &&
+    host.machineProviderId !== null &&
+    host.status === "disconnected" &&
+    host.lifecycle.phase === "removing" &&
+    host.lifecycle.teardown?.status === "failed"
+  );
+}
+
+export function machineRemoveLabel(host: Host): string {
+  return canForgetMachine(host) ? "Forget machine" : "Remove machine";
+}
+
 export function machineRemovalConsequences(host: Host): string {
+  if (canForgetMachine(host)) {
+    return "Cloudroom can't reach it, so its files stay on it. Its environments remain as read-only history.";
+  }
   if (host.type === "ephemeral") {
     return "The compute and its saved snapshots are deleted. Its environments remain as read-only history.";
   }
@@ -30,14 +48,17 @@ export function MachineRemoveDialog({
   onRemoved?: (host: Host) => void;
 }) {
   const removeHost = useRemoveHost();
+  const forgetHost = useForgetHost();
+  const forget = target !== null && canForgetMachine(target);
+  const mutation = forget ? forgetHost : removeHost;
 
   return (
     <ConfirmDeleteDialog
       modal={false}
       open={target !== null}
       onOpenChange={(open) => {
-        if (!open && !removeHost.isPending) {
-          removeHost.reset();
+        if (!open && !mutation.isPending) {
+          mutation.reset();
           onOpenChange(false);
         }
       }}
@@ -45,17 +66,19 @@ export function MachineRemoveDialog({
       {target === null ? null : (
         <>
           <DialogHeader>
-            <DialogTitle>Remove {target.name}?</DialogTitle>
+            <DialogTitle>
+              {forget ? "Forget" : "Remove"} {target.name}?
+            </DialogTitle>
             <DialogDescription>
               This revokes {target.name}'s access to this server.{" "}
               {machineRemovalConsequences(target)}
             </DialogDescription>
           </DialogHeader>
-          {removeHost.isError ? (
+          {mutation.isError ? (
             <p className="text-sm text-destructive" role="alert">
               {getMutationErrorMessage({
-                error: removeHost.error,
-                fallbackMessage: `Couldn't remove ${target.name}.`,
+                error: mutation.error,
+                fallbackMessage: `Couldn't ${forget ? "forget" : "remove"} ${target.name}.`,
               })}
             </p>
           ) : null}
@@ -63,9 +86,9 @@ export function MachineRemoveDialog({
             <Button
               type="button"
               variant="destructive"
-              disabled={removeHost.isPending}
+              disabled={mutation.isPending}
               onClick={() =>
-                removeHost.mutate(target.id, {
+                mutation.mutate(target.id, {
                   onSuccess: () => {
                     onOpenChange(false);
                     onRemoved?.(target);
@@ -73,7 +96,7 @@ export function MachineRemoveDialog({
                 })
               }
             >
-              Remove machine
+              {machineRemoveLabel(target)}
             </Button>
           </DialogFooter>
         </>

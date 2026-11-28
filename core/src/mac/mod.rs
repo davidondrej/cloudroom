@@ -64,6 +64,8 @@ const STALE: &str = "Mac not responding: the paired Mac is connected but didn't 
 const LOST: &str = "The Mac app restarted while this command was running, so its output is lost. It may have finished: check its effects before running it again.";
 /// Core keeps jobs in memory, so a Core restart (update, crash, sandbox wake) forgets them (#1952).
 const RESTARTED: &str = "Cloudroom restarted in this sandbox after this command started, so its result is lost. It may have run, fully or in part: check its effects before running it again.";
+/// Windows hides the app's computer use (docs/scopes/windows.md), so its `room-cli` only says "unknown command" (#2783).
+const NO_WINDOWS_COMPUTER_USE: &str = "Computer use unavailable: the user's computer runs Windows, where Cloudroom has no desktop control. room-cli mac run, pull, and push still work there. Continue without it; tell the user only if the task needs their own apps.";
 /// The helper connection changed while this command waited for it to confirm the command.
 const RECONNECTED: &str = "Mac unavailable: the connection to the Mac restarted while this command was starting. Run it again.";
 /// How long room-cli waits for a read Core answers from what it knows (`status`): under Codex's 10 s command
@@ -91,6 +93,9 @@ pub struct Run {
     /// A `push`: the helper builds its own unpack from this and ignores `command` (#222).
     #[serde(default)]
     copy: Option<Copy>,
+    /// A `mac computer-use` call, refused at once when the paired computer runs Windows (#2783).
+    #[serde(default)]
+    computer_use: bool,
 }
 /// What a `push` copies, for the Mac helper's own unpack: the item's `name`, its place as typed (`to`), and the Mac
 /// temp folder holding a copy over 16 MiB (`staged`). The helper places only that item, so a sandbox's archive can't
@@ -777,6 +782,11 @@ async fn local_run(
     let Some((generation, device, boot, fetch, events)) = attach(mac).await else {
         return Err(refused(&m, started));
     };
+    // After attach, so a Windows helper still connecting is caught and an offline one gets the usual refusal (#2783).
+    let os = mac.os.lock().unwrap().clone();
+    if run.computer_use && os.is_some_and(|(d, os)| d == device && os == "windows") {
+        return Err(conflict(NO_WINDOWS_COMPUTER_USE));
+    }
     let id = mac.job_id();
     {
         let mut jobs = mac.jobs.lock().unwrap();
@@ -968,13 +978,18 @@ async fn local_status(
     } else {
         json!({"connected":false,"reason":naming(&m, mac.unavailable()),"mac":name})
     };
-    // Which system the paired computer's helper said it runs: Windows runs commands in Git Bash, with only Off and
-    // Full access (#958). Omitted while unknown, or for a computer that is no longer paired.
-    let os = mac.os.lock().unwrap().clone();
-    if let Some((_, os)) = os.filter(|(device, _)| m.previews.paired(device)) {
+    // Windows runs commands in Git Bash, with only Off and Full access (#958).
+    if let Some(os) = paired_os(&m) {
         status["os"] = json!(os);
     }
     Ok(Json(status))
+}
+
+/// Which system the paired computer's helper said it runs. None while unknown, or for a computer no longer paired.
+fn paired_os(m: &Manager) -> Option<String> {
+    let os = m.mac.os.lock().unwrap().clone();
+    os.filter(|(device, _)| m.previews.paired(device))
+        .map(|(_, os)| os)
 }
 
 /// Every route on the agent socket. Two modules using the same method and path panic here, which a test catches.
@@ -1244,6 +1259,7 @@ room-cli mac push VM_PATH [MAC_PATH]
 room-cli mac result JOB
 room-cli mac status
 room-cli mac computer-use status | tools [TOOL] | call TOOL ['JSON'] [--purpose WHY]
+(computer-use: macOS and Linux only; Windows has no desktop control.)
 Runs on the user's paired Mac as the user, in their home folder by default.
 Flags go before COMMAND: room-cli mac run --cwd DIR 'COMMAND'. Later words,
 flags included, go to COMMAND. DIR is relative to their home folder, or absolute.
@@ -1328,7 +1344,7 @@ const APP_CLI: &str = "c=\"$HOME/.local/bin/room-cli\"; [ -x \"$c\" ] || \
 const SHOTS: &str = "/tmp/cloudroom-mac-computer-use";
 
 /// `room-cli mac computer-use ARGS`: the app's Computer Use on the user's computer, as this thread, so its sidebar row
-/// shows it and the user approves each app in this thread (docs/scopes/computer-use.md). This sandbox's own screen
+/// shows it and the user approves computer use once per thread (docs/scopes/computer-use.md). This sandbox's own screen
 /// stays `room-cli computer-use`. Every call counts as a change: Read-only refuses it, Ask first asks.
 async fn computer_use(socket: &str, args: &[String]) -> io::Result<i32> {
     let thread = std::env::var("ROOM_THREAD_ID").unwrap_or_default();
@@ -1351,7 +1367,7 @@ async fn computer_use(socket: &str, args: &[String]) -> io::Result<i32> {
         "{APP_CLI} echo {mark}; ROOM_THREAD_ID={thread} \"$c\" computer-use {}",
         words.join(" ")
     );
-    let body = json!({"command":command,"stdin":"","cwd":null,"write":true});
+    let body = json!({"command":command,"stdin":"","cwd":null,"write":true,"computer_use":true});
     let mut value = request(socket, "POST", "/jobs", Some(body)).await?;
     if value["state"] == "done"
         && let Some(stdout) = value["stdout"].as_str().and_then(unhex)

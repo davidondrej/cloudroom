@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setExperiments } from "@cloudroom/db";
+import { getAppSettings, setAppSettings, setExperiments } from "@cloudroom/db";
 import { defaultExperiments } from "@cloudroom/domain";
 import {
   skillContentResponseSchema,
@@ -1233,6 +1233,37 @@ describe("public project skills route", () => {
           ),
         });
       }
+    });
+  });
+
+  it("leaves out skills of agents removed in Settings", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, { id: "host-removed" });
+      const { project } = seedProjectWithSource(harness.deps, { hostId: host.id, path: "/tmp/removed-project" });
+      const environment = seedEnvironment(harness.deps, { hostId: host.id, projectId: project.id, path: "/tmp/removed-env" });
+      const stub = registerSkillRpc(harness, {
+        hostId: host.id,
+        sessionId: session.id,
+        skillsByProvider: {
+          "claude-code": [discovered("cu", "provider-user", "/home/.claude/skills/cu/SKILL.md")],
+          "acp-cursor": [discovered("cur", "provider-user", "/home/.cursor/skills/cur/SKILL.md")],
+        },
+      });
+      setAppSettings(harness.deps.db, { ...getAppSettings(harness.deps.db), hiddenProviderIds: ["acp-cursor"] });
+
+      const response = await harness.app.request(
+        `/api/v1/projects/${project.id}/skills?environmentId=${environment.id}`,
+      );
+
+      expect(response.status).toBe(200);
+      const body = skillListResponseSchema.parse(await readJson(response));
+      expect(body.skills.filter((skill) => skill.provider !== null).map((skill) => skill.name)).toEqual(["cu"]);
+      const scanned = stub.requests
+        .map((request) => request.command)
+        .filter((command) => command.type === "host.list_skills")
+        .map((command) => command.providerId);
+      expect(scanned).toContain("claude-code");
+      expect(scanned).not.toContain("acp-cursor");
     });
   });
 

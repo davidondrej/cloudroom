@@ -48,7 +48,11 @@ import {
   resolveMessageSenderThreadId,
   sendThreadMessage,
 } from "./thread-send.js";
-import { requestThreadStopForCurrentState } from "./thread-lifecycle.js";
+import {
+  requestThreadStopForCurrentState,
+  stopThreadForCurrentState,
+} from "./thread-lifecycle.js";
+import { settleDanglingBackgroundTasksForStoppedThreadInTransaction } from "./background-task-reconciliation.js";
 import { getLeadingAgentOnlyInput } from "./deferred-first-turn-context.js";
 
 type ThreadRewindPrepareCommand = Extract<
@@ -302,7 +306,9 @@ function resolveEditableTurn(
   db: DbQueryConnection,
   thread: Thread,
   requestSequence?: number,
-): EditableTurn {
+  /** The edit stops them first. */
+  allowCommands = false,
+): EditableTurn & { activeBackgroundCommandCount: number } {
   if (thread.archivedAt !== null || thread.deletedAt !== null) {
     conflict("The thread is not writable");
   }
@@ -312,11 +318,13 @@ function resolveEditableTurn(
   if (
     backgroundActivity &&
     (backgroundActivity.activeBackgroundAgentCount > 0 ||
-      backgroundActivity.activeBackgroundCommandCount > 0 ||
+      (!allowCommands && backgroundActivity.activeBackgroundCommandCount > 0) ||
       backgroundActivity.activeWorkflowCount > 0)
   ) {
     conflict("Wait for background work to finish before editing the message");
   }
+  const activeBackgroundCommandCount =
+    backgroundActivity?.activeBackgroundCommandCount ?? 0;
 
   if (requestSequence !== undefined) {
     const requestRow = db
@@ -332,7 +340,10 @@ function resolveEditableTurn(
       .limit(1)
       .get();
     if (requestRow !== undefined) {
-      return resolveEditableTurnCandidate(db, thread, requestRow);
+      return {
+        ...resolveEditableTurnCandidate(db, thread, requestRow),
+        activeBackgroundCommandCount,
+      };
     }
     conflict("The thread has no editable user message");
   }
@@ -353,7 +364,10 @@ function resolveEditableTurn(
     .all();
   for (const requestRow of requestRows) {
     try {
-      return resolveEditableTurnCandidate(db, thread, requestRow);
+      return {
+        ...resolveEditableTurnCandidate(db, thread, requestRow),
+        activeBackgroundCommandCount,
+      };
     } catch (error) {
       if (
         !(error instanceof ApiError) ||
@@ -426,15 +440,23 @@ export async function editThreadMessage(
     senderThreadId: args.payload.senderThreadId,
     targetThread: initialThread,
   });
+  // Like Stop, an edit ends a Codex thread's background commands (#1774).
+  const stopsCommands = initialThread.providerId === "codex";
   const initialTarget = resolveEditableTurn(
     deps.db,
     initialThread,
     args.payload.expectedRequestSequence,
+    stopsCommands,
   );
   const editableThread = await stopThreadBeforeMessageEdit(deps, {
     environment: args.environment,
     threadId: initialThread.id,
   });
+  if (stopsCommands && initialTarget.activeBackgroundCommandCount > 0) {
+    await stopThreadForCurrentState(deps, editableThread, args.environment, {
+      keepSession: true,
+    });
+  }
   const target = resolveEditableTurn(
     deps.db,
     editableThread,
@@ -583,6 +605,15 @@ export async function editThreadMessage(
       thread: editableThread,
       trigger: "user",
     });
+    // A command from before the edited message lost its stop with the cut.
+    if (stopsCommands) {
+      deps.db.transaction((tx) =>
+        settleDanglingBackgroundTasksForStoppedThreadInTransaction(
+          { db: tx, hub: deps.hub, logger: deps.logger },
+          { threadId: editableThread.id },
+        ),
+      );
+    }
     deps.hub.notifyThread(editableThread.id, ["history-rewritten"], {
       projectId: editableThread.projectId,
     });

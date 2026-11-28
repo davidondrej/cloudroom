@@ -17,7 +17,7 @@ import {
   type WorkspaceResolutionFailure,
 } from "@cloudroom/host-daemon-contract";
 import type { AgentRuntimeBridgeLaunch } from "@cloudroom/agent-runtime";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import {
   ExpectedCommandDispatchError,
   probeProviderInstallationStatus,

@@ -492,10 +492,10 @@ export class CloudRuntime implements SyncHost {
     return storage;
   }
 
-  async capabilities(client: CloudroomClient, storage?: Storage | null): Promise<Capabilities> {
+  async capabilities(client: CloudroomClient, storage?: Storage | null, options?: { models?: boolean }): Promise<Capabilities> {
     const message = storageMessage(storage === undefined ? await this.storage(client) : storage);
     if (message) throw new ApiError(503, "storage_blocked", message, { retryable: true });
-    return capabilitiesSchema.parse(await client.capabilities());
+    return capabilitiesSchema.parse(await client.capabilities(undefined, options));
   }
 
   async liveCapabilities(saved: Binding): Promise<Capabilities> {

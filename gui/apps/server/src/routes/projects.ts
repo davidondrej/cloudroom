@@ -95,6 +95,7 @@ import {
   requestProjectDeletionAdvance,
 } from "../services/projects/project-deletion.js";
 import { projectRemote } from "../services/cloudroom/project-copy.js";
+import { deleteProjectFromCloud, syncProjectToCloud } from "../services/cloudroom/project-sync.js";
 import { stopSharingDeleted } from "../services/cloudroom/shares.js";
 import { resolveDefaultWorktreeBaseBranch } from "../services/projects/worktree-base-branch.js";
 import {
@@ -437,6 +438,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     const existingProject = getPublicProjectByLocalPathSource(deps.db, source);
     if (existingProject) {
       setProjectHidden(deps.db, deps.hub, existingProject.id, false);
+      syncProjectToCloud(deps, existingProject.id);
       return context.json(
         buildProjectResponses(deps, existingProject.id)[0],
         201,
@@ -451,6 +453,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       },
     );
     await fillProjectGitRemote(deps, project, source);
+    syncProjectToCloud(deps, project.id);
     return context.json(buildProjectResponses(deps, project.id)[0], 201);
   });
 
@@ -495,6 +498,8 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     if (payload.name !== undefined) {
       updateProject(deps.db, deps.hub, projectId, { name: payload.name });
     }
+    if (payload.hidden === true) deleteProjectFromCloud(deps, projectId);
+    else syncProjectToCloud(deps, projectId);
     return context.json(buildProjectResponses(deps, projectId)[0]);
   });
 
@@ -526,6 +531,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       );
     }
     beginProjectDeletion(deps, { projectId: id });
+    deleteProjectFromCloud(deps, id);
     void stopSharingDeleted(deps);
     requestProjectDeletionAdvance(deps, { projectId: id });
     return context.json({ ok: true });
@@ -567,6 +573,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
               payload,
             ),
           });
+    syncProjectToCloud(deps, projectId);
     return context.json(source, 201);
   });
 
@@ -635,6 +642,7 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       const saved = getProject(deps.db, projectId);
       if (saved?.gitRemoteUrl) await projectRemote(deps, saved, source.path).catch(() => null);
     }
+    syncProjectToCloud(deps, projectId);
     return context.json(source);
   });
 

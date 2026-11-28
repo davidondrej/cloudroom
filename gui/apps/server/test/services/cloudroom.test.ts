@@ -1273,6 +1273,57 @@ it("starts Cloud Claude with no level at the Mac catalog default, after a retry'
   }
 });
 
+it("skips live capabilities on cached Cloud model picks and rolls back via ?models=false on an older Core 404", async () => {
+  const harness = await createTestAppHarness();
+  const { host } = seedHostSession(harness.deps);
+  const { project } = seedProjectWithSource(harness.deps, { hostId: host.id });
+  const service = cloudroom(harness.deps);
+  let oldCore = false;
+  let hitModelEndpoint = false;
+  const seenCapabilities: string[] = [];
+  const core = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    if (req.url?.startsWith("/v1/capabilities")) {
+      seenCapabilities.push(req.url);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ version: 1, repository: "/code/test", stop: true, resume: true, launch_settings: true, direct_workspaces: true, command_guard: true, harnesses: [{ id: "claude-code", model: "test-model", set_model: !oldCore, idle_set_model: !oldCore, models: ["test-model", "opus"].map((model) => ({ model, reasoning_levels: ["medium", "high"] })) }] }));
+      return;
+    }
+    if (req.url === "/v1/sessions/cr_old/model") {
+      hitModelEndpoint = true;
+      res.writeHead(404);
+      res.end();
+      return;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end("{}");
+  });
+  core.listen(0, "127.0.0.1"); await once(core, "listening");
+  const address = core.address();
+  if (!address || typeof address === "string") throw new Error("fixture did not listen");
+  try {
+    await service.configure({ url: `http://127.0.0.1:${address.port}`, token: "x".repeat(40), projectId: project.id });
+    await service.status();
+    seenCapabilities.length = 0;
+    oldCore = true;
+    const thread = createThread(harness.db, harness.hub, { projectId: project.id, providerId: "claude-code", executionTarget: "cloud", status: "idle" });
+    harness.db.insert(cloudroomThreads).values({ threadId: thread.id, coreUrl: `http://127.0.0.1:${address.port}`, sessionId: "cr_old", startRequestId: "old", model: "test-model", reasoning: "medium" }).run();
+    const res = await harness.app.request(`/api/v1/threads/${thread.id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "opus" }),
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    await vi.waitFor(() => expect(service.threadStatus(thread.id)?.model).toBe("test-model"));
+    expect(hitModelEndpoint).toBe(true);
+    expect(seenCapabilities).toContain("/v1/capabilities?models=false");
+  } finally {
+    service.stop();
+    core.closeAllConnections();
+    await new Promise<void>((resolve) => core.close(() => resolve()));
+    await harness.cleanup();
+  }
+});
+
 it("credits Claude usage that arrives after a follow-up was sent to the turn that used it", async () => {
   const harness = await createTestAppHarness();
   const { host } = seedHostSession(harness.deps);

@@ -2933,6 +2933,58 @@ describe("DesktopBrowserViewManager", () => {
     manager.destroyAll();
   });
 
+  it("blocks automation tabs from opening personal/external tabs or native popups", () => {
+    const { manager, hostWindow, view } = createRendererRecoveryFixture(
+      67,
+      "thread-1",
+      "automation",
+    );
+
+    expect(
+      view.webContents.emitWindowOpen("https://attacker.example/escape", {
+        disposition: "foreground-tab",
+        frameName: "_blank",
+      }),
+    ).toEqual({ action: "deny" });
+    expect(openTabPushesOf(hostWindow)).toEqual([]);
+    expect(scopedOpenTabPushesOf(hostWindow)).toEqual([]);
+    expect(
+      view.webContents.emitWindowOpen("https://attacker.example/popup", {
+        disposition: "new-window",
+        features: "width=520,height=700",
+        frameName: "popup",
+      }),
+    ).toEqual({ action: "deny" });
+    expect(electronMock.fakeWindows).toEqual([]);
+
+    // Stays isolated after the renderer attaches to present the automation tab.
+    manager.attach({
+      hostWindow,
+      request: {
+        threadId: "thread-1",
+        tabId: "browser:a",
+        url: "https://example.com/original",
+        bounds: { x: 0, y: 0, width: 500, height: 350 },
+        visible: true,
+      },
+    });
+    expect(
+      view.webContents.emitWindowOpen("http://localhost:38886/csrf", {
+        disposition: "foreground-tab",
+        frameName: "_blank",
+      }),
+    ).toEqual({ action: "deny" });
+    expect(
+      view.webContents.emitWindowOpen("about:blank", {
+        disposition: "new-window",
+      }),
+    ).toEqual({ action: "deny" });
+    expect(openTabPushesOf(hostWindow)).toEqual([]);
+    expect(scopedOpenTabPushesOf(hostWindow)).toEqual([]);
+    expect(electronMock.fakeWindows).toEqual([]);
+    manager.destroyAll();
+  });
+
   it("snapshots then hides visible views on resize, revealing them clamped to the shrunken window", async () => {
     const manager = createDesktopBrowserViewManager({
       partition: "persist:test",

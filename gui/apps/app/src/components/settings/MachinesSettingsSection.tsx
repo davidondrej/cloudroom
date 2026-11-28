@@ -31,7 +31,10 @@ import { DESKTOP_DOWNLOAD_URL } from "@/hooks/useDesktopUpdateInfo";
 import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { appToast } from "@/components/ui/app-toast";
 import { MachineLifecycleActions } from "@/components/machines/MachineLifecycleActions";
-import { MachineRemoveDialog } from "@/components/machines/MachineRemoveDialog";
+import {
+  MachineRemoveDialog,
+  machineRemoveLabel,
+} from "@/components/machines/MachineRemoveDialog";
 import { MachineStatusDot } from "@/components/machines/MachineStatusDot";
 import {
   machineStatusLabel,
@@ -147,7 +150,7 @@ export function MachineRowContent({
       }}
     >
       <Icon name="Trash2" aria-hidden />
-      <span className="min-w-0 truncate">Remove machine</span>
+      <span className="min-w-0 truncate">{machineRemoveLabel(host)}</span>
     </DropdownMenuItem>
   );
 

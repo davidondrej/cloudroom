@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { DRIVER, assetFor } from "./driver.js";
+import { inspectBrowserControl } from "./browser-control.js";
 import {
   createHostEntry,
   driverEnv,
@@ -21,7 +22,12 @@ import {
   unsupportedGnomeHint,
   workingXauthority,
 } from "./host.js";
-import computerUsePlugin, { decideGate, takesForeground } from "./server.js";
+import computerUsePlugin, {
+  blockedBrowserAction,
+  decideGate,
+  isBrowserApp,
+  isCloudroomApp,
+} from "./server.js";
 
 const disk = vi.hoisted(() => ({ full: false }));
 const proc = vi.hoisted(() => ({
@@ -78,6 +84,9 @@ describe("decideGate", () => {
       name: "com.apple.TextEdit",
     });
     expect(decideGate({ tool: "get_desktop_state", input: {} })).toEqual({ kind: "screen" });
+    expect(decideGate({ tool: "move_cursor", input: { x: 1, y: 2 } })).toEqual({ kind: "screen" });
+    expect(decideGate({ tool: "browser_click", input: { delivery_mode: "foreground" } })).toEqual({ kind: "screen" });
+    expect(decideGate({ tool: "click", input: { pid: 42, delivery_mode: "foreground" } })).toEqual({ kind: "pid", pid: 42 });
     for (const tool of ["clipboard_read", "clipboard_write"])
       expect(decideGate({ tool, input: { pid: 42 } }).kind).toBe("clipboard");
     expect(decideGate({ tool: "set_config", input: {} }).kind).toBe("error");
@@ -114,7 +123,7 @@ it("refuses an app macOS doesn't know without an approval card", async () => {
   ).toEqual(["prepare", "appForName"]);
 });
 
-it("keeps an approval saved with the bundle ID in another case", async () => {
+it("lets a granted thread launch an app without re-asking", async () => {
   const status = {
     platform: "darwin",
     supported: true,
@@ -134,9 +143,7 @@ it("keeps an approval saved with the bundle ID in another case", async () => {
     sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
     experimental_callHostRpc: ({ method }) => replies[method],
   });
-  await fake.bb.storage.kv.set("always-allowed", [
-    { key: "com.apple.textedit", name: "TextEdit" },
-  ]);
+  await fake.bb.storage.kv.set("thread-granted/thr_1", true);
   await computerUsePlugin(fake.bb);
   const result = await fake.harness.runCli(
     ["call", "launch_app", '{"name":"TextEdit"}'],
@@ -172,8 +179,8 @@ it("lets approved threads read the clipboard without Accessibility", async () =>
     sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
     experimental_callHostRpc: ({ method }) => replies[method],
   });
-  const clipboard = { key: "clipboard", name: "the clipboard" };
-  await fake.bb.storage.kv.set("always-allowed", [clipboard]);
+  await fake.bb.storage.kv.set("thread-granted/thr_1", true);
+  await fake.bb.storage.kv.set("thread-granted/thr_2", true);
   await computerUsePlugin(fake.bb);
   const read = ["call", "clipboard_read", "{}"];
   for (const threadId of ["thr_1", "thr_2"])
@@ -570,9 +577,7 @@ describe("active computer-use indicator state", () => {
       sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
       experimental_callHostRpc: ({ method }) => replies[method],
     });
-    await fake.bb.storage.kv.set("always-allowed", [
-      { key: "com.brave.browser", name: "Brave" },
-    ]);
+    await fake.bb.storage.kv.set("thread-granted/thr_1", true);
     await computerUsePlugin(fake.bb);
 
     expect(await fake.harness.callRpc("getActive", null)).toEqual({
@@ -677,70 +682,187 @@ describe("active computer-use indicator state", () => {
   });
 });
 
-describe("foreground focus gate", () => {
+describe("thread-level approval", () => {
   const readyStatus = {
     platform: "darwin",
     supported: true,
     reason: null,
-    version: "0.55.0",
+    version: "0.59.5",
     installed: true,
     running: true,
     permissions: { accessibility: true, screenRecording: true },
   };
 
-  it("identifies foreground calls", () => {
-    expect(takesForeground("bring_to_front", { pid: 1 })).toBe(true);
-    expect(takesForeground("move_cursor", { x: 1, y: 2 })).toBe(true);
-    expect(takesForeground("click", { pid: 1, delivery_mode: "foreground" })).toBe(true);
-    expect(takesForeground("click", { pid: 1 })).toBe(false);
-    expect(takesForeground("drag", { pid: 1 })).toBe(false);
-  });
-
-  it("asks once for foreground calls even on always-allowed apps and blocks on deny", async () => {
-    const replies: Record<string, unknown> = {
-      prepare: { ...readyStatus, installMs: null },
-      status: readyStatus,
-      appForPid: { key: "com.brave.Browser", name: "Brave" },
-      call: {
-        exitCode: 0,
-        stdout: JSON.stringify(verified),
-        stderr: "",
-        driverExits: 0,
-      },
-    };
-    const fake = createFakePluginHost({
+  function setup(appsByPid: Record<number, { key: string; name: string }> = { 42: { key: "com.brave.Browser", name: "Brave" } }) {
+    return createFakePluginHost({
       sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
-      experimental_callHostRpc: ({ method }) => replies[method],
+      experimental_callHostRpc: ({ method, input }) => {
+        if (method === "prepare") return { ...readyStatus, installMs: null };
+        if (method === "status") return readyStatus;
+        if (method === "appForPid") return appsByPid[(input as { pid: number }).pid] ?? null;
+        if (method === "call")
+          return { exitCode: 0, stdout: JSON.stringify(verified), stderr: "", driverExits: 0 };
+        return null;
+      },
     });
-    await fake.bb.storage.kv.set("always-allowed", [{ key: "com.brave.Browser", name: "Brave" }]);
+  }
+
+  it("asks once per thread, blocks on deny, and covers other apps and foreground calls once allowed", async () => {
+    const fake = setup({
+      42: { key: "com.brave.Browser", name: "Brave" },
+      99: { key: "com.apple.TextEdit", name: "TextEdit" },
+    });
     await computerUsePlugin(fake.bb);
 
+    // Deny blocks the call without granting the thread.
     const deniedCall = fake.harness.runCli(
       ["call", "click", '{"pid":42,"delivery_mode":"foreground"}'],
       { threadId: "thr_1" },
     );
     await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
-    expect(fake.harness.pendingInteractions[0]?.payload).toMatchObject({ foreground: true });
     fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "deny" });
     const denied = await deniedCall;
     expect(denied.exitCode).toBe(1);
-    expect(JSON.parse(denied.stdout ?? "").error).toBe("foreground_denied");
+    expect(JSON.parse(denied.stdout ?? "").error).toBe("app_denied");
 
-    // Allow once succeeds, and a second foreground call still asks again.
-    for (let i = 0; i < 2; i++) {
-      const allowedCall = fake.harness.runCli(
-        ["call", "bring_to_front", '{"pid":42,"window_id":7}'],
-        { threadId: "thr_1" },
-      );
+    // Allow for this thread covers all subsequent apps, foreground calls, cursor moves, and clipboard in that thread.
+    const firstAllowed = fake.harness.runCli(
+      ["call", "bring_to_front", '{"pid":42,"window_id":7}'],
+      { threadId: "thr_1" },
+    );
+    await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "thread" });
+    expect((await firstAllowed).exitCode).toBe(0);
+
+    for (const argv of [
+      ["call", "type_text", '{"pid":42,"text":"hi","delivery_mode":"foreground"}'],
+      ["call", "click", '{"pid":99}'],
+      ["call", "move_cursor", '{"x":10,"y":20}'],
+      ["call", "clipboard_read", "{}"],
+    ]) {
+      expect((await fake.harness.runCli(argv, { threadId: "thr_1" })).exitCode).toBe(0);
+    }
+    expect(fake.harness.pendingInteractions).toHaveLength(0);
+
+    // Ending the turn releases app locks while keeping the thread grant.
+    await fake.harness.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: "thr_1", projectId: "proj_1" }),
+      lastAssistantText: "Done",
+    });
+    expect(await fake.bb.storage.kv.get("thread-granted/thr_1")).toBe(true);
+
+    // A different thread still asks independently.
+    const otherThread = fake.harness.runCli(["call", "click", '{"pid":42}'], { threadId: "thr_2" });
+    await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "deny" });
+    expect((await otherThread).exitCode).toBe(1);
+
+    // Archiving clears the thread grant.
+    await fake.harness.emitThreadEvent("thread.archived", {
+      thread: makeThreadResponse({ id: "thr_1", projectId: "proj_1" }),
+    });
+    expect(await fake.bb.storage.kv.get("thread-granted/thr_1")).toBeUndefined();
+  });
+
+  it("persists an approval clicked after the 90s approval_pending timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = setup();
+      await computerUsePlugin(fake.bb);
+
+      const first = fake.harness.runCli(["call", "click", '{"pid":42}'], { threadId: "thr_1" });
       await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
-      fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "thread" });
-      expect((await allowedCall).exitCode).toBe(0);
+      const cardId = fake.harness.pendingInteractions[0]!.id;
+
+      await vi.advanceTimersByTimeAsync(90_000);
+      const pendingResult = await first;
+      expect(pendingResult.exitCode).toBe(3);
+      expect(JSON.parse(pendingResult.stdout ?? "").error).toBe("approval_pending");
+
+      // User clicks Allow after the CLI already returned approval_pending.
+      fake.harness.submitInteraction(cardId, { decision: "thread" });
+      await vi.waitFor(async () =>
+        expect(await fake.bb.storage.kv.get("thread-granted/thr_1")).toBe(true),
+      );
+
+      // Next call goes straight through with no new card.
+      const retry = await fake.harness.runCli(["call", "click", '{"pid":42}'], { threadId: "thr_1" });
+      expect(retry.exitCode).toBe(0);
+      expect(fake.harness.pendingInteractions).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("refuses to control Cloudroom itself (and its helpers), even in a granted thread", async () => {
+    expect(isCloudroomApp("dev.cloudroom.gui")).toBe(true);
+    expect(isCloudroomApp("dev.cloudroom.gui.helper")).toBe(true);
+    expect(isCloudroomApp("com.github.Electron", "com.github.Electron")).toBe(false);
+
+    const fake = setup({
+      42: { key: "dev.cloudroom.gui", name: "Cloudroom" },
+      43: { key: "dev.cloudroom.gui.helper.Renderer", name: "Cloudroom Helper" },
+      44: { key: "com.github.Electron", name: "Electron" },
+    });
+    await fake.bb.storage.kv.set("thread-granted/thr_1", true);
+    await computerUsePlugin(fake.bb);
+
+    for (const pid of [42, 43]) {
+      const blocked = await fake.harness.runCli(["call", "click", JSON.stringify({ pid })], {
+        threadId: "thr_1",
+      });
+      expect(blocked.exitCode).toBe(1);
+      expect(JSON.parse(blocked.stdout ?? "").error).toBe("app_blocked");
     }
     expect(
-      fake.harness.experimental_hostRpcCalls
-        .filter((call) => call.method === "call")
-        .map((call) => (call.input as { tool: string }).tool),
-    ).toEqual(["bring_to_front", "bring_to_front"]);
+      fake.harness.experimental_hostRpcCalls.filter((call) => call.method === "call"),
+    ).toHaveLength(0);
+
+    // Cloudroom Dev (com.github.Electron) is still allowed for QA.
+    const dev = await fake.harness.runCli(["call", "click", '{"pid":44}'], { threadId: "thr_1" });
+    expect(dev.exitCode).toBe(0);
+  });
+
+  it("lists granted threads in Settings, prunes archived ones, and revokes on demand", async () => {
+    const threads: Record<string, { title?: string; archivedAt?: number | null; host: { id: string } }> = {
+      thr_active: { title: "AWS KMS setup", host: { id: "mac" } },
+      thr_old: { title: "Old task", archivedAt: 123, host: { id: "mac" } },
+    };
+    const fake = createFakePluginHost({
+      sdk: {
+        threads: {
+          get: async ({ threadId }: { threadId: string }) => threads[threadId] ?? { host: { id: "mac" } },
+        },
+        hosts: { list: async () => [{ id: "mac", status: "connected" }] },
+      },
+      experimental_callHostRpc: ({ method }) => {
+        if (method === "prepare") return { ...readyStatus, installMs: null };
+        if (method === "status") return readyStatus;
+        if (method === "appForPid") return { key: "com.brave.Browser", name: "Brave" };
+        if (method === "call") return { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 };
+        return null;
+      },
+    });
+    await fake.bb.storage.kv.set("thread-granted/thr_active", true);
+    await fake.bb.storage.kv.set("thread-granted/thr_old", true);
+    await computerUsePlugin(fake.bb);
+
+    expect(await fake.harness.callRpc("getSettings", null)).toMatchObject({
+      grantedThreads: [{ threadId: "thr_active", title: "AWS KMS setup" }],
+    });
+    expect(await fake.bb.storage.kv.get("thread-granted/thr_old")).toBeUndefined();
+
+    expect(
+      await fake.harness.callRpc("revokeThread", { threadId: "thr_active" }),
+    ).toMatchObject({ grantedThreads: [] });
+    expect(await fake.bb.storage.kv.get("thread-granted/thr_active")).toBeUndefined();
+
+    // Legacy "always" decision still grants the thread.
+    const nextCall = fake.harness.runCli(["call", "click", '{"pid":42}'], { threadId: "thr_active" });
+    await vi.waitFor(() => expect(fake.harness.pendingInteractions).toHaveLength(1));
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, { decision: "always" });
+    expect((await nextCall).exitCode).toBe(0);
+    expect(await fake.bb.storage.kv.get("thread-granted/thr_active")).toBe(true);
   });
 });
 
@@ -875,4 +997,357 @@ it("Mac launch_app requires confirmed user-home prelaunch and preserves bypass f
     });
     await rm(root, { recursive: true, force: true });
   }
+});
+
+describe("browser new-window and separate-instance guards", () => {
+  const brave = { key: "com.brave.Browser", name: "Brave Browser" };
+  const textEdit = { key: "com.apple.TextEdit", name: "TextEdit" };
+
+  it("blocks new browser windows/instances across hotkey, press_key, invoke_menu, and launch_app", () => {
+    for (const id of [
+      "com.brave.Browser",
+      "com.apple.SafariTechnologyPreview",
+      "org.mozilla.firefoxdeveloperedition",
+      "com.operasoftware.OperaGX",
+      "brave-browser",
+    ])
+      expect(isBrowserApp(id), id).toBe(true);
+    expect(isBrowserApp("com.apple.TextEdit")).toBe(false);
+
+    expect(
+      blockedBrowserAction({
+        tool: "launch_app",
+        input: { creates_new_application_instance: true },
+        app: brave,
+        platform: "darwin",
+      }),
+    ).toMatch(/second Brave Browser instance/);
+    expect(
+      blockedBrowserAction({
+        tool: "invoke_menu",
+        input: { path: ["File", "New Window"] },
+        app: brave,
+        platform: "darwin",
+      }),
+    ).toMatch(/New Window/);
+    expect(
+      blockedBrowserAction({
+        tool: "hotkey",
+        input: { keys: ["cmd", "n"] },
+        app: brave,
+        platform: "darwin",
+      }),
+    ).toMatch(/cmd\+n/);
+    expect(
+      blockedBrowserAction({
+        tool: "press_key",
+        input: { key: "n", modifiers: ["cmd"] },
+        app: brave,
+        platform: "darwin",
+      }),
+    ).toMatch(/cmd\+n/);
+    expect(
+      blockedBrowserAction({
+        tool: "press_key",
+        input: { key: "ctrl+shift+n" },
+        app: brave,
+        platform: "linux",
+      }),
+    ).toMatch(/ctrl\+t/);
+
+    for (const allowed of [
+      { tool: "invoke_menu", input: { path: ["File", "New Tab"] }, app: brave, platform: "darwin" },
+      { tool: "hotkey", input: { keys: ["cmd", "t"] }, app: brave, platform: "darwin" },
+      { tool: "press_key", input: { key: "n" }, app: brave, platform: "darwin" },
+      { tool: "press_key", input: { key: "n", modifiers: ["ctrl"] }, app: brave, platform: "darwin" },
+      { tool: "hotkey", input: { keys: ["cmd", "n"] }, app: textEdit, platform: "darwin" },
+    ])
+      expect(blockedBrowserAction(allowed)).toBeNull();
+  });
+
+  it("gates browser_prepare(allow_launch) without Accessibility or cross-thread app lock", async () => {
+    expect(
+      decideGate({
+        tool: "browser_prepare",
+        input: { allow_launch: true, profile: { mode: "isolated_new" } },
+      }),
+    ).toEqual({ kind: "isolated_browser" });
+
+    const status = {
+      platform: "linux",
+      supported: true,
+      reason: null,
+      version: "0",
+      installed: true,
+      running: true,
+      permissions: { accessibility: false, screenRecording: true },
+    };
+    const replies: Record<string, unknown> = {
+      prepare: { ...status, installMs: null },
+      status,
+      call: { exitCode: 0, stdout: "{}", stderr: "", driverExits: 0 },
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "linux" } }) } },
+      experimental_callHostRpc: ({ method }) => replies[method],
+    });
+    await fake.bb.storage.kv.set("thread-granted/thr_1", true);
+    await fake.bb.storage.kv.set("thread-granted/thr_2", true);
+    await computerUsePlugin(fake.bb);
+    const launch = ["call", "browser_prepare", '{"allow_launch":true,"profile":{"mode":"isolated_new"}}'];
+    for (const threadId of ["thr_1", "thr_2"])
+      expect((await fake.harness.runCli(launch, { threadId })).exitCode).toBe(0);
+  });
+});
+
+describe("browser control detection and setup", () => {
+  const err = (code: string) => Object.assign(new Error(code), { code });
+
+  it("detects default browser, FDA, remote debugging, fallbacks, and Linux Flatpak", async () => {
+    const home = "/Users/tester";
+    // 1. macOS Brave blocked by FDA -> fullDiskAccess: false, remoteDebugging: null (unknown)
+    const fdaBlocked = await inspectBrowserControl({
+      platform: "darwin",
+      home,
+      detectDefault: async () => ({
+        bundleId: "com.brave.Browser",
+        name: "Brave Browser",
+        executablePath: null,
+      }),
+      readFile: async () => {
+        throw err("EPERM");
+      },
+      probeCdpHttp: async () => false,
+    });
+    expect(fdaBlocked).toMatchObject({
+      supported: true,
+      browserName: "Brave Browser",
+      isDefault: true,
+      inspectUrl: "brave://inspect/#remote-debugging",
+      fullDiskAccess: false,
+      remoteDebugging: null,
+      ready: false,
+    });
+
+    // 2. macOS Brave FDA granted, DevToolsActivePort live -> ready: true
+    const ready = await inspectBrowserControl({
+      platform: "darwin",
+      home,
+      detectDefault: async () => ({
+        bundleId: "com.brave.Browser",
+        name: "Brave Browser",
+        executablePath: null,
+      }),
+      readFile: async () => "9444\n/devtools/browser/abc\n",
+      probeTcp: async (port) => port === 9444,
+    });
+    expect(ready).toMatchObject({
+      supported: true,
+      fullDiskAccess: true,
+      remoteDebugging: true,
+      ready: true,
+    });
+
+    // 3. macOS Brave FDA granted, DevToolsActivePort missing -> remoteDebugging: false
+    const debugOff = await inspectBrowserControl({
+      platform: "darwin",
+      home,
+      detectDefault: async () => ({
+        bundleId: "com.brave.Browser",
+        name: "Brave Browser",
+        executablePath: null,
+      }),
+      readFile: async () => {
+        throw err("ENOENT");
+      },
+      readdir: async () => ["Local State"],
+      accessReadable: async () => undefined,
+      probeCdpHttp: async () => false,
+    });
+    expect(debugOff).toMatchObject({
+      fullDiskAccess: true,
+      remoteDebugging: false,
+      ready: false,
+    });
+
+    // 4. macOS Safari default with no Chromium installed -> unsupported
+    const safariOnly = await inspectBrowserControl({
+      platform: "darwin",
+      home,
+      detectDefault: async () => ({
+        bundleId: "com.apple.Safari",
+        name: "Safari",
+        executablePath: null,
+      }),
+      readdir: async () => {
+        throw err("ENOENT");
+      },
+    });
+    expect(safariOnly).toMatchObject({
+      supported: false,
+      browserName: "Safari",
+      ready: false,
+    });
+
+    // 5. Fallback port 9222 live works even when DevToolsActivePort is EPERM
+    const fallbackPort = await inspectBrowserControl({
+      platform: "darwin",
+      home,
+      detectDefault: async () => ({
+        bundleId: "com.google.Chrome",
+        name: "Google Chrome",
+        executablePath: null,
+      }),
+      readFile: async () => {
+        throw err("EPERM");
+      },
+      probeCdpHttp: async (port) => port === 9222,
+    });
+    expect(fallbackPort).toMatchObject({
+      supported: true,
+      fullDiskAccess: false,
+      remoteDebugging: true,
+      ready: true,
+    });
+
+    // 6. Linux Brave Origin desktop ID doesn't get swallowed by Brave, and Flatpak Chrome works
+    const linuxOrigin = await inspectBrowserControl({
+      platform: "linux",
+      home: "/home/tester",
+      detectDefault: async () => ({
+        bundleId: "brave-browser-origin.desktop",
+        name: "brave-browser-origin",
+        executablePath: null,
+      }),
+      readFile: async (p) =>
+        p.includes("Brave-Origin/DevToolsActivePort")
+          ? "9555\n/ws\n"
+          : Promise.reject(err("ENOENT")),
+      probeTcp: async (port) => port === 9555,
+    });
+    expect(linuxOrigin).toMatchObject({
+      supported: true,
+      browserName: "Brave Origin",
+      ready: true,
+    });
+
+    const linuxFlatpak = await inspectBrowserControl({
+      platform: "linux",
+      home: "/home/tester",
+      detectDefault: async () => ({
+        bundleId: "firefox.desktop",
+        name: "firefox",
+        executablePath: null,
+      }),
+      readdir: async (p) =>
+        p.includes(".var/app/com.google.Chrome/config/google-chrome")
+          ? ["DevToolsActivePort"]
+          : Promise.reject(err("ENOENT")),
+      readFile: async (p) =>
+        p.includes(
+          ".var/app/com.google.Chrome/config/google-chrome/DevToolsActivePort",
+        )
+          ? "9666\n/ws\n"
+          : Promise.reject(err("ENOENT")),
+      probeTcp: async (port) => port === 9666,
+    });
+    expect(linuxFlatpak).toMatchObject({
+      supported: true,
+      browserName: "Google Chrome",
+      isDefault: false,
+      ready: true,
+    });
+  });
+
+  it("setup --browser fails fast on unsupported browser, aborts stale cards on ready, and handles dismiss", async () => {
+    const baseStatus = {
+      platform: "darwin",
+      supported: true,
+      reason: null,
+      version: "0.55.0",
+      installed: true,
+      running: false,
+      permissions: { accessibility: true, screenRecording: true },
+    };
+    let currentBrowserControl = {
+      supported: false,
+      browserName: "Safari",
+      shortName: "Safari",
+      bundleId: "com.apple.Safari",
+      isDefault: true,
+      inspectUrl: "chrome://inspect/#remote-debugging",
+      fullDiskAccess: null as boolean | null,
+      remoteDebugging: null as boolean | null,
+      ready: false,
+      reason: "Safari doesn't support background browser control." as string | null,
+    };
+    const fake = createFakePluginHost({
+      sdk: { threads: { get: async () => ({ host: { id: "mac" } }) } },
+      experimental_callHostRpc: ({ method }) =>
+        method === "status"
+          ? { ...baseStatus, browserControl: currentBrowserControl }
+          : null,
+    });
+    await computerUsePlugin(fake.bb);
+
+    // Unsupported browser fails fast without creating a card.
+    const unsupported = await fake.harness.runCli(["setup", "--browser"], {
+      threadId: "thr_1",
+    });
+    expect(unsupported.exitCode).toBe(1);
+    expect(JSON.parse(unsupported.stdout ?? "").error).toBe("unsupported");
+    expect(fake.harness.pendingInteractions).toEqual([]);
+
+    // Supported but not ready opens the inline card; dismiss ends cleanly.
+    currentBrowserControl = {
+      supported: true,
+      browserName: "Brave Browser",
+      shortName: "Brave",
+      bundleId: "com.brave.browser",
+      isDefault: true,
+      inspectUrl: "brave://inspect/#remote-debugging",
+      fullDiskAccess: false,
+      remoteDebugging: null,
+      ready: false,
+      reason: "macOS blocks Brave's debug port without Full Disk Access.",
+    };
+    const dismissedCall = fake.harness.runCli(["setup", "--browser"], {
+      threadId: "thr_1",
+    });
+    await vi.waitFor(() =>
+      expect(fake.harness.pendingInteractions).toHaveLength(1),
+    );
+    expect(fake.harness.pendingInteractions[0]?.rendererId).toBe(
+      "computer-use-browser-setup",
+    );
+    fake.harness.submitInteraction(fake.harness.pendingInteractions[0]!.id, {
+      action: "dismiss",
+    });
+    const dismissed = await dismissedCall;
+    expect(dismissed.exitCode).toBe(1);
+    expect(JSON.parse(dismissed.stdout ?? "").error).toBe("setup_dismissed");
+
+    // If a card is still open when the user fixes settings and setup --browser runs again, abort the stale card.
+    const pendingCall = fake.harness.runCli(["setup", "--browser"], {
+      threadId: "thr_2",
+    });
+    await vi.waitFor(() =>
+      expect(fake.harness.pendingInteractions).toHaveLength(1),
+    );
+    currentBrowserControl = {
+      ...currentBrowserControl,
+      fullDiskAccess: true,
+      remoteDebugging: true,
+      ready: true,
+      reason: null,
+    };
+    const readyResult = await fake.harness.runCli(["setup", "--browser"], {
+      threadId: "thr_2",
+    });
+    expect(readyResult.exitCode).toBe(0);
+    expect(JSON.parse(readyResult.stdout ?? "").ready).toBe(true);
+    expect(fake.harness.pendingInteractions).toEqual([]);
+    const cancelled = await pendingCall;
+    expect(JSON.parse(cancelled.stdout ?? "").error).toBe("setup_cancelled");
+  });
 });

@@ -450,20 +450,48 @@ impl Manager {
         Err(Error::Conflict(failure))
     }
 
-    pub async fn capabilities(&self) -> Value {
+    pub async fn capabilities(self: &Arc<Self>, include_models: bool) -> Value {
+        let mut catalogs = std::collections::BTreeMap::new();
+        if include_models && !self.storage.blocks() {
+            let mut probes = tokio::task::JoinSet::new();
+            for &kind in self.config.harnesses.keys() {
+                if matches!(
+                    kind,
+                    runtime::Kind::Codex
+                        | runtime::Kind::Claude
+                        | runtime::Kind::Cursor
+                        | runtime::Kind::OpenCode
+                        | runtime::Kind::Antigravity
+                ) {
+                    let manager = Arc::clone(self);
+                    probes.spawn(async move {
+                        let models = match manager.startups.acquire().await {
+                            Ok(_startup) => {
+                                match manager.catalog(kind, CachePolicy::Capabilities).await {
+                                    Ok(models) => json!(models),
+                                    Err(_) => Value::Null,
+                                }
+                            }
+                            Err(_) => Value::Null,
+                        };
+                        (kind, models)
+                    });
+                }
+            }
+            while let Some(result) = probes.join_next().await {
+                if let Ok((kind, models)) = result {
+                    catalogs.insert(kind, models);
+                }
+            }
+        }
         let mut harnesses = Vec::new();
         for (kind, profile) in &self.config.harnesses {
             let mut harness = json!({"id":kind,"model":profile.model,"provider":profile.provider});
             match kind {
                 runtime::Kind::Codex | runtime::Kind::Claude => {
-                    harness["models"] = if self.storage.blocks() {
-                        Value::Null
-                    } else {
-                        match self.catalog(*kind, CachePolicy::Capabilities).await {
-                            Ok(models) => json!(models),
-                            Err(_) => Value::Null,
-                        }
-                    };
+                    if include_models {
+                        harness["models"] = catalogs.remove(kind).unwrap_or(Value::Null);
+                    }
                     harness["steer"] = json!(true);
                     harness["goal"] = json!(*kind == runtime::Kind::Codex);
                     harness["compact"] = json!(true);
@@ -512,20 +540,15 @@ impl Manager {
                     if matches!(*kind, runtime::Kind::Fx | runtime::Kind::Antigravity) {
                         harness["prompt_reasoning"] = json!(true);
                     }
-                    if matches!(
-                        *kind,
-                        runtime::Kind::Cursor
-                            | runtime::Kind::OpenCode
-                            | runtime::Kind::Antigravity
-                    ) {
-                        harness["models"] = if self.storage.blocks() {
-                            Value::Null
-                        } else {
-                            match self.catalog(*kind, CachePolicy::Capabilities).await {
-                                Ok(models) => json!(models),
-                                Err(_) => Value::Null,
-                            }
-                        };
+                    if include_models
+                        && matches!(
+                            *kind,
+                            runtime::Kind::Cursor
+                                | runtime::Kind::OpenCode
+                                | runtime::Kind::Antigravity
+                        )
+                    {
+                        harness["models"] = catalogs.remove(kind).unwrap_or(Value::Null);
                     }
                 }
                 runtime::Kind::Pi => {

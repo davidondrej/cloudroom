@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { definePluginApp, experimental_ProviderModelPicker as AgentPicker, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Button } from "@cloudroom/shared-ui/button";
@@ -6,8 +6,9 @@ import { Checkbox } from "@cloudroom/shared-ui/checkbox";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { Input } from "@cloudroom/shared-ui/input";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { COLORS, Glyph, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, SLOT, Tile, WeakModel, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
+import { COLORS, COMPACT_MAX, COMPACT_MIN, COMPACT_PRESETS, CompactPercent, Glyph, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, SLOT, Tile, WeakModel, message, taught, timeLeft, useDirector, useSettings } from "./src/parts.js";
 import { DirectorModal } from "./src/modal.js";
+import { DirectorScanCard } from "./src/scan-card.js";
 
 /** The sidebar row above Pinned. It opens the Director's thread. */
 function Row() {
@@ -37,7 +38,8 @@ function Row() {
     if (!active) refresh();
   }, [active, refresh]);
 
-  if (slot === null || view === null) return null;
+  const byline = view?.threadId ? <Byline threadId={view.threadId} icon={view.config.icon} color={view.config.color} /> : null;
+  if (slot === null || view === null) return byline;
   const { config } = view;
   // While it is being taught, the row shows how far along it is instead of the countdown.
   const learning = taught(view);
@@ -103,6 +105,32 @@ function Row() {
         slot,
       )}
       {settings ? <DirectorModal onClose={() => setSettings(false)} /> : null}
+      {byline}
+    </>
+  );
+}
+
+/** Puts the Director's icon and name above each of its messages, in its color (David, 2026-11-28, option 2 of 8). */
+function Byline({ threadId, icon, color }: { threadId: string; icon: string; color: string }) {
+  const glyph = useRef<HTMLSpanElement>(null);
+  const [css, setCss] = useState("");
+  useEffect(() => {
+    const svg = glyph.current?.querySelector("svg");
+    // An emoji icon goes in the text; an svg icon is drawn in the Director's color.
+    const ink = color || getComputedStyle(document.documentElement).getPropertyValue("--primary").trim() || "currentColor";
+    const image = svg ? `url("data:image/svg+xml,${encodeURIComponent(svg.outerHTML.replace(/^<svg(?![^>]*xmlns=)/, '<svg xmlns="http://www.w3.org/2000/svg"').replaceAll("currentColor", ink))}") left center / 15px 15px no-repeat` : "none";
+    const label = svg ? "Director" : `${glyph.current?.textContent ?? ""}  Director`;
+    const tint = color || "var(--primary)";
+    setCss(
+      `[data-thread-view="${threadId}"] [data-message-column]:not(:has([data-user-message-bubble]))::before{content:${JSON.stringify(label)};display:flex;align-items:center;height:18px;margin-bottom:6px;padding-left:${svg ? 21 : 0}px;font-size:12.5px;font-weight:600;color:color-mix(in oklab,${tint} 80%,var(--foreground));background:${image}}`,
+    );
+  }, [threadId, icon, color]);
+  return (
+    <>
+      <span ref={glyph} hidden>
+        <Glyph icon={icon} size={15} />
+      </span>
+      <style>{css}</style>
     </>
   );
 }
@@ -118,7 +146,8 @@ function Field({ title, hint, children }: { title: string; hint?: string; childr
 }
 
 function Settings() {
-  const { view, save, run, forget, busy, error } = useSettings();
+  const { view, save, run, scan, forget, busy, error } = useSettings();
+  const navigate = useBbNavigate();
   if (view === null) return <p className="text-sm text-muted-foreground">Loading…</p>;
   const { config } = view;
   const watched = config.projectIds;
@@ -162,6 +191,29 @@ function Settings() {
         <WeakModel check={view.modelCheck} onPick={(agent) => save({ agent })} />
       </Field>
 
+      <Field
+        title="Auto-compact"
+        hint={
+          view.supportsAutoCompact
+            ? `Automatically compacts the Director's thread once context usage hits this threshold (${COMPACT_MIN}%–${COMPACT_MAX}%).`
+            : "Not supported by this harness."
+        }
+      >
+        <label className={`flex items-center gap-3 text-sm ${view.supportsAutoCompact ? "" : "opacity-40"}`}>
+          <Switch checked={config.autoCompact} disabled={!view.supportsAutoCompact} onCheckedChange={(autoCompact) => save({ autoCompact })} aria-label="Auto-compact Director context" />
+          Auto-compact Director context
+        </label>
+        <div className={`mt-3 flex flex-wrap items-center gap-1.5 transition-opacity ${view.supportsAutoCompact && config.autoCompact ? "" : "opacity-40"}`}>
+          {COMPACT_PRESETS.map((percent) => (
+            <Button key={percent} size="sm" disabled={!view.supportsAutoCompact} variant={view.supportsAutoCompact && config.autoCompact && config.autoCompactPercent === percent ? "secondary" : "outline"} onClick={() => save({ autoCompact: true, autoCompactPercent: percent })}>
+              {percent}%
+            </Button>
+          ))}
+          <CompactPercent key={config.autoCompactPercent} value={config.autoCompactPercent} disabled={!view.supportsAutoCompact} onSave={(autoCompactPercent) => view.supportsAutoCompact && save({ autoCompact: true, autoCompactPercent })} />
+          <span className="text-xs text-muted-foreground">%</span>
+        </div>
+      </Field>
+
       <Field title="What it watches" hint="Sub-agents and threads waiting on a prompt or a form are always skipped.">
         <label className="flex items-center gap-3 py-1 text-sm">
           <Checkbox checked={watched === null} onCheckedChange={(all) => save({ projectIds: all === true ? null : view.projects.map((project) => project.id) })} />
@@ -182,10 +234,15 @@ function Settings() {
       </Field>
 
       <Field title="Learning" hint="Until it is taught, the Director asks before it acts. It remembers each correction with the place it applies to. Lessons are saved with your Cloudroom account, so they work on every computer and from your phone.">
-        <label className="mb-3 flex items-center gap-3 text-sm">
-          <Switch checked={config.learning} onCheckedChange={(learning) => save({ learning })} aria-label="Learn from my corrections" />
-          Learn from my corrections
-        </label>
+        <div className="mb-3 flex flex-wrap items-center gap-3">
+          <label className="flex items-center gap-3 text-sm">
+            <Switch checked={config.learning} onCheckedChange={(learning) => save({ learning })} aria-label="Learn from my corrections" />
+            Learn from my corrections
+          </label>
+          <Button size="sm" variant="outline" className="ml-auto" disabled={busy || !config.learning} onClick={() => scan((id) => navigate.toThread(id))}>
+            Scan threads
+          </Button>
+        </div>
         <Meter view={view} onSkip={() => run("skip")} />
         {view.learned?.lessons.length ? (
           <ul className="mt-3 space-y-2">
@@ -266,4 +323,5 @@ function Settings() {
 export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({ id: "sidebar-row", component: Row });
   app.slots.settingsSection({ id: "director", component: Settings });
+  app.slots.messageDirective({ id: "director-scan", component: DirectorScanCard });
 });

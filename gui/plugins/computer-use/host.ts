@@ -28,6 +28,7 @@ import {
 } from "@get-bb/plugin-sdk/host";
 import { z } from "zod";
 import { hostContract, type AppIdentity, type HostStatus } from "./contract.js";
+import { inspectBrowserControl, openBrowserInspectPage } from "./browser-control.js";
 import { DRIVER, SESSION_TOOLS, assetFor } from "./driver.js";
 
 const run = promisify(execFile);
@@ -721,10 +722,22 @@ export function createHostEntry() {
     return `GNOME on Wayland hides app windows until the "cua WinRects" GNOME extension is on. With the user's OK, run ${join(helper, "install.sh")} (no sudo needed), then ask them to log out and back in once.`;
   }
 
-  async function status(): Promise<HostStatus> {
+  function selfBundleId(): string | null {
+    if (process.platform !== "darwin") return null;
+    const id = process.env.__CFBundleIdentifier?.trim();
+    if (!id || id.toLowerCase() === "com.github.electron") return "dev.cloudroom.gui";
+    return id;
+  }
+
+  async function status(includeBrowser = false): Promise<HostStatus> {
     const reason = unsupported();
     // One install snapshot for both fields, so the hint never contradicts `installed`.
     const installed = paths !== null && (await exists(join(dir(), "verified.json")));
+    const [permissions, browserControl, hint] = await Promise.all([
+      readPermissions().catch(() => ({ accessibility: null, screenRecording: null })),
+      includeBrowser ? inspectBrowserControl().catch(() => undefined) : Promise.resolve(undefined),
+      waylandHint(installed),
+    ]);
     return {
       platform: process.platform,
       supported: reason === null,
@@ -732,8 +745,10 @@ export function createHostEntry() {
       version: DRIVER.version,
       installed,
       running: daemon !== null && daemon.exitCode === null,
-      permissions: await readPermissions().catch(() => ({ accessibility: null, screenRecording: null })),
-      hint: await waylandHint(installed),
+      permissions,
+      ...(browserControl ? { browserControl } : {}),
+      hint,
+      selfBundleId: selfBundleId(),
     };
   }
 
@@ -836,9 +851,9 @@ export function createHostEntry() {
   return experimental_defineHostEntry({
     contract: hostContract,
     handlers: {
-      async status(_input, context) {
+      async status(input, context) {
         paths = context.experimental_paths;
-        return status();
+        return status(input.includeBrowser === true);
       },
       async prepare(_input, context) {
         paths = context.experimental_paths;
@@ -960,6 +975,12 @@ export function createHostEntry() {
       async requestPermission({ kind }, context) {
         paths = context.experimental_paths;
         if (process.platform !== "darwin") return status();
+        if (kind === "fullDiskAccess") {
+          await run("/usr/bin/open", [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles",
+          ]).catch(() => {});
+          return status(true);
+        }
         if (kind === "accessibility")
           await osascript('ObjC.import("ApplicationServices"); $.AXIsProcessTrustedWithOptions($({AXTrustedCheckOptionPrompt: true}))');
         else
@@ -968,6 +989,14 @@ export function createHostEntry() {
         await run("/usr/bin/open", [`x-apple.systempreferences:com.apple.preference.security?${pane}`]).catch(() => {});
         stopDaemon();
         return status();
+      },
+      async openBrowserInspect(_input, context) {
+        paths = context.experimental_paths;
+        const current = await status(true);
+        if (current.browserControl) {
+          await openBrowserInspectPage(current.browserControl).catch(() => {});
+        }
+        return current;
       },
       async restart(_input, context) {
         paths = context.experimental_paths;

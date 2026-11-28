@@ -15,6 +15,7 @@ Call the `result` tool with:
 - title: the thread name
 
 Title the problem or goal, not the tools the user mentions.
+Write plain text only. Never include `@thread:...`, thread IDs (`thr_...`), or `@` mentions.
 {{#if otherTitles}}
 
 Other threads in this project:

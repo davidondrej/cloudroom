@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import { PLUGIN_SDK_MAJOR } from "@cloudroom/domain";
 import {
   assertValidPluginCompactIconSvg,

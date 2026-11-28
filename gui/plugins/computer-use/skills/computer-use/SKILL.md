@@ -15,17 +15,16 @@ In Cloud threads, use the `cloud-computer-use` skill instead.
 - Try APIs, CLIs, files, and `browser-harness` first.
 - Use the GUI when those don't fit, or the user asks.
 - For the user's logged-in browser, use `browser-harness`.
-- Cua's `browser_*` tools work only on a separate browser: `browser_prepare` with `"allow_launch":true,"profile":{"mode":"isolated_new"}`.
-- Cloudroom doesn't grant `existing_profile`.
+- Cloudroom doesn't grant Cua's `existing_profile`; use `browser-harness` or a new tab in the existing window instead of launching a separate browser.
 - One app at a time. Agents share one screen and keyboard.
 
 ## Commands
 
 ```bash
-room-cli computer-use status                  # driver, macOS permissions, approved apps
+room-cli computer-use status                  # driver, macOS permissions, browser control, approval status
 room-cli computer-use tools [TOOL]            # list tools, or TOOL's exact input schema
 room-cli computer-use call TOOL ['JSON'] [--purpose "why"]
-room-cli computer-use setup [--screen-recording]   # shows macOS permission prompts
+room-cli computer-use setup [--screen-recording | --browser]   # macOS permissions or inline browser setup card
 ```
 
 - Run `tools TOOL` before using a parameter you don't know.
@@ -33,7 +32,7 @@ room-cli computer-use setup [--screen-recording]   # shows macOS permission prom
 
 ## Approvals
 
-- The first call to an app asks the user: always allow, this thread only, or deny.
+- The first control call in a thread asks the user once: allow for this thread or deny. Once allowed, the grant persists for that thread across apps, dialogs, screen, clipboard, and foreground focus.
 - Pass `--purpose` so they know why.
 - Discovery needs no approval: `list_apps`, `list_windows`, `get_screen_size`.
 - Input tools need the target's `pid`.
@@ -65,8 +64,7 @@ room-cli computer-use setup [--screen-recording]   # shows macOS permission prom
 
 ## Rules
 
-- Stay in the background (`drag` works in the background too).
-- Never use `"delivery_mode":"foreground"`, `bring_to_front`, or `move_cursor` without the user's OK; Cloudroom asks them each time.
+- Stay in the background (`drag` works in the background too). Only use `"delivery_mode":"foreground"`, `bring_to_front`, or `move_cursor` when background input fails.
 - Never run `open -a`, `osascript`, `screencapture`, or `cliclick` — they steal focus. For URLs, use `browser-harness`, `browser_navigate`, or `set_value` on the address bar of your own tab.
 - Ask before sending, posting, buying, deleting, or changing account or security settings.
 - Never type passwords, OTPs, or secrets. Hand those to the user.
@@ -83,7 +81,7 @@ room-cli computer-use setup [--screen-recording]   # shows macOS permission prom
 
 ## The user's browser
 
-- Prefer `browser-harness` for Chromium browsers.
+- Prefer `browser-harness` for Chromium browsers. If macOS Full Disk Access or remote debugging is off, run `room-cli computer-use setup --browser` to guide the user with an inline card instead of falling back to focus-stealing clicks.
 - It works in a background tab and never touches the user's tabs.
 - With computer use, the user can switch tabs at any time.
 - Every click, key, and address bar change hits the active tab.

@@ -1089,11 +1089,6 @@ export class SandboxDirectory {
     return this.call(body, "popups");
   }
 
-  /** Creates or fetches this account's instant Dub affiliate link (`go.cloudroom.dev/...`), or falls back to Dub's portal (docs/scopes/affiliate.md). */
-  async affiliateLink(): Promise<{ url: string; instant: boolean }> {
-    return z.object({ url: z.string().url(), instant: z.boolean().default(true) }).parse(await this.call({}, "affiliate"));
-  }
-
   /** Monthly Wrapped: this account's "Top N%" by agents started in a finished month, or null (docs/scopes/wrapped.md). */
   async wrappedTop(month: string): Promise<number | null> {
     return z.object({ top: z.number().nullable() }).parse(await this.call({ month }, "wrapped")).top;
@@ -1524,6 +1519,11 @@ export class SandboxDirectory {
     return z.object({ wave: z.unknown() }).parse(await this.call({ action: "usage_wave" })).wave ?? null;
   }
 
+  /** `room-cli usage [--days | --threads | THREAD_ID]` on this computer: the website's answer, as Cloud threads get it. */
+  async usageView(view?: string): Promise<unknown> {
+    return this.call({ action: "usage_view", ...(view ? { view } : {}) });
+  }
+
   /** One Cloud thread's billed credits and its sandbox's CPU per minute, for the purpose card. Asked when it opens. */
   async threadCredits(thread: string) {
     return threadCreditMinutesSchema.parse(await this.call({ action: "thread_credits", thread }));
@@ -1793,6 +1793,11 @@ export class SandboxDirectory {
     // The website starts the run at once, so its thread shows within seconds, not at the next minute's check.
     if (body.action === "run") { this.soonUntil = Date.now() + SOON_FOR_MS; this.awakeNext = 0; }
     return value;
+  }
+
+  /** Lazy project catalog sync for Mac-off PWA listing and instant Cloud thread starts. */
+  async projects(body: Record<string, unknown>): Promise<unknown> {
+    return this.call(body, "projects");
   }
 
   /** Snippets use local account identity and the existing membership cache before contacting hosting. */

@@ -17,7 +17,7 @@ import {
 import {
   describeUnreachableServer,
   fetchPluginCliContributions,
-  findDisabledPluginForCommand,
+  findPluginStatusForCommand,
   findPluginCliCommand,
   PLUGIN_CLI_HEADERS_TIMEOUT_MS,
   runPluginCliCommand,
@@ -377,7 +377,7 @@ describe("describeUnreachableServer", () => {
   });
 });
 
-describe("findDisabledPluginForCommand", () => {
+describe("findPluginStatusForCommand", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -399,13 +399,13 @@ describe("findDisabledPluginForCommand", () => {
       ),
     );
     await expect(
-      findDisabledPluginForCommand("http://localhost", "connect"),
-    ).resolves.toBe("connect");
+      findPluginStatusForCommand("http://localhost", "connect"),
+    ).resolves.toMatchObject({ id: "connect", status: "disabled" });
     await expect(
-      findDisabledPluginForCommand("http://localhost", "automations"),
-    ).resolves.toBeNull();
+      findPluginStatusForCommand("http://localhost", "automations"),
+    ).resolves.toMatchObject({ status: "running" });
     await expect(
-      findDisabledPluginForCommand("http://localhost", "linear"),
+      findPluginStatusForCommand("http://localhost", "linear"),
     ).resolves.toBeNull();
   });
 
@@ -430,8 +430,31 @@ describe("findDisabledPluginForCommand", () => {
       ),
     );
     await expect(
-      findDisabledPluginForCommand("http://localhost", "automations"),
-    ).resolves.toBe("automations");
+      findPluginStatusForCommand("http://localhost", "automations"),
+    ).resolves.toMatchObject({ id: "automations", status: "disabled" });
+  });
+
+  it("maps a command to its plugin's status (#1930)", async () => {
+    let status = "starting";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              plugins: [{ id: "automations", enabled: true, status }],
+            }),
+            { status: 200 },
+          ),
+      ),
+    );
+    await expect(
+      findPluginStatusForCommand("http://localhost", "loop"),
+    ).resolves.toEqual({ id: "automations", status: "starting", detail: null });
+    status = "running";
+    await expect(
+      findPluginStatusForCommand("http://localhost", "loop"),
+    ).resolves.toMatchObject({ status: "running" });
   });
 
   it("returns null on any fetch failure", async () => {
@@ -442,7 +465,7 @@ describe("findDisabledPluginForCommand", () => {
       }),
     );
     await expect(
-      findDisabledPluginForCommand("http://localhost", "connect"),
+      findPluginStatusForCommand("http://localhost", "connect"),
     ).resolves.toBeNull();
   });
 });

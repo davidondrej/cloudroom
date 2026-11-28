@@ -46,7 +46,7 @@ function render(extra: Record<string, unknown> = {}) {
             permissions: { ...permissions, accessibility: true },
           },
           error: null,
-          alwaysAllowed: [],
+          grantedThreads: [],
         }),
       },
     },
@@ -59,7 +59,7 @@ it("opens with no choice focused", () => {
   expect(document.activeElement).toBe(document.body);
 });
 
-it("asks macOS for permission on Grant without allowing the app", async () => {
+it("asks macOS for permission on Grant without allowing the thread", async () => {
   const { slot, submit } = render();
   fireEvent.click(slot.getAllByRole("button", { name: "Grant" })[0]!);
   await waitFor(() =>
@@ -75,11 +75,11 @@ it("asks macOS for permission on Grant without allowing the app", async () => {
 });
 
 it.each([
-  ["Always allow", "always"],
-  ["Only this thread", "thread"],
+  ["Allow for this thread", "thread"],
   ["Deny", "deny"],
 ])("%s sends its own decision", (name, decision) => {
   const { slot, submit } = render();
+  expect(slot.queryByRole("button", { name: "Always allow" })).toBeNull();
   fireEvent.click(slot.getByRole("button", { name }));
   expect(submit).toHaveBeenCalledExactlyOnceWith({ decision });
 });
@@ -92,10 +92,41 @@ it("denies on Escape", () => {
   expect(submit).toHaveBeenCalledExactlyOnceWith({ decision: "deny" });
 });
 
-it("foreground card shows Allow once and Deny with no Always allow", () => {
-  const { slot, submit } = render({ foreground: true });
-  expect(slot.queryByRole("button", { name: "Always allow" })).toBeNull();
-  expect(slot.queryByRole("button", { name: "Only this thread" })).toBeNull();
-  fireEvent.click(slot.getByRole("button", { name: "Allow once" }));
-  expect(submit).toHaveBeenCalledExactlyOnceWith({ decision: "thread" });
+it("lists granted threads in Settings and revokes one on click", async () => {
+  const baseStatus = {
+    platform: "darwin",
+    supported: true,
+    reason: null,
+    version: "0.59.5",
+    installed: true,
+    running: false,
+    permissions: { accessibility: true, screenRecording: true },
+  };
+  const slot = renderSlot(
+    app.settingsSections[0]!,
+    {},
+    {
+      rpc: {
+        getSettings: async () => ({
+          hostId: "mac",
+          status: baseStatus,
+          error: null,
+          grantedThreads: [{ threadId: "thr_abc", title: "AWS KMS setup" }],
+        }),
+        revokeThread: async () => ({
+          hostId: "mac",
+          status: baseStatus,
+          error: null,
+          grantedThreads: [],
+        }),
+      },
+    },
+  );
+  await waitFor(() => expect(slot.getByText("AWS KMS setup")).toBeTruthy());
+  fireEvent.click(slot.getByRole("button", { name: "Revoke" }));
+  await waitFor(() => expect(slot.getByText("None yet.")).toBeTruthy());
+  expect(slot.rpcCalls).toContainEqual({
+    method: "revokeThread",
+    input: { threadId: "thr_abc" },
+  });
 });

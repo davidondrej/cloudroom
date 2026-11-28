@@ -11,7 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import {
   createConnection,
   createEnvironment,

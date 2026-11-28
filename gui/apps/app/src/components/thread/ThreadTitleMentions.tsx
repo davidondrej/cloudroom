@@ -19,7 +19,6 @@ import {
   THREAD_MENTION_RESOLVE_MAX_IDS,
   type ThreadResponse,
 } from "@cloudroom/server-contract";
-import { PromptMentionPill } from "@/components/thread/timeline/ConversationMessageMentions";
 import { useThread } from "@/hooks/queries/thread-queries";
 import { threadQueryKey } from "@/hooks/queries/query-keys";
 import { sdk } from "@/lib/sdk";
@@ -507,17 +506,6 @@ const UNRESOLVED_THREAD_MENTION_LABEL = "Thread";
 const UNAVAILABLE_THREAD_MENTION_LABEL = "Unavailable thread";
 const SECTION_MENTION_PREFIXES = ["section:", "folder:"] as const;
 
-function unresolvedThreadMentionResource(
-  threadId: string,
-  label = UNRESOLVED_THREAD_MENTION_LABEL,
-): PromptMentionResource {
-  return {
-    kind: "thread",
-    threadId,
-    label,
-  };
-}
-
 function resolveTitleMentionResource(
   token: string,
   resources: ThreadTitleMentionResources,
@@ -809,67 +797,9 @@ export function useRawThreadMentionResources(
   }, [queryClient, resolutionContext.resourceById, resources, threadIds]);
 }
 
-interface ResolvingThreadTitleMentionProps {
-  renderFallbackPill: boolean;
-  serializedText: string;
-  threadId: string;
-}
-
-function ResolvingThreadTitleMention({
-  renderFallbackPill,
-  serializedText,
-  threadId,
-}: ResolvingThreadTitleMentionProps) {
-  const resource = useRawThreadMentionResource(threadId);
-  const unavailableIds = useUnavailableRawThreadMentionIds();
-  if (resource === null) {
-    return renderFallbackPill ? (
-      <PromptMentionPill
-        interactive={false}
-        resource={unresolvedThreadMentionResource(
-          threadId,
-          unavailableIds.has(threadId)
-            ? UNAVAILABLE_THREAD_MENTION_LABEL
-            : UNRESOLVED_THREAD_MENTION_LABEL,
-        )}
-        serializedText={serializedText}
-      />
-    ) : (
-      <span className="truncate">{threadId}</span>
-    );
-  }
-  return (
-    <PromptMentionPill
-      interactive={false}
-      resource={resource}
-      serializedText={serializedText}
-    />
-  );
-}
-
 function ThreadTitleMentionsContent({ title }: { title: string }) {
-  const resources = useContext(ThreadTitleMentionResourcesContext);
-  return threadTitleTextSegments(title, resources).map((segment, index) =>
-    segment.unresolvedThreadId !== null && segment.serializedText !== null ? (
-      <ResolvingThreadTitleMention
-        key={`${index}:${segment.unresolvedThreadId}`}
-        renderFallbackPill={segment.serializedText.startsWith("@thread:")}
-        serializedText={segment.serializedText}
-        threadId={segment.unresolvedThreadId}
-      />
-    ) : segment.resource === null || segment.serializedText === null ? (
-      <span key={`${index}:text`} className="truncate whitespace-pre">
-        {segment.text}
-      </span>
-    ) : (
-      <PromptMentionPill
-        key={`${index}:${segment.serializedText}`}
-        interactive={false}
-        resource={segment.resource}
-        serializedText={segment.serializedText}
-      />
-    ),
-  );
+  const displayText = useThreadTitleDisplayText(title);
+  return <span className="truncate whitespace-pre">{displayText}</span>;
 }
 
 export function ThreadTitleMentions({ title }: { title: string }) {

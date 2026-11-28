@@ -2,7 +2,7 @@ import { isUtf8 } from "node:buffer";
 import { lstat, open, realpath, stat, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { Readable } from "node:stream";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import { getHost } from "@cloudroom/db";
 import { isWindowsNetworkOrDevicePath } from "@cloudroom/domain";
 import { isPathWithinDirectory } from "@cloudroom/process-utils";
@@ -265,7 +265,7 @@ export async function tryServeColocatedLocalFile(
       throw new ApiError(400, "invalid_path", "Path is not a regular file", false);
     }
 
-    const mimeType = mimeTypes.lookup(target.path) || OCTET_STREAM_MIME_TYPE;
+    const mimeType = lookupMimeType(target.path) || OCTET_STREAM_MIME_TYPE;
     if (
       !isKnownBinaryMediaMimeType(mimeType) &&
       fileStat.size > NON_MEDIA_FILE_SIZE_LIMIT_BYTES

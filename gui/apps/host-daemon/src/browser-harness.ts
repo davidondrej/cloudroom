@@ -278,9 +278,9 @@ path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines()
 helpers = '''# Cloudroom (#1115): fixed hints for known daemon failures. Log text is never shown.
 _CLOUDROOM_HINTS = (
-    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Ask the user to turn on Full Disk Access for Cloudroom (System Settings > Privacy & Security > Full Disk Access), then quit and reopen Cloudroom."),
-    ((b"chrome://inspect/#remote-debugging",), "Chrome is running without remote debugging. Ask the user to open chrome://inspect/#remote-debugging in Chrome and tick 'Allow remote debugging for this browser instance', then retry."),
-    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open Chrome, then retry."),
+    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Run 'room-cli computer-use setup --browser' so the user can turn on Full Disk Access (System Settings > Privacy & Security > Full Disk Access) and remote debugging, then quit and reopen Cloudroom."),
+    ((b"chrome://inspect/#remote-debugging",), "The browser is running without remote debugging. Run 'room-cli computer-use setup --browser' to show the one-click setup card (or ask the user to tick 'Allow remote debugging for this browser instance' on their browser's inspect/#remote-debugging page), then retry."),
+    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open their browser (Chrome, Brave, Edge, Arc, Dia, or Comet), then retry."),
 )
 
 
@@ -331,6 +331,28 @@ if all(lines.count(a) == 1 for a in anchors):
     os.replace(tmp, path)
 PY
 fi
+# Upgrade existing installs whose admin.py already had the older Chrome-only _CLOUDROOM_HINTS (#1115).
+if [ -f "$admin" ] && grep -qsF 'Ask the user to open chrome://inspect/#remote-debugging in Chrome' "$admin"; then
+  "$venv/bin/python" -I - "$admin" <<'PY' 2>/dev/null || true
+import os, sys
+path = sys.argv[1]
+src = open(path, encoding="utf-8").read()
+old = '''_CLOUDROOM_HINTS = (
+    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Ask the user to turn on Full Disk Access for Cloudroom (System Settings > Privacy & Security > Full Disk Access), then quit and reopen Cloudroom."),
+    ((b"chrome://inspect/#remote-debugging",), "Chrome is running without remote debugging. Ask the user to open chrome://inspect/#remote-debugging in Chrome and tick 'Allow remote debugging for this browser instance', then retry."),
+    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open Chrome, then retry."),
+)'''
+new = '''_CLOUDROOM_HINTS = (
+    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Run 'room-cli computer-use setup --browser' so the user can turn on Full Disk Access (System Settings > Privacy & Security > Full Disk Access) and remote debugging, then quit and reopen Cloudroom."),
+    ((b"chrome://inspect/#remote-debugging",), "The browser is running without remote debugging. Run 'room-cli computer-use setup --browser' to show the one-click setup card (or ask the user to tick 'Allow remote debugging for this browser instance' on their browser's inspect/#remote-debugging page), then retry."),
+    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open their browser (Chrome, Brave, Edge, Arc, Dia, or Comet), then retry."),
+)'''
+if old in src:
+    tmp = f"{path}.{os.getpid()}"
+    open(tmp, "w", encoding="utf-8").write(src.replace(old, new, 1))
+    os.replace(tmp, path)
+PY
+fi
 # 0.1.13 mac-approve sees only English Google Chrome sheets on the current Space, yet its not-found answer said to
 # run it again, so agents looped while the sheet waited elsewhere (#1295). Say to ask the user instead. Swapped in by
 # rename like run.py; skips itself once a release changes the line.
@@ -371,7 +393,7 @@ if [ "$(uname -s)" = Darwin ] && { [ $# -eq 0 ] || [ "$1" = -c ]; } && [ -z "$BU
     const url = $.NSWorkspace.sharedWorkspace.URLForApplicationToOpenURL($.NSURL.URLWithString("https://example.com"));
     const id = url.isNil() ? "" : ($.NSBundle.bundleWithURL(url).bundleIdentifier.js || "");
     const chromium = /^(com[.]google[.]chrome|com[.]brave[.]browser|com[.]microsoft[.]edgemac|company[.]thebrowser[.](browser|dia)|org[.]chromium[.]chromium|ai[.]perplexity[.]comet)/i;
-    const profile = {"com.google.chrome": "Google/Chrome", "com.brave.browser": "BraveSoftware/Brave-Browser", "com.microsoft.edgemac": "Microsoft Edge", "company.thebrowser.browser": "Arc/User Data", "company.thebrowser.dia": "Dia/User Data", "ai.perplexity.comet": "Comet"}[id.toLowerCase()] || "";
+    const profile = {"com.google.chrome": "Google/Chrome", "com.brave.browser": "BraveSoftware/Brave-Browser", "com.brave.browser.origin": "BraveSoftware/Brave-Origin", "org.chromium.chromium": "Chromium", "com.microsoft.edgemac": "Microsoft Edge", "company.thebrowser.browser": "Arc/User Data", "company.thebrowser.dia": "Dia/User Data", "ai.perplexity.comet": "Comet"}[id.toLowerCase()] || "";
     profile + "|" + (chromium.test(id) && $.NSRunningApplication.runningApplicationsWithBundleIdentifier(id).count === 0 ? id : "");
   ' 2>/dev/null || true)
   app=$(printf %s "$browser" | cut -s -d'|' -f2)

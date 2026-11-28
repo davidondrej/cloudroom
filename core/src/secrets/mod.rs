@@ -40,6 +40,16 @@ pub struct Secrets {
     next: AtomicU64,
 }
 
+impl Secrets {
+    pub(crate) fn has_pending(&self, session: &str) -> bool {
+        self.pending
+            .lock()
+            .unwrap()
+            .values()
+            .any(|pending| pending.session == session)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {

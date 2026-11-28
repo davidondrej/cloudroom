@@ -33,6 +33,7 @@ const seenWaiters: { match: (entry: Seen) => boolean; resolve: () => void }[] = 
 const seenOnce = (match: (entry: Seen) => boolean) =>
   seen.some(match) ? Promise.resolve() : new Promise<void>((resolve) => seenWaiters.push({ match, resolve }));
 let website: (request: Request) => MiniflareResponse = () => MiniflareResponse.json({ userId: "user-1" });
+let edgeHtml = false;
 let mf: Miniflare;
 let tunnel: ClientWebSocket;
 let handle: string;
@@ -152,7 +153,28 @@ beforeAll(async () => {
     durableObjects: { TUNNEL_DO: "TunnelDO" },
     d1Databases: { DB: "relay-test" },
     bindings: { BASE_DOMAIN: BASE, WEBSITE_URL: "https://website.test", CONNECT_SIGNAL_SECRET: "signal-secret" },
-    serviceBindings: { ASSETS: (request: { url: string }) => new MiniflareResponse(`asset:${new URL(request.url).pathname}`) },
+    serviceBindings: {
+      ASSETS: (request: { url: string }) => {
+        const pathname = new URL(request.url).pathname;
+        // Mirror Cloudflare Workers Static Assets auto-trailing-slash behavior: /index.html redirects 307 to /.
+        if (pathname === "/index.html") {
+          return new MiniflareResponse(null, { status: 307, headers: { location: "/" } });
+        }
+        if (edgeHtml && pathname === "/") {
+          return new MiniflareResponse("<!doctype html><title>Edge PWA</title>", {
+            status: 200,
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+        if (edgeHtml && pathname === "/assets/edge-only-bundle.js") {
+          return new MiniflareResponse("console.log('edge');", {
+            status: 200,
+            headers: { "content-type": "application/javascript" },
+          });
+        }
+        return new MiniflareResponse(`asset:${pathname}`);
+      },
+    },
     outboundService: (request: unknown) => website(request as Request),
   });
   const db = await mf.getD1Database("DB");
@@ -1258,6 +1280,86 @@ describe("Cloudroom Connect relay", () => {
     expect(machineSettings.status).toBe(403);
 
     ws2.close(1000, "done");
+  });
+
+  it("delivers /api/phones-changed to /__cloud/events without waking Macs, and closes the socket on session revoke", async () => {
+    seen.length = 0;
+    const cookie = await signInPhone();
+    const eventsResp = await fetchRelay(`https://${handle}.${BASE}/__cloud/events`, {
+      headers: { upgrade: "websocket", cookie, origin: `https://${handle}.${BASE}` },
+    });
+    expect(eventsResp.status).toBe(101);
+    const eventsWs = eventsResp.webSocket!;
+    eventsWs.accept();
+    eventsWs.send("hello");
+
+    const received = new Promise<string>((resolve) => {
+      eventsWs.addEventListener("message", (event) => resolve(String(event.data)), { once: true });
+    });
+    const closed = new Promise<void>((resolve) => {
+      eventsWs.addEventListener("close", () => { eventsWs.close(); resolve(); }, { once: true });
+    });
+
+    const ping = await fetchRelay(`https://${BASE}/api/phones-changed`, {
+      method: "POST",
+      headers: { authorization: "Bearer signal-secret", "content-type": "application/json" },
+      body: JSON.stringify({ user_id: "user-1" }),
+    });
+    expect(ping.status).toBe(202);
+    expect(JSON.parse(await received)).toMatchObject({ type: "threads-changed" });
+    // Phone-only signals must never wake online Macs.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(seen.some((req) => req.path.includes("threads-changed"))).toBe(false);
+
+    // Revoking phone sessions immediately closes the hibernatable events socket.
+    const revoke = await fetchRelay(`https://${BASE}/api/phone-sessions/revoke`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${credential}` },
+    });
+    expect(revoke.status).toBe(200);
+    await Promise.race([
+      closed,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`events socket stayed open after revoke (readyState=${eventsWs.readyState})`)), 1000)),
+    ]);
+  });
+
+  it("serves edge PWA via / (not /index.html 307) only while the Mac is offline, and keeps /api/* at 503", async () => {
+    const cookie = await signInPhone();
+    edgeHtml = true;
+    try {
+      // Mac online: never serves edge fallback.
+      const online = await fetchRelay(`https://${handle}.${BASE}/`, { headers: { ...HTML, cookie } });
+      expect(online.status).toBe(200);
+      expect(online.headers.get("x-cloudroom-edge-fallback")).toBeNull();
+      expect(await online.text()).toBe("mac:app:/");
+
+      // Mac goes offline: HTML routes and static assets fall back to edge ASSETS via / (not 307 /index.html).
+      tunnel.close(1000, "offline");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const fallbackHtml = await fetchRelay(`https://${handle}.${BASE}/threads/thr_abc`, {
+        headers: { ...HTML, cookie },
+      });
+      expect(fallbackHtml.status).toBe(200);
+      expect(fallbackHtml.headers.get("x-cloudroom-edge-fallback")).toBe("1");
+      expect(await fallbackHtml.text()).toContain("Edge PWA");
+
+      const fallbackJs = await fetchRelay(`https://${handle}.${BASE}/assets/edge-only-bundle.js`, {
+        headers: { cookie },
+      });
+      expect(fallbackJs.status).toBe(200);
+      expect(fallbackJs.headers.get("x-cloudroom-edge-fallback")).toBe("1");
+      expect(await fallbackJs.text()).toContain("edge");
+
+      // Backend API paths MUST remain 503 offline even when Accept: text/html is sent, so macOffline() triggers.
+      const apiVersion = await fetchRelay(`https://${handle}.${BASE}/api/v1/system/version`, {
+        headers: { ...HTML, cookie },
+      });
+      expect(apiVersion.status).toBe(503);
+      expect(apiVersion.headers.get("x-bb-tunnel-offline")).toBe("1");
+    } finally {
+      edgeHtml = false;
+    }
   });
 });
 

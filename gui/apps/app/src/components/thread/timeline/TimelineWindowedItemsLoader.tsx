@@ -37,7 +37,6 @@ export const TimelineWindowingMeasurementsContext = createContext<Map<
 > | null>(null);
 
 export interface TimelineWindowedItemRenderState {
-  isRealized: boolean;
   itemIndex: number | undefined;
   itemRef: (node: HTMLDivElement | null) => void;
   itemStyle: CSSProperties | undefined;
@@ -72,7 +71,6 @@ function TimelineWindowedItemsControl({
 }: TimelineWindowedItemsProps & { captureMeasurements?: boolean }) {
   return itemKeys.map((key, index) =>
     renderItem(index, {
-      isRealized: true,
       itemIndex: captureMeasurements ? index : undefined,
       itemRef: captureMeasurements
         ? (element) => {

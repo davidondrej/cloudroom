@@ -1168,7 +1168,7 @@ function ProviderUsageStatus(props: ExperimentalSidebarFooterDisclosureProps) {
       void refreshUsage({
         force: false,
         machineIds: active ? [active.id] : null,
-        maxAgeMs: CARD_MAX_AGE_MS,
+        maxAgeMs: 24 * 60 * 60_000,
       });
     }, [threadMachineId]),
   );

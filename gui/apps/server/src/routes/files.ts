@@ -1,7 +1,7 @@
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Hono } from "hono";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import {
   publicApiRoutes,
   typedRoutes,
@@ -95,7 +95,7 @@ function parseRawFilesystemPath(rawPath: string): string {
 }
 
 function assertHtmlPreviewPath(filePath: string): void {
-  if (!isHtmlMimeType(mimeTypes.lookup(filePath) || null)) {
+  if (!isHtmlMimeType(lookupMimeType(filePath) || null)) {
     throw createRawFilesystemPathUnsupportedError();
   }
 }
@@ -402,7 +402,7 @@ export function registerFileRoutes(app: Hono, deps: AppDeps): void {
     ) {
       throw new ApiError(400, "invalid_path", "Invalid preview path", false);
     }
-    const isHtmlPath = isHtmlMimeType(mimeTypes.lookup(rawPath) || null);
+    const isHtmlPath = isHtmlMimeType(lookupMimeType(rawPath) || null);
     return serveDaemonFileContent(
       deps,
       {

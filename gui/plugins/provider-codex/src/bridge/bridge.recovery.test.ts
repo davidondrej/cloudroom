@@ -352,3 +352,130 @@ it("fails a rename with a plain error once the ladder is exhausted", async () =>
   expect(response.error?.message).toMatch(/rollout at .+ is empty/);
   expect(response.error?.data).toBeUndefined();
 }, 30_000);
+
+it("keeps an exec that outlives its turn open as background work until it exits (#1774)", async () => {
+  // Codex sends the exec's item/completed only when its process exits. An
+  // approval-gated exec starts without a processId.
+  const exec = (
+    id: string,
+    processId: string | null,
+    exitCode: number | null,
+  ) => ({
+    type: "commandExecution",
+    id,
+    command: "TOKEN=secret sleep 60",
+    cwd: "/",
+    processId,
+    source: "unifiedExecStartup",
+    status: exitCode === null ? "inProgress" : "completed",
+    commandActions: [],
+    aggregatedOutput: null,
+    exitCode,
+    durationMs: 1,
+  });
+  const exited = (id: string, exitCode: number) => ({
+    method: "item/completed",
+    params: { threadId: "x", turnId: id, item: exec(id, "41", exitCode) },
+  });
+  const run = (
+    id: string,
+    status: string,
+    processId: string | null,
+    exitCode?: number,
+  ) => {
+    const turn = (turnStatus: string) => ({
+      method: turnStatus === "inProgress" ? "turn/started" : "turn/completed",
+      params: { threadId: "x", turn: { id, status: turnStatus } },
+    });
+    return [
+      turn("inProgress"),
+      {
+        method: "item/started",
+        params: { threadId: "x", turnId: id, item: exec(id, processId, null) },
+      },
+      turn(status),
+      ...(exitCode === undefined ? [] : [exited(id, exitCode)]),
+    ];
+  };
+  stubFakeAppServer({
+    turns: [
+      [
+        // Interrupted while waiting for approval: it never sends item/completed.
+        ...run("stopped", "interrupted", null),
+        ...run("bg", "completed", "41", 0),
+        // Approved, then failed to start (no such cwd): no item/completed.
+        ...run("noCwd", "completed", null),
+        ...run("dev", "completed", null),
+      ],
+    ],
+    // What Codex still runs: the approved dev server.
+    backgroundTerminals: ["dev"],
+    // Stop's cleanup ends the dev server.
+    cleanNotifications: [exited("dev", -1)],
+  });
+  harness = createBridgeJsonRpcTestHarness(handleLine);
+  harness.sendRequest(1, "thread/resume", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    cwd: workspaceDir,
+    instructionMode: "append",
+    options: { ...FULL_ACCESS_SESSION_OPTIONS },
+  });
+  expect((await harness.waitForResponse(1)).error).toBeUndefined();
+  const send = (id: number, text: string) => {
+    harness.sendRequest(id, "turn/start", {
+      threadId: THREAD_ID,
+      providerThreadId: PROVIDER_THREAD_ID,
+      clientRequestId: `creq_cdxrcvry2${id}`,
+      input: [{ type: "text", text, mentions: [] }],
+      options: { ...FULL_ACCESS_SESSION_OPTIONS },
+    });
+    return harness.waitForResponse(id);
+  };
+  expect((await send(2, "run it")).error).toBeUndefined();
+
+  type Delta = {
+    kind: string;
+    item?: { type: string; taskStatus?: string; description?: string };
+  };
+  const steps = () =>
+    (threadDeltas() as Delta[]).flatMap((delta) =>
+      delta.kind === "turn.boundary"
+        ? ["turn.boundary"]
+        : delta.item?.type === "backgroundTask"
+          ? [`${delta.kind}:${delta.item.taskStatus}`]
+          : [],
+    );
+  // Open background work keeps the idle reaper from ending its app-server.
+  const ran = [
+    "turn.boundary",
+    "item.open:running",
+    "turn.boundary",
+    "item.close:completed",
+    "turn.boundary",
+    "turn.boundary",
+    // The approved dev server, once Codex lists it.
+    "item.open:running",
+  ];
+  await vi.waitFor(() => expect(steps()).toEqual(ran));
+  // A parent's notice quotes it: a fixed label, never the command line.
+  expect(
+    (threadDeltas() as Delta[]).find((d) => d.item?.type === "backgroundTask")
+      ?.item?.description,
+  ).toBe("background command");
+
+  // A Stop that keeps Codex ends the dev server as stopped, not failed.
+  expect((await send(3, "/wait-for-interrupt")).error).toBeUndefined();
+  harness.sendRequest(4, "thread/stop", {
+    threadId: THREAD_ID,
+    providerThreadId: PROVIDER_THREAD_ID,
+    intent: "interrupt",
+    activeTurnId: "turn-fx-1",
+    keepSession: true,
+  });
+  expect((await harness.waitForResponse(4)).result).toEqual({
+    ok: true,
+    sessionKept: true,
+  });
+  expect(steps()).toEqual([...ran, "turn.boundary", "item.close:stopped"]);
+});

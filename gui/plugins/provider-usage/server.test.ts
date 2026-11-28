@@ -630,18 +630,18 @@ it("persists ok measurements, rolls expired windows, survives unloaded plugins, 
     });
     expect(await bb.storage.kv.get("measurements:v1")).toHaveProperty(savedKey);
 
-    // 2. Once loaded, even if refresh fails (429), hydrated measurement is shown with expired window rolled to 0%.
+    // 2. Once loaded, hydrated measurement returns immediately (stale-while-revalidate) with expired window rolled to 0%.
     pluginLoaded = true;
-    const afterFailure = await harness.callRpc("getUsage", {
+    const immediate = await harness.callRpc("getUsage", {
       force: false,
       machineIds: ["here"],
       providerId: null,
       maxAgeMs: 60_000,
     });
-    expect(afterFailure).toMatchObject({
+    expect(immediate).toMatchObject({
       machines: [
         {
-          error: "Some usage could not be refreshed.",
+          error: null,
           providers: expect.arrayContaining([
             expect.objectContaining({
               accountId: "local",
@@ -656,6 +656,18 @@ it("persists ok measurements, rolls expired windows, survives unloaded plugins, 
           ]),
         },
       ],
+    });
+    // Background refresh failure is recorded without wiping the saved bars.
+    await vi.waitFor(async () => {
+      const afterBgFailure = await harness.callRpc("getUsage", {
+        force: false,
+        machineIds: ["here"],
+        providerId: null,
+        maxAgeMs: 60_000,
+      });
+      expect(afterBgFailure).toMatchObject({
+        machines: [{ error: "Some usage could not be refreshed." }],
+      });
     });
 
     // 3. Forced reload succeeds natively -> passes skipLocal: true and keeps fresh native 42% (not accounts' stale 99%).

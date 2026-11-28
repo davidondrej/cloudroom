@@ -15,7 +15,7 @@ const ENV_LIMIT = 256_000;
 /** A project's .env files on this Mac, packed like a Cloud thread's copy: base64 of a .tgz. Empty when the folder has
  *  none, or when they are other projects' secrets (#1120), so a copy saved before is replaced; null when there is no folder
  *  or it can't be read, so nothing replaces the loops' saved copy. */
-async function packedEnv(root: string | undefined, repository: string | null): Promise<string | null> {
+export async function packedEnv(root: string | undefined, repository: string | null): Promise<string | null> {
   if (!root) return null;
   if (envRefusal(root, repository)) return "";
   const files = await localFiles(root, "env").catch(() => null);

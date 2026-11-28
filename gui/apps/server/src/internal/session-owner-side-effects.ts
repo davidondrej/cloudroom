@@ -67,6 +67,19 @@ function rememberLostBackgroundTasks(
   return kept;
 }
 
+/** Its "stopped" is only provisional: the same daemon may still report its end. */
+export function isLostBackgroundTask(
+  hostId: string,
+  task: { threadId: string; itemId: string },
+): boolean {
+  return (
+    lostBackgroundTasksByHostId
+      .get(hostId)
+      ?.get(task.threadId)
+      ?.some(({ itemId }) => itemId === task.itemId) ?? false
+  );
+}
+
 /** A job settled while its daemon was away finished after all. */
 export function forgetLostBackgroundTask(threadId: string, itemId: string) {
   for (const lost of lostBackgroundTasksByHostId.values()) {
@@ -267,6 +280,7 @@ export function startRunningTurnDeadlinesAfterRestart(
       startRunningTurnDeadline(deps, hostId);
     }
   }
+  deps.pendingInteractions.resumeResolvingInteractionsAfterRestart();
 }
 
 export function handleHostRemoved(
@@ -316,10 +330,6 @@ function completeDaemonDisconnectGrace(
     return;
   }
 
-  interruptPendingInteractionsForHostThreads(deps, {
-    hostId: args.hostId,
-    reason: DAEMON_DISCONNECTED_PENDING_INTERACTION_REASON,
-  });
   rememberLostBackgroundTasks(
     args.hostId,
     settleDanglingBackgroundTasks(deps, args),
@@ -339,6 +349,10 @@ function completeDaemonActiveWorkDisconnectGrace(
     hostId: args.hostId,
     reason: "host-daemon-restarted",
     cause: "host-connection-lost",
+  });
+  interruptPendingInteractionsForHostThreads(deps, {
+    hostId: args.hostId,
+    reason: DAEMON_DISCONNECTED_PENDING_INTERACTION_REASON,
   });
   rememberLostBackgroundTasks(args.hostId, new Map(), interrupted);
 }

@@ -751,6 +751,11 @@ export function createDesktopBrowserViewManager(
     guardMainFrameNavigation(webContents, isAllowedBrowserUrl);
 
     webContents.setWindowOpenHandler((details) => {
+      // Automation tabs stay in their isolated profile: never bounce URLs into
+      // the user's personal or external browser, or spawn untracked popups.
+      if (entry.profile.kind === "automation") {
+        return { action: "deny" };
+      }
       const opensPopup = details.disposition === "new-window";
       const allowedUrl = opensPopup
         ? isAllowedPopupNavigationUrl(details.url)

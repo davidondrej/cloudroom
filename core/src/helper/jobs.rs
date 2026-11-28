@@ -6,6 +6,7 @@ use super::{base64, hex, home, private_json, text, unhex};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{CStr, c_char};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,8 +26,11 @@ const POST: Duration = Duration::from_secs(60);
 const SCRIPT_TYPES: [&str; 10] = [
     "sh", "bash", "zsh", "py", "js", "mjs", "cjs", "ts", "rb", "pl",
 ];
-// Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
-pub(super) const TEMP_FOLDERS: [&str; 2] = ["/private/tmp", "/private/var/folders"];
+// Read-only commands may create and swap paths here (READ_ONLY: copy staging, their own temp folder, bash's sh-thd-N),
+// so agents can change things in it without asking (in_temp).
+pub(super) const PRIVATE_TMP: &str = "/private/tmp";
+// Why a push into /tmp failed: it runs read-only (as_copy), as in client.py.
+const PUSH_HINT: &[u8] = b"\nCloudroom: a push into /tmp runs read-only, so it can land only in /tmp/cloudroom.NAME. Push there instead, such as `room-cli mac push FILE /tmp/cloudroom.NAME/`, or to a folder outside /tmp.\n";
 const NOT_APPROVED: &str =
     "The user did not approve this command on their Mac. Do not retry it unless they ask you to.";
 const CHANGED: &str = "The folder changed after it was approved, so this command did not run.";
@@ -85,23 +89,17 @@ pub(super) fn disk_path(_: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same folder,
-/// such as other letter case, still counts.
-pub(super) fn in_temp(folder: &Path) -> bool {
+/// Whether a path, or a folder above it, is `tmp` (PRIVATE_TMP). Folders compare by identity, never by name, so /tmp,
+/// other letter case, other Unicode spellings, and links into it all count, as does a path that doesn't exist yet.
+/// Nothing counts where `tmp` doesn't exist (Linux, Windows). Same answer as client.py's in_temp.
+pub(super) fn in_temp(path: &Path, tmp: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let id = |path: &Path| {
         std::fs::metadata(path)
             .ok()
             .map(|info| (info.dev(), info.ino()))
     };
-    let roots: Vec<_> = TEMP_FOLDERS
-        .iter()
-        .filter_map(|root| id(Path::new(root)))
-        .collect();
-    folder.ancestors().any(|path| {
-        TEMP_FOLDERS.iter().any(|root| path == Path::new(root))
-            || id(path).is_some_and(|path| roots.contains(&path))
-    })
+    id(tmp).is_some_and(|tmp| path.ancestors().any(|path| id(path) == Some(tmp)))
 }
 // A push's own tar. macOS's bsdtar refuses `..` and writing through symlinks, even when PATH puts GNU tar first.
 const COPY_TAR: &str = if cfg!(target_os = "macos") {
@@ -125,13 +123,19 @@ const COPY_ACL: &str = if cfg!(target_os = "macos") {
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
 
-// Read-only commands (ADR 0186): no file writes outside temp folders, no signals to other processes, and no tools that
-// drive apps or system settings. Beyond those named tools, they cannot run programs from the writable temp folders, open
-// apps or URLs through Launch Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
+// Read-only commands (ADR 0186): no file writes outside their own temp folder (TEMP, their TMPDIR) and copy staging
+// (/tmp/cloudroom.*, a pull's /tmp/cloudroom-copy-*), so they can't take over other programs' temp files or sockets, like
+// tmux's (#1933). Apple's bash 3.2 ignores TMPDIR for here-documents, so it may also create and remove its own
+// /tmp/sh-thd-N, but never write into one that exists (another program's, while it reads it). bash picks that folder
+// with access(W_OK), which Seatbelt answers with file-write-data on the folder itself, so /private/tmp alone gets that:
+// it can't create, rename or remove anything there, since those check the entry's own path. They can listen on Unix
+// sockets only in their own temp folder. No signals to other processes, and no tools that drive apps or system
+// settings. Beyond those named tools, they cannot run programs from the temp folders, open apps or URLs through Launch
+// Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
 // Nothing they start outlives them (end). They also cannot reach this Mac's own servers and sockets or read Cloudroom's
 // folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works. Seatbelt's
 // localhost misses IPv4-mapped IPv6, so IPv6 is blocked outright and clients fall back to IPv4.
-const READ_ONLY: &str = r##"(version 1)(allow default)(deny file-write*)(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))(deny signal (target others))(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/open") (literal "/usr/bin/shortcuts") (literal "/usr/bin/automator") (literal "/bin/launchctl") (literal "/usr/bin/tccutil") (literal "/usr/bin/defaults"))(deny process-exec (subpath "/private/tmp") (subpath "/private/var/folders"))(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents") (global-name "com.apple.lsd.open") (global-name "com.apple.lsd.openurl") (global-name "com.apple.lsd.modifydb"))(deny appleevent-send)(deny job-creation)(deny user-preference-write)(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))(allow network-outbound (literal "/private/var/run/mDNSResponder"))"##;
+const READ_ONLY: &str = r##"(version 1)(allow default)(deny file-write*)(allow file-write* (subpath (param "TEMP")) (regex #"^/private/tmp/cloudroom\.") (regex #"^/private/tmp/cloudroom-copy-") (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))(allow file-write-create file-write-unlink (regex #"^/private/tmp/sh-thd-[0-9]+$"))(allow file-write-data (literal "/private/tmp"))(deny signal (target others))(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/open") (literal "/usr/bin/shortcuts") (literal "/usr/bin/automator") (literal "/bin/launchctl") (literal "/usr/bin/tccutil") (literal "/usr/bin/defaults"))(deny process-exec (subpath "/private/tmp") (subpath "/private/var/folders"))(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents") (global-name "com.apple.lsd.open") (global-name "com.apple.lsd.openurl") (global-name "com.apple.lsd.modifydb"))(deny appleevent-send)(deny job-creation)(deny user-preference-write)(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))(allow network-outbound (literal "/private/var/run/mDNSResponder"))(deny network-bind (local unix-socket (path-regex #"^/")))(allow network-bind (subpath (param "TEMP")))"##;
 // Cloudroom's own tools stay readable in its hidden data folder.
 pub(super) const READ_ONLY_TOOLS: &str = r#"(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))"#;
 // Older machine installers kept the relay key in a temp file, and an interrupted install left it behind.
@@ -395,7 +399,7 @@ pub(super) fn popup_text(job: &Value, home: &Path) -> String {
     if ["/tmp", "/var/folders", "TMPDIR"]
         .iter()
         .any(|word| raw.contains(word))
-        || in_temp(Path::new(cwd))
+        || in_temp(Path::new(cwd), Path::new(PRIVATE_TMP))
     {
         warnings += "Warning: the command uses files in a temp folder. Cloud agents can change those without asking, and they are not shown.\n\n";
     }
@@ -444,7 +448,7 @@ pub(super) fn popup_text(job: &Value, home: &Path) -> String {
 pub(super) fn copy_command(
     copy: &Value,
     home: &Path,
-    temp_folders: &[&str],
+    tmp: &Path,
 ) -> std::result::Result<(String, String, bool, bool), ()> {
     let (Some(name), Some(to)) = (copy["name"].as_str(), copy["to"].as_str()) else {
         return Err(());
@@ -506,9 +510,8 @@ pub(super) fn copy_command(
     } else {
         format!("{folder}/{last}")
     };
-    let temp = temp_folders
-        .iter()
-        .any(|root| folder == *root || folder.starts_with(&format!("{root}/")));
+    // Anywhere in /tmp, whatever its name (#1933): read-only commands can swap paths there.
+    let temp = in_temp(Path::new(&place), tmp);
     let taken = r#"{ [ ! -e "$to" ] && [ ! -L "$to" ] || taken; }"#;
     let mut command = format!(
         "b={}; n={}; to={}; s={}; ",
@@ -522,7 +525,12 @@ pub(super) fn copy_command(
     if !inside {
         command += &format!("{taken} || exit 1; ");
     }
-    command += r#"mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; "#;
+    // One that runs read-only unpacks where its sandbox may write (READ_ONLY's /tmp/cloudroom.*). Others use a hidden
+    // name read-only commands can't write.
+    let scratch = if temp { "cloudroom." } else { ".cloudroom." };
+    command += &format!(
+        r#"mkdir -p -- "$b" && x=$(mktemp -d "$b/{scratch}XXXXXX") && mkdir -- "$x/i" || exit 1; "#
+    );
     command +=
         r#"clean() { find "$x" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$x" $s; }; "#;
     command += "trap 'clean; exit 1' HUP INT TERM; ";
@@ -575,11 +583,11 @@ pub(super) fn copy_command(
     Ok((command, place, inside, temp))
 }
 
-/// A push runs only the command built here, from the home folder, and always counts as a change. One into a temp
-/// folder also runs read-only, since agents can swap paths there. Why it can't run, or None.
-pub(super) fn as_copy(job: &mut Value, home: &Path, temp_folders: &[&str]) -> Option<String> {
+/// A push runs only the command built here, from the home folder, and always counts as a change. One into `tmp`
+/// (PRIVATE_TMP) also runs read-only, since agents can swap paths there. Why it can't run, or None.
+pub(super) fn as_copy(job: &mut Value, home: &Path, tmp: &Path) -> Option<String> {
     let copy = job.get("copy").filter(|copy| !copy.is_null())?.clone();
-    let Ok((command, place, inside, temp)) = copy_command(&copy, home, temp_folders) else {
+    let Ok((command, place, inside, temp)) = copy_command(&copy, home, tmp) else {
         return Some(BAD_COPY.into());
     };
     job["command"] = json!(command);
@@ -645,15 +653,17 @@ fn hidden_folders(data: &Path, home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     )
 }
 
-/// sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens. The sandbox
-/// denies the `marks`, names no Mach service has, so `end` can find all the command started.
-pub(super) fn read_only(data: &Path, home: &Path, marks: &[&str]) -> Vec<String> {
+/// sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens, and `temp` the
+/// command's own temp folder (private_temp). The sandbox denies the `marks`, names no Mach service has, so `end` can
+/// find all the command started.
+pub(super) fn read_only(data: &Path, home: &Path, temp: &Path, marks: &[&str]) -> Vec<String> {
     let data = realpath(data); // Seatbelt matches real paths.
     let (folders, machines) = hidden_folders(&data, home);
     let mut params = vec![
         ("DATA".to_owned(), data.clone()),
         ("DATA_BIN".into(), data.join("bin")),
         ("DATA_HARNESS".into(), data.join("browser-harness")),
+        ("TEMP".into(), temp.to_owned()),
     ];
     params.extend(
         folders
@@ -694,6 +704,23 @@ pub(super) fn read_only(data: &Path, home: &Path, marks: &[&str]) -> Vec<String>
     }
     args.extend(["-p".into(), profile]);
     args
+}
+
+/// A read-only command's own new temp folder, its TMPDIR, with zsh's TMPPREFIX there too, since zsh ignores TMPDIR for
+/// here-documents. It is the only folder the command may write besides copy staging (READ_ONLY). Real path, for
+/// Seatbelt; the caller removes it once the command ends.
+fn private_temp() -> std::io::Result<PathBuf> {
+    let temp =
+        realpath(Path::new("/tmp")).join(format!("cloudroom-tmp.{}", &super::uuid4()?[..16]));
+    std::fs::DirBuilder::new().mode(0o700).create(&temp)?;
+    Ok(temp)
+}
+
+/// Removes a read-only command's temp folder once it ends. remove_dir_all never follows links the command left there.
+async fn remove_temp(temp: Option<PathBuf>) {
+    if let Some(temp) = temp {
+        let _ = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(temp)).await;
+    }
 }
 
 #[repr(C)]
@@ -1446,7 +1473,7 @@ impl Jobs {
             return closed;
         }
         // After Off and the key list, so a sandbox without Mac access can't learn which Mac folders exist from a push.
-        if let Some(unusable) = as_copy(job, &home(), &TEMP_FOLDERS) {
+        if let Some(unusable) = as_copy(job, &home(), Path::new(PRIVATE_TMP)) {
             return Some(unusable);
         }
         let write = truthy(&job["write"]);
@@ -1644,7 +1671,7 @@ impl Jobs {
             refused.is_none(),
         );
         let full = level(&self.enabled().unwrap_or(Value::Null)) == "full";
-        // A push into a temp folder runs read-only even once approved, since agents can swap paths there.
+        // A push into /tmp runs read-only even once approved, since agents can swap paths there (as_copy).
         let mut sandboxed =
             refused.is_none() && (!truthy(&job["write"]) || truthy(&job["sandbox"])) && !full;
         if sandboxed && !self.containable().await {
@@ -1696,6 +1723,12 @@ impl Jobs {
         // Never the job's ID, which a sandbox can pick.
         let mark = match sandboxed.then(super::uuid4).transpose() {
             Ok(token) => token.map(|token| format!("{}.{}", self.boot, &token[..16])),
+            Err(error) => {
+                return json!({"state": "done", "code": 127, "stdout": "", "stderr": hex(error.to_string().as_bytes()), "truncated": false});
+            }
+        };
+        let temp = match mark.as_ref().map(|_| private_temp()).transpose() {
+            Ok(temp) => temp,
             Err(error) => {
                 return json!({"state": "done", "code": 127, "stdout": "", "stderr": hex(error.to_string().as_bytes()), "truncated": false});
             }
@@ -1760,9 +1793,11 @@ impl Jobs {
                 )
             };
         }
-        let mut argv = match &mark {
-            Some(mark) => read_only(data, &home(), &[&self.mark, &self.boot, mark]),
-            None => Vec::new(),
+        let mut argv = match (&mark, &temp) {
+            (Some(mark), Some(temp)) => {
+                read_only(data, &home(), temp, &[&self.mark, &self.boot, mark])
+            }
+            _ => Vec::new(),
         };
         argv.extend([login, "-lc".into(), path + &line]);
         let folder = home().join(expanduser(
@@ -1780,6 +1815,7 @@ impl Jobs {
                     serde_json::from_value(job["approvedFolder"].clone()).unwrap_or_default(),
                 ))
         {
+            remove_temp(temp).await;
             return json!({"state": "done", "code": 126, "stdout": "", "stderr": hex(CHANGED.as_bytes()), "truncated": false});
         }
         let mut result =
@@ -1804,7 +1840,13 @@ impl Jobs {
                 // command too, as in client.py.
                 denied(UNWANTED)
             } else {
-                let spawned = command(&argv[0])
+                let mut spawn = command(&argv[0]);
+                if let Some(temp) = &temp {
+                    spawn
+                        .env("TMPDIR", format!("{}/", temp.display()))
+                        .env("TMPPREFIX", temp.join("zsh"));
+                }
+                let spawned = spawn
                     .args(&argv[1..])
                     .current_dir(&folder)
                     .stdin(std::process::Stdio::piped())
@@ -1830,6 +1872,7 @@ impl Jobs {
         let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
+                remove_temp(temp).await;
                 result["code"] = json!(if error.kind() == std::io::ErrorKind::PermissionDenied {
                     126
                 } else {
@@ -1904,6 +1947,7 @@ impl Jobs {
                 }
             }
         }
+        remove_temp(temp).await;
         let (out, mut err) = (
             stdout.lock().unwrap().take().unwrap_or_default(),
             stderr.lock().unwrap().take().unwrap_or_default(),
@@ -1919,10 +1963,12 @@ impl Jobs {
                 .any(|sign| contains(&lower, sign))
             && !contains(&lower, b"deadlock avoided")
         {
-            err.extend_from_slice(if read_only {
-                b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files.\n"
+            err.extend_from_slice(if truthy(&job["copy"]) {
+                PUSH_HINT
+            } else if read_only {
+                b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files. They may write only in $TMPDIR, which is removed when the command ends, and in /tmp/cloudroom.NAME, which keeps files to pull later. macOS mktemp ignores $TMPDIR unless given a path: use `mktemp -d -p \"$TMPDIR\"` or `mktemp \"$TMPDIR/x.XXXXXX\"`.\n"
             } else {
-                b"\nCloudroom: this ran read-only, without this Mac's local servers, sockets, or Cloudroom's files. To change the Mac or reach them, rerun with `room-cli mac run --write ...`; the user approves it first.\n"
+                b"\nCloudroom: this ran read-only, without this Mac's local servers, sockets, or Cloudroom's files. It may write only in $TMPDIR, which is removed when the command ends, and in /tmp/cloudroom.NAME, which keeps files to pull later. macOS mktemp ignores $TMPDIR unless given a path: use `mktemp -d -p \"$TMPDIR\"` or `mktemp \"$TMPDIR/x.XXXXXX\"`. To change the Mac or reach them, rerun with `room-cli mac run --write ...`; the user approves it first.\n"
             });
         }
         // Reading an iCloud file that "Optimize Mac Storage" moved off the Mac downloads it, which the sandbox blocks (#144).

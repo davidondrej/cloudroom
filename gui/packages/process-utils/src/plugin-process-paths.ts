@@ -106,8 +106,9 @@ function ownPrivateDir(realDataDir: string, name: string, create = true): string
 // plugins. Nothing less trusted than Cloudroom may write that folder, so it is
 // never the OS temp folder. Other accounts can write Linux's /tmp. Code that
 // runs as this account in a sandbox can write the account's own temp folder:
-// macOS Read-only Mac commands may write all of /private/var/folders, and
-// Codex's workspace-write sandbox may write $TMPDIR (%TEMP% on Windows). They
+// macOS Read-only Mac commands may write /tmp/cloudroom.* (all of
+// /private/var/folders and /private/tmp before #1933), and Codex's
+// workspace-write sandbox may write $TMPDIR (%TEMP% on Windows). They
 // cannot write Cloudroom's data folder, so the folder goes in `.cloudroom-tmp`
 // under the plugin's data folder. Its real path is returned, so no symlink in
 // it can be swapped.

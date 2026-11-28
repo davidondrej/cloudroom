@@ -11,13 +11,12 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
-import semverCompare from "semver/functions/compare.js";
-import minVersion from "semver/ranges/min-version.js";
 import {
   derivePluginId,
   PLUGIN_SDK_NPM_VERSION,
   PLUGIN_SDK_VERSION,
 } from "@cloudroom/domain";
+import { compare as semverCompare, minVersion } from "@cloudroom/domain/semver";
 import { loadPluginSdkDeclarations } from "./plugin-sdk-dts.js";
 import {
   PLUGIN_SHIMMED_TYPE_DEPENDENCIES,

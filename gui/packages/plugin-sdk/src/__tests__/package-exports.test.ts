@@ -24,7 +24,12 @@ describe("packed plugin SDK exports", () => {
     expect(packageJson.private).not.toBe(true);
     expect(packageJson.dependencies.zod).toBe("^4.6.5");
     expect(packageJson.peerDependencies.zod).toBeUndefined();
-    expect(packageJson.files).toEqual(["bundled-types", "dist", "README.md"]);
+    expect(packageJson.files).toEqual([
+      "bundled-types",
+      "dist",
+      "NOTICE",
+      "README.md",
+    ]);
     expect(Object.keys(packageJson.exports)).toEqual([
       ".",
       "./provider-bridge",

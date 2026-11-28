@@ -558,12 +558,18 @@ class MacJobTests(unittest.TestCase):
                 plistlib.dumps({'EnvironmentVariables': {'BB_DATA_DIR': str(home / 'old-machine')}}))
             (agents / 'app.getbb.host-daemon.broken.plist').write_text('<?xml version="1.0"?><plist><dict>')
             with mock.patch.dict(os.environ, {'HOME': str(home)}):
-                args = preview.read_only(data, 'helper.read-only', 'helper.read-only.job')
+                args = preview.read_only(data, home / 'temp', 'helper.read-only', 'helper.read-only.job')
         params = dict(args[n + 1].split('=', 1) for n, arg in enumerate(args) if arg == '-D')
         group = lambda name: {Path(path) for key, path in params.items() if key.startswith(name)}
         self.assertEqual(group('FOLDER_'), {data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev'})
         self.assertEqual(group('MACHINE_'), {machines, machines / 'pro.cloudroom.run', disk / 'air', home / 'old-machine'})
         profile = args[args.index('-p') + 1]
+        # #1933: writes only in its own temp folder and copy staging, not other programs' temp files or sockets.
+        self.assertEqual(params['TEMP'], str(home / 'temp'))
+        self.assertIn('(allow file-write* (subpath (param "TEMP")) (regex #"^/private/tmp/cloudroom\\.") (regex #"^/private/tmp/cloudroom-copy-") (literal "/dev/null")', profile)
+        # bash 3.2's own here-documents in /tmp, never written into once they exist; Unix listening only in its own folder.
+        self.assertIn('(allow file-write-create file-write-unlink (regex #"^/private/tmp/sh-thd-[0-9]+$"))(allow file-write-data (literal "/private/tmp"))', profile)
+        self.assertIn('(deny network-bind (local unix-socket (path-regex #"^/")))(allow network-bind (subpath (param "TEMP")))', profile)
         self.assertTrue(all(f'(subpath (param "{key}"))' in profile for key in params if key.startswith(('FOLDER_', 'MACHINE_'))))
         # The tools exception reopens only this app's tools. Machine installs and old key copies come last, so neither the
         # tools nor the temp-folder write exception can reopen them, and they can't be rewritten either.
@@ -582,7 +588,8 @@ class MacJobTests(unittest.TestCase):
         # theirs (dev servers), and other sandboxes and other helpers' commands run on. Linux has no macOS sandbox, so
         # there the marks travel in an environment variable.
         mac, started = sys.platform == 'darwin', []
-        with tempfile.TemporaryDirectory(dir='/tmp') as folder, tempfile.TemporaryDirectory(dir='/tmp') as beats, contextlib.ExitStack() as stack:
+        # Beats live in copy staging, the only shared place read-only commands may write (#1933).
+        with tempfile.TemporaryDirectory(dir='/tmp') as folder, tempfile.TemporaryDirectory(dir='/tmp', prefix='cloudroom.') as beats, contextlib.ExitStack() as stack:
             folder, beats = Path(os.path.realpath(folder)), Path(os.path.realpath(beats))
             if not mac:
                 def covered(pid, names):
@@ -593,7 +600,7 @@ class MacJobTests(unittest.TestCase):
                     return False
                 listing = lambda: [int(entry) for entry in os.listdir('/proc') if entry.isdigit()]
                 stack.enter_context(mock.patch.object(preview, 'sandbox_checks', lambda: (listing, covered)))
-                stack.enter_context(mock.patch.object(preview, 'read_only', lambda data, *marks: ['/usr/bin/env', 'CLOUDROOM_TEST_MARKS=' + ' '.join(marks)]))
+                stack.enter_context(mock.patch.object(preview, 'read_only', lambda data, temp, *marks: ['/usr/bin/env', 'CLOUDROOM_TEST_MARKS=' + ' '.join(marks)]))
                 stack.enter_context(mock.patch.object(preview.MacJobs, 'refusal', lambda *_: None))
                 stack.enter_context(mock.patch.object(preview.MacJobs, 'containable', lambda *_: True))
             stack.enter_context(mock.patch.object(preview, 'review', lambda *_: None))
@@ -638,7 +645,7 @@ class MacJobTests(unittest.TestCase):
                 # command (a dev build), and on a Mac another sandbox.
                 other = f"perl -e '{loop}' {beats}/"
                 for marks, name in (((jobs.mark, jobs.mark + '.0', jobs.mark + '.0.job'), 'old'), (('other.read-only', 'other.read-only.job'), 'other')):
-                    started.append(subprocess.Popen([*preview.read_only(folder, *marks), 'sh', '-c', other + name]))
+                    started.append(subprocess.Popen([*preview.read_only(folder, beats, *marks), 'sh', '-c', other + name]))
                 if mac:
                     started.append(subprocess.Popen(['/usr/bin/sandbox-exec', '-p', '(version 1)(allow default)(deny mach-lookup)', 'sh', '-c', other + 'denies-all']))
                 # Full keeps what it leaves running; read-only ends it all with the command.
@@ -646,6 +653,10 @@ class MacJobTests(unittest.TestCase):
                 self.assertEqual(running('full-group', 'full-left'), [True, True])
                 self.assertEqual(run(leaves('read', 'chain')), 0)
                 self.assertEqual(running('read-group', 'read-left', 'read-chain'), [False] * 3)
+                # #1933: each read-only command writes in its own temp folder, removed once it ends.
+                self.assertEqual(run(f'touch "$TMPDIR/x" && echo "$TMPDIR" > {beats}/temp'), 0)
+                temp = (beats / 'temp').read_text().strip()
+                self.assertTrue(temp.startswith(f"{Path('/tmp').resolve()}/cloudroom-tmp.") and not os.path.exists(temp))
                 # A running read-only command survives another one's end and the check that ends what earlier runs left.
                 first = start('first')
                 self.assertEqual(run('true'), 0)
@@ -710,7 +721,7 @@ class MacJobTests(unittest.TestCase):
         jobs, job = preview.MacJobs(Path('/unused')), {'id': 'job', 'command': 'make', 'write': True,
                                                      'cwd': '~/code/' + './' * 100 + '../' * 30 + str(home).lstrip('/') + '/temp/b'}
         jobs.wanted = {'core'}
-        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'TEMP_FOLDERS', (str(home / 'temp-link'),)), \
+        with mock.patch.dict(os.environ, HOME=str(home)), mock.patch.object(preview, 'PRIVATE_TMP', str(home / 'temp-link')), \
                 mock.patch.object(preview.sys, 'platform', 'darwin'), mock.patch.object(preview.subprocess, 'Popen', popup), \
                 mock.patch.object(jobs, 'closed', return_value=('ask', None)), mock.patch.object(preview, 'mac_level', return_value='ask'):
             self.assertIsNone(jobs.refusal(SimpleNamespace(key='core'), job))
@@ -889,16 +900,19 @@ class MacJobTests(unittest.TestCase):
                 mock.patch.object(preview.subprocess, 'Popen', Popup):
             real, jobs, core = os.path.realpath(folder), preview.MacJobs(Path('/unused')), SimpleNamespace(key='core')
             copy = {'id': 'copy', 'command': 'touch ~/.zshrc', 'cwd': '/', 'stdin': '1f8b', 'copy': {'name': 'a\nb', 'to': '~'}}
-            with mock.patch.object(preview, 'TEMP_FOLDERS', ()):  # On macOS this test's folder is a temp folder.
+            with mock.patch.object(preview, 'PRIVATE_TMP', ''):  # On macOS this test's folder can be in /tmp.
                 self.assertIsNone(preview.as_copy(copy))
             self.assertEqual((copy['cwd'], copy['write'], copy['sandbox']), (None, True, False))
             self.assertTrue(copy['command'].startswith(f"b={real}; n='a\nb'; to='{real}/a\nb'; s=; "))
             self.assertTrue(jobs.approve(core, copy))
             self.assertTrue(jobs.approve(core, {'id': 'raw', 'command': 'cat /tmp/x/* | tar -xzf - -C ~', 'write': True, 'stdin': '1f8b00'}))
-            with mock.patch.object(preview, 'TEMP_FOLDERS', (real,)):
+            with mock.patch.object(preview, 'PRIVATE_TMP', real):
                 temp = {'copy': {'name': 'x', 'to': folder + '/'}}
                 self.assertIsNone(preview.as_copy(temp))
                 self.assertTrue(temp['write'] and temp['sandbox'])
+                self.assertIn('mktemp -d "$b/cloudroom.XXXXXX"', temp['command'])  # Where READ_ONLY lets it unpack (#1933).
+                odd = {'copy': {'name': 'x', 'to': folder + '/ſh-thd-1/new/'}}  # By identity, never by name (#1933).
+                self.assertTrue(preview.as_copy(odd) is None and odd['sandbox'])
             self.assertEqual(preview.as_copy({'copy': {'name': 'x', 'to': '~', 'staged': '/tmp/cloudroom.a/..'}}),
                              'This copy has a name or place the Mac cannot use, so nothing was copied.')
         self.assertEqual(shown[0], 'A cloud agent wants to copy a file or folder to your Mac.\n\nCopy to: ~/a\\nb\n\nOnly this one item is copied. '

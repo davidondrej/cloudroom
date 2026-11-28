@@ -45,14 +45,38 @@ const referralsSchema = z.object({
 
 export type ReferralsSummary = z.infer<typeof referralsSchema>;
 
-const REFERRALS_KEY = ["cloudroom-referrals"] as const;
+export const REFERRALS_KEY = ["cloudroom-referrals"] as const;
 
 export const autoCreditWrappedAtom = createBooleanPreferenceAtom(
   "cloudroom.referrals.autoCreditWrapped",
   true,
 );
 
-async function requestReferrals(method: "GET" | "POST", signal?: AbortSignal) {
+/** Only a real `https://go.cloudroom.dev/<slug>` link counts as an instant referral link (never the Dub portal URL). */
+export function isAffiliateShortLink(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname === "go.cloudroom.dev" && url.pathname.length > 1;
+  } catch {
+    return false;
+  }
+}
+
+export class ReferralsRequestError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+  constructor(status: number, code: string | null, message: string) {
+    super(message);
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export const isAffiliateInactiveError = (error: unknown): error is ReferralsRequestError =>
+  error instanceof ReferralsRequestError && error.status === 403 && error.code === "affiliate_inactive";
+
+export async function requestReferrals(method: "GET" | "POST", signal?: AbortSignal) {
   const response = await fetchWithAppSurface("/api/v1/cloudroom/account/referrals", {
     method,
     signal,
@@ -60,12 +84,14 @@ async function requestReferrals(method: "GET" | "POST", signal?: AbortSignal) {
       ? { headers: { "Content-Type": "application/json" }, body: "{}" }
       : {}),
   });
-  const value = (await response.json().catch(() => null)) as unknown;
+  const value = (await response.json().catch(() => null)) as { message?: unknown; error?: unknown; code?: unknown } | null;
   if (!response.ok) {
-    throw new Error(
-      (value as { message?: string } | null)?.message ??
-        "Referrals are unavailable right now.",
-    );
+    const message =
+      (typeof value?.message === "string" && value.message.trim()) ||
+      (typeof value?.error === "string" && value.error.trim()) ||
+      "Referrals are unavailable right now.";
+    const code = typeof value?.code === "string" ? value.code : null;
+    throw new ReferralsRequestError(response.status, code, message);
   }
   return referralsSchema.parse(value);
 }
@@ -152,6 +178,11 @@ export function ReferralsSettingsSection() {
     mutationFn: () => requestReferrals("POST"),
     onSuccess: (summary) => {
       queryClient.setQueryData([...REFERRALS_KEY, accountId], summary);
+      if (summary.available && isAffiliateShortLink(summary.link)) {
+        void copyToClipboardWithToast(summary.link, { successMessage: "Referral link copied" });
+      } else if (!summary.available || !summary.link) {
+        openUrlInExternalBrowser(PARTNER_URL);
+      }
     },
   });
 
@@ -200,7 +231,15 @@ export function ReferralsSettingsSection() {
   const signupsCount = data?.signupsCount ?? 0;
   const recent = data?.recent ?? [];
 
+  const inactiveError = isAffiliateInactiveError(enroll.error)
+    ? enroll.error
+    : isAffiliateInactiveError(query.error)
+      ? query.error
+      : null;
+  const actionError = inactiveError ?? enroll.error;
+
   const handleGetLink = () => {
+    if (inactiveError) return;
     if (query.isError || data?.available === false) {
       openUrlInExternalBrowser(PARTNER_URL);
       return;
@@ -262,25 +301,30 @@ export function ReferralsSettingsSection() {
             <p className="mt-0.5 text-xs text-subtle-foreground/75">
               No application form. Open Dub only later when you want to cash out ($50 min).
             </p>
-            {enroll.error ? (
+            {actionError ? (
               <p role="alert" className="mt-2 text-xs text-destructive">
-                {enroll.error instanceof Error
-                  ? enroll.error.message
-                  : "Could not create your referral link."}{" "}
-                <button
-                  type="button"
-                  className="underline underline-offset-2 hover:text-foreground"
-                  onClick={() => openUrlInExternalBrowser(PARTNER_URL)}
-                >
-                  Open Dub instead
-                </button>
+                {actionError instanceof Error
+                  ? actionError.message
+                  : "Could not create your referral link."}
+                {!inactiveError ? (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="underline underline-offset-2 hover:text-foreground"
+                      onClick={() => openUrlInExternalBrowser(PARTNER_URL)}
+                    >
+                      Open Dub instead
+                    </button>
+                  </>
+                ) : null}
               </p>
             ) : null}
           </div>
           <Button
             type="button"
             size="sm"
-            disabled={enroll.isPending || query.isPending}
+            disabled={enroll.isPending || query.isPending || Boolean(inactiveError)}
             className="h-8 shrink-0 gap-1.5 px-3.5 text-xs"
             onClick={handleGetLink}
           >

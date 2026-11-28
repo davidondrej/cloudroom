@@ -19,6 +19,8 @@ export type CloudroomThreadStatus = { model: string; reasoning: string; error?: 
 /** A thread's Cloud Credits from the last 7 days, split by what used them (docs/scopes/thread-purpose.md). `credits` is
  *  null when they can't be known yet; `pending`: billed, but the split isn't ready; `partial`: the thread is older than 7 days. */
 export type CloudroomThreadCredits = { credits: number | null; pending: boolean; awakeMinutes: number; partial: boolean; rows: { name: string; credits: number; ms: number | null; rest?: true }[] };
+/** `room-cli usage`'s website answer (web/lib/data.ts usageAnswer). Null plan: billing is off; null credits: still counting. */
+export type CloudroomUsage = { plan: string | null; credits?: number | null; credits_limit?: number; extra_credits?: number; text?: string; history?: unknown };
 
 export interface CloudroomStatus {
   storage?: CloudroomStorage | null;
@@ -420,6 +422,8 @@ export interface CloudroomArea {
    *  say why its start or messages aren't going through yet (older apps send neither); `waiting` is the website's
    *  words while its sandbox's server restarts or is full. */
   threadStatus(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadStatus | null>;
+  /** `room-cli usage`: the account's Cloud Credits and, with a view (days, threads, or a thread ID), the last 7 days' `text`. */
+  usage(view?: string): Promise<CloudroomUsage>;
   /** One website read per thread a minute at most (the app server caches it). */
   threadCredits(threadId: string, signal?: AbortSignal): Promise<CloudroomThreadCredits>;
   retryStart(threadId: string): Promise<void>;
@@ -469,8 +473,6 @@ export interface CloudroomArea {
   connectAccount(): Promise<{ accountId: string | null; blocked?: string }>;
   /** Registers this Mac with Cloudroom Connect on cloudroom.run and returns its tunnel credential. */
   connectRegister(): Promise<CloudroomConnectRegistration>;
-  /** Creates or fetches this account's instant affiliate referral link (`go.cloudroom.dev/...`), or falls back to Dub's portal. */
-  affiliateLink(): Promise<{ url: string; instant: boolean }>;
 }
 
 export interface ThreadShare {
@@ -578,6 +580,7 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     runOnVm: (input) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/vm/run`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) })) as Promise<{ code: number | null; stdout: string; stderr: string; truncated: boolean }>,
     logout: () => transport.readVoid(request("/logout", {})),
     threadStatus: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}`, { signal })) as Promise<CloudroomThreadStatus | null>,
+    usage: (view) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/account/usage${view ? `?view=${encodeURIComponent(view)}` : ""}`)) as Promise<CloudroomUsage>,
     threadCredits: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/credits`, { signal })) as Promise<CloudroomThreadCredits>,
     threadWorkspace: (threadId, signal) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/workspace`, { signal })) as Promise<CloudroomThreadWorkspace | null>,
     teleport: (threadId, action = "start", choice) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/teleport`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, ...choice }) })) as Promise<TeleportProgress>,
@@ -603,7 +606,6 @@ export function createCloudroomArea({ transport }: CreateSdkAreaArgs): Cloudroom
     continueShare: (link) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/shares/continue`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ link }) })) as Promise<{ threadId: string; projectId: string }>,
     connectAccount: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`)) as Promise<{ accountId: string | null; blocked?: string }>,
     connectRegister: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/connect`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<CloudroomConnectRegistration>,
-    affiliateLink: () => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/affiliate`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<{ url: string; instant: boolean }>,
     retryStart: (threadId) => transport.readVoid(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/retry-start`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })),
     clearDisk: (threadId) => transport.readJson(transport.fetch(`${transport.baseUrl}/api/v1/cloudroom/threads/${encodeURIComponent(threadId)}/clear-disk`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" })) as Promise<{ freedBytes: number }>,
   };

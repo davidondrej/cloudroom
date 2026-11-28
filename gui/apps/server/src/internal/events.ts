@@ -58,7 +58,10 @@ import { applyLoggedThreadLifecycleEvent } from "../services/threads/lifecycle-o
 import { loadFailedTurn } from "../services/threads/turn-failed.js";
 import { applyTurnCompletedEvent } from "./turn-completed-events.js";
 import { settleCompactFollowUp } from "../services/threads/compact-follow-up.js";
-import { forgetLostBackgroundTask } from "./session-owner-side-effects.js";
+import {
+  forgetLostBackgroundTask,
+  isLostBackgroundTask,
+} from "./session-owner-side-effects.js";
 import {
   getInactiveSessionLogFields,
   requireAuthenticatedDaemonSession,
@@ -1124,7 +1127,14 @@ export function registerInternalEventRoutes(app: Hono, deps: AppDeps): void {
       let appendResult: AppendDaemonEventsResult;
       try {
         appendResult = deps.db.transaction(
-          (tx) => appendDaemonEventsInTransaction(tx, eventInputs),
+          (tx) =>
+            appendDaemonEventsInTransaction(
+              tx,
+              eventInputs,
+              (input) =>
+                input.type === "item/backgroundTask/completed" &&
+                isLostBackgroundTask(session.hostId, input),
+            ),
           { behavior: "immediate" },
         );
       } catch (error) {

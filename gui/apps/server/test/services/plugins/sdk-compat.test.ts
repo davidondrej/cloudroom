@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import { ROOM_APP_COMPAT_VERSION, PLUGIN_SDK_VERSION } from "@cloudroom/domain";
 import {
   roomCompatAppVersion,
@@ -15,8 +15,9 @@ describe("isPluginSdkRangeSatisfied", () => {
   });
 
   it("rejects a floor above the running SDK", () => {
-    const ahead = semver.inc(PLUGIN_SDK_VERSION, "minor");
-    if (ahead === null) throw new Error("cannot increment SDK version");
+    const sdk = semver.parse(PLUGIN_SDK_VERSION);
+    if (sdk === null) throw new Error("cannot parse SDK version");
+    const ahead = `${sdk.major}.${sdk.minor + 1}.0`;
     expect(isPluginSdkRangeSatisfied(`>=${ahead}`)).toBe(false);
     expect(isPluginSdkRangeSatisfied(`^${ahead}`)).toBe(false);
   });

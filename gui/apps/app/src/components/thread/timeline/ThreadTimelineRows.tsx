@@ -2058,13 +2058,9 @@ function TimelineRowItemWrapper({
     <div
       ref={composedRef}
       data-timeline-row-id={row.id}
+      data-timeline-row-seq={row.sourceSeqStart}
       data-timeline-window-key={row.id}
       data-index={windowedState.itemIndex}
-      data-timeline-windowed-realized={
-        windowedState.windowingEnabled
-          ? String(windowedState.isRealized)
-          : undefined
-      }
       className={
         isTopLevel && !windowedState.windowingEnabled
           ? TOP_LEVEL_TIMELINE_ROW_INTRINSIC_SIZE_CLASS_NAME
@@ -2224,18 +2220,11 @@ function TimelineRowsList({
                     ref={windowedState.itemRef}
                     data-index={windowedState.itemIndex}
                     data-timeline-window-key={`divider:${item.id}`}
-                    data-timeline-windowed-realized={
-                      windowedState.windowingEnabled
-                        ? String(windowedState.isRealized)
-                        : undefined
-                    }
                     style={windowedState.itemStyle}
                   >
-                    {windowedState.isRealized ? (
-                      <TimelineUnreadDivider
-                        autoScroll={unreadDividerAutoScroll}
-                      />
-                    ) : null}
+                    <TimelineUnreadDivider
+                      autoScroll={unreadDividerAutoScroll}
+                    />
                   </div>
                 );
               }
@@ -2247,18 +2236,16 @@ function TimelineRowsList({
                     spacing={spacing}
                     windowedState={windowedState}
                   >
-                    {windowedState.isRealized ? (
-                      <TimelineWarningGroup
-                        rows={item.rows}
-                        rowProps={{
-                          activeLatestBundleId,
-                          compactActivityIntents,
-                          scopeActive,
-                          showAssistantMessageActions,
-                          spacing,
-                        }}
-                      />
-                    ) : null}
+                    <TimelineWarningGroup
+                      rows={item.rows}
+                      rowProps={{
+                        activeLatestBundleId,
+                        compactActivityIntents,
+                        scopeActive,
+                        showAssistantMessageActions,
+                        spacing,
+                      }}
+                    />
                   </TimelineRowItemWrapper>
                 );
               }
@@ -2269,16 +2256,14 @@ function TimelineRowsList({
                   spacing={spacing}
                   windowedState={windowedState}
                 >
-                  {windowedState.isRealized ? (
-                    <MemoizedTimelineRowView
-                      activeLatestBundleId={activeLatestBundleId}
-                      row={item.row}
-                      scopeActive={scopeActive}
-                      showAssistantMessageActions={showAssistantMessageActions}
-                      spacing={spacing}
-                      compactActivityIntents={compactActivityIntents}
-                    />
-                  ) : null}
+                  <MemoizedTimelineRowView
+                    activeLatestBundleId={activeLatestBundleId}
+                    row={item.row}
+                    scopeActive={scopeActive}
+                    showAssistantMessageActions={showAssistantMessageActions}
+                    spacing={spacing}
+                    compactActivityIntents={compactActivityIntents}
+                  />
                 </TimelineRowItemWrapper>
               );
             }}

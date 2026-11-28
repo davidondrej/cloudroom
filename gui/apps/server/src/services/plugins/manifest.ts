@@ -1,6 +1,6 @@
 import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import {
   derivePluginId,
   isCodeThemeFilePath,

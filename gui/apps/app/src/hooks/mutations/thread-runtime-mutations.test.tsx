@@ -481,4 +481,74 @@ describe("thread runtime mutations", () => {
         ?.map((queuedMessage) => queuedMessage.id),
     ).toEqual(["qmsg-2"]);
   });
+
+  it("serializes overlapping sends in order and adopts a newer model switch before dispatch", async () => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    const order: string[] = [];
+    let releaseFirstSend: (() => void) | undefined;
+    let releaseSwitch: (() => void) | undefined;
+
+    vi.mocked(sdk.threads.send).mockImplementation(async (req) => {
+      const text = req.input[0]?.type === "text" ? req.input[0].text : "";
+      order.push(`${text}:${req.model ?? ""}`);
+      if (text === "first") {
+        await new Promise<void>((resolve) => {
+          releaseFirstSend = resolve;
+        });
+      }
+      return { ok: true, delivery: "sent" };
+    });
+
+    const { result } = renderHook(() => useSendThreadMessage(), { wrapper });
+    let firstPromise: Promise<unknown> | undefined;
+    let secondPromise: Promise<unknown> | undefined;
+
+    await act(async () => {
+      firstPromise = result.current.mutateAsync({
+        id: "thread-1",
+        mode: "queue-if-active",
+        model: "model-a",
+        input: [{ type: "text", text: "first", mentions: [] }],
+      });
+    });
+    await vi.waitFor(() => expect(order).toEqual(["first:model-a"]));
+
+    await act(async () => {
+      // Start an overlapping model switch before the second send dispatches.
+      const switchMutation = queryClient.getMutationCache().build(queryClient, {
+        mutationKey: ["thread-update", "thread-1"],
+        mutationFn: async () => {
+          await new Promise<void>((resolve) => {
+            releaseSwitch = resolve;
+          });
+          return makeThreadResponse({ id: "thread-1" });
+        },
+      });
+      void switchMutation.execute({ id: "thread-1", model: "model-b" });
+
+      secondPromise = result.current.mutateAsync({
+        id: "thread-1",
+        mode: "queue-if-active",
+        model: "model-a",
+        input: [{ type: "text", text: "second", mentions: [] }],
+      });
+      await Promise.resolve();
+    });
+
+    // Second send must wait behind first send and the pending model switch.
+    expect(order).toEqual(["first:model-a"]);
+
+    await act(async () => {
+      releaseFirstSend?.();
+      await firstPromise;
+      await Promise.resolve();
+    });
+    expect(order).toEqual(["first:model-a"]);
+
+    await act(async () => {
+      releaseSwitch?.();
+      await secondPromise;
+    });
+    expect(order).toEqual(["first:model-a", "second:model-b"]);
+  });
 });

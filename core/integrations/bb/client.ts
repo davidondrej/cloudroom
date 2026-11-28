@@ -663,8 +663,8 @@ export class CloudroomClient {
     return result;
   }
 
-  capabilities(signal?: AbortSignal) {
-    return this.#json("/v1/capabilities", undefined, signal);
+  capabilities(signal?: AbortSignal, options?: { models?: boolean }) {
+    return this.#json(options?.models === false ? "/v1/capabilities?models=false" : "/v1/capabilities", undefined, signal);
   }
 
   async workspace(id: string, signal?: AbortSignal): Promise<Workspace | null> {

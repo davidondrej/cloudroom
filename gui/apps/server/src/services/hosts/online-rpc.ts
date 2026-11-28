@@ -15,6 +15,7 @@ import {
 import { ApiError } from "../../errors.js";
 import type { WorkSessionDeps } from "../../types.js";
 import {
+  HostOnlineRpcCancelledError,
   HostOnlineRpcTimeoutError,
   HostOnlineRpcUnavailableError,
 } from "../../ws/hub.js";
@@ -31,6 +32,8 @@ export const HOST_CONNECTION_INTERRUPTED = "host_connection_interrupted";
 interface CallHostOnlineRpcArgs<TCommand extends HostDaemonRpcCommand> {
   command: TCommand;
   hostId: string;
+  onSent?: () => void;
+  signal?: AbortSignal;
   timeoutMs: number;
 }
 
@@ -39,6 +42,8 @@ interface CallHostRetryableOnlineRpcArgs<
 > {
   command: TCommand;
   hostId: string;
+  onSent?: () => void;
+  signal?: AbortSignal;
   timeoutMs: number;
 }
 
@@ -50,6 +55,7 @@ export async function callHostOnlineRpc(
   deps: WorkSessionDeps,
   args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
 ): Promise<HostDaemonRpcResultForCommand> {
+  throwIfAborted(args.signal);
   assertHostActiveForRead(deps, args);
   return callHostOnlineRpcWithRetry(deps, args, {
     retryOnTransportFailure: false,
@@ -65,7 +71,9 @@ export async function callHostOnlineRpcForWork(
   deps: WorkSessionDeps,
   args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
 ): Promise<HostDaemonRpcResultForCommand> {
+  throwIfAborted(args.signal);
   await prepareHostForWork(deps, args, false);
+  throwIfAborted(args.signal);
   return callHostOnlineRpcWithRetry(deps, args, {
     retryOnTransportFailure: false,
     waitForTransportFailure: false,
@@ -235,10 +243,14 @@ async function callHostOnlineRpcWithRetry(
   const startsNewThread =
     args.command.type === "thread.start" &&
     getThread(deps.db, args.command.threadId)?.status === "starting";
+  throwIfAborted(args.signal);
   const response = await requestHostOnlineRpcResponse(
     deps,
     firstAttemptArgs,
   ).catch(async (error) => {
+    if (error instanceof HostOnlineRpcCancelledError) {
+      throw error;
+    }
     if (!options.retryOnTransportFailure) {
       // The start may have reached the daemon, so never resend it. Wait for
       // the host: once back, its reconnect has already marked the thread
@@ -246,7 +258,9 @@ async function callHostOnlineRpcWithRetry(
       if (error instanceof HostOnlineRpcUnavailableError && startsNewThread) {
         // Already true when a reconnect replaced the dropped socket.
         const waitMs = threadStartHostWaitMs(deps.hub, args.hostId) ?? 0;
-        if (await deps.hub.waitForDaemonForHost(args.hostId, waitMs)) {
+        if (
+          await deps.hub.waitForDaemonForHost(args.hostId, waitMs, args.signal)
+        ) {
           throw new ApiError(
             502,
             HOST_CONNECTION_INTERRUPTED,
@@ -258,6 +272,7 @@ async function callHostOnlineRpcWithRetry(
       }
       throwOnlineRpcError(error);
     }
+    throwIfAborted(args.signal);
     if (error instanceof HostOnlineRpcUnavailableError) {
       if (!options.waitForTransportFailure) throwOnlineRpcError(error);
       await waitForRetryableHostRpcTransport(deps, args);
@@ -306,12 +321,15 @@ async function waitForRetryableHostRpcTransport(
   deps: WorkSessionDeps,
   args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
 ): Promise<void> {
+  throwIfAborted(args.signal);
   if (!deps.hub.hasDaemonForHost(args.hostId)) {
     await deps.hub.waitForDaemonForHost(
       args.hostId,
       HOST_DAEMON_REGISTRATION_WAIT_MS,
+      args.signal,
     );
   }
+  throwIfAborted(args.signal);
   await prepareHostForWork(deps, args, false);
 }
 
@@ -346,6 +364,33 @@ export function isHostUnavailableApiError(error: unknown): boolean {
   );
 }
 
+export function isHostOnlineRpcCancelledError(error: unknown): boolean {
+  return error instanceof HostOnlineRpcCancelledError;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new HostOnlineRpcCancelledError();
+  }
+}
+
+function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    return Promise.reject(new HostOnlineRpcCancelledError());
+  }
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new HostOnlineRpcCancelledError());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 // Commands to a host leave in the order they were made, also after a wait,
 // so a cancel never overtakes the command it cancels (#2171).
 const hostSendQueues = new WeakMap<object, Map<string, Promise<void>>>();
@@ -354,16 +399,25 @@ function requestHostOnlineRpcResponse(
   deps: Pick<WorkSessionDeps, "db" | "hub">,
   args: CallHostOnlineRpcArgs<HostDaemonRpcCommand>,
 ): Promise<HostDaemonOnlineRpcResponseMessage> {
-  const send = () =>
-    deps.hub.requestHostOnlineRpc({
+  if (args.signal?.aborted) {
+    return Promise.reject(new HostOnlineRpcCancelledError());
+  }
+  const send = () => {
+    if (args.signal?.aborted) {
+      return Promise.reject(new HostOnlineRpcCancelledError());
+    }
+    return deps.hub.requestHostOnlineRpc({
       hostId: args.hostId,
       message: {
         type: "host-rpc.request",
         requestId: randomUUID(),
         command: args.command,
       },
+      ...(args.onSent ? { onSent: args.onSent } : {}),
+      ...(args.signal ? { signal: args.signal } : {}),
       timeoutMs: args.timeoutMs,
     });
+  };
   const queue =
     hostSendQueues.get(deps.hub) ?? new Map<string, Promise<void>>();
   hostSendQueues.set(deps.hub, queue);
@@ -374,7 +428,9 @@ function requestHostOnlineRpcResponse(
   const startedAt = Date.now();
   // Resolves once sent, not once answered, so the next command can follow.
   const sending = (ahead ?? Promise.resolve()).then(async () => {
+    throwIfAborted(args.signal);
     await waitForAnsweringDaemon(deps, args, startedAt);
+    throwIfAborted(args.signal);
     return { response: send() };
   });
   const released = sending.then(
@@ -412,6 +468,7 @@ async function waitForAnsweringDaemon(
   startedAt: number,
 ): Promise<void> {
   for (;;) {
+    throwIfAborted(args.signal);
     const session = silentDaemonSession(deps, args.hostId);
     if (session === null) return;
     const now = Date.now();
@@ -433,7 +490,7 @@ async function waitForAnsweringDaemon(
         },
       );
     }
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await waitWithAbort(250, args.signal);
   }
 }
 

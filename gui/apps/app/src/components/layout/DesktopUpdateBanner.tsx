@@ -199,41 +199,44 @@ export function DesktopUpdateBanner() {
       role="status"
       data-testid="desktop-update-banner"
       className={cn(
-        "flex shrink-0 items-center gap-3 px-4 py-2 text-sm",
+        "relative flex h-9 shrink-0 items-center justify-center gap-3 px-11 text-sm",
         BANNER_CLASS,
       )}
     >
-      <Icon name="Download" className="size-4 shrink-0 text-primary" />
-      <span className="min-w-0 flex-1 truncate">
-        {failed ? (
-          <>
-            <strong>The last update didn't install.</strong>{" "}
-            {ready ? "Restart to try again, or download" : "Download"} the new
-            version from the website.
-          </>
-        ) : ready ? (
-          <>
-            <strong>A new version of Cloudroom is ready.</strong> Restart to
-            update.{" "}
-            {desktopInfo?.installNeedsPassword
-              ? "Enter your Mac password once, and future updates install by themselves."
-              : "Running agents resume automatically."}
-          </>
-        ) : desktopInfo?.installNeedsMove ? (
-          <>
-            <strong>Cloudroom {version} is available.</strong> Move Cloudroom
-            to your Applications folder and open it from there, so it can
-            update itself.
-          </>
-        ) : (
-          <>
-            <strong>Cloudroom {version} is available.</strong> You have{" "}
-            {desktopInfo?.version}. Download it to get the latest fixes.
-          </>
-        )}
+      <span
+        aria-hidden
+        className="size-1.5 shrink-0 rounded-full bg-primary shadow-[0_0_0_3px_color-mix(in_oklab,var(--primary)_18%,transparent)]"
+      />
+      <span className="min-w-0 truncate">
+        <strong className="font-semibold text-foreground">
+          {failed
+            ? "Update didn't install"
+            : ready
+              ? "Update ready"
+              : `Cloudroom ${version} is available`}
+        </strong>
+        <span>
+          {" · "}
+          {failed
+            ? ready
+              ? "Restart to try again, or download it."
+              : "Download it from the website."
+            : ready
+              ? desktopInfo?.installNeedsPassword
+                ? "Enter your Mac password once, then updates install by themselves."
+                : "Running agents resume automatically."
+              : desktopInfo?.installNeedsMove
+                ? "Move Cloudroom to Applications, then reopen it there."
+                : `You have ${desktopInfo?.version}.`}
+        </span>
       </span>
       {ready ? (
-        <Button size="sm" disabled={restarting} onClick={restart}>
+        <Button
+          size="sm"
+          className="h-6 px-2.5 font-semibold"
+          disabled={restarting}
+          onClick={restart}
+        >
           {!restarting
             ? "Restart to update"
             : desktopInfo?.installNeedsPassword
@@ -244,6 +247,7 @@ export function DesktopUpdateBanner() {
       {!ready || failed ? (
         <Button
           size="sm"
+          className="h-6 px-2.5 font-semibold"
           variant={ready ? "outline" : "default"}
           onClick={download}
         >
@@ -254,9 +258,10 @@ export function DesktopUpdateBanner() {
         size="icon"
         variant="ghost"
         aria-label="Dismiss update notice"
+        className="absolute right-2 size-6 text-muted-foreground hover:text-foreground [&_[data-icon-root]]:size-3.5"
         onClick={dismiss}
       >
-        <Icon name="X" className="size-4" />
+        <Icon name="X" />
       </Button>
     </div>
   );

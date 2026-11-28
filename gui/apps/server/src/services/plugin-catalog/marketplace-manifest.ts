@@ -14,7 +14,7 @@ import {
   ROOT_PLUGIN_SOURCE_SELECTION,
   type PluginSourceSelection,
 } from "@cloudroom/server-contract";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import { z } from "zod";
 import {
   formatIssues,

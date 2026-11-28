@@ -776,3 +776,53 @@ it.skipIf(!supported)(
     expect(out[5]).toBe("ws://127.0.0.1:9444/devtools/browser/ok");
   },
 );
+
+it.skipIf(!supported)(
+  "upgrades existing admin.py installs from old Chrome-only _CLOUDROOM_HINTS to setup --browser",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "browser-harness-"));
+    roots.push(root);
+    const bin = await installBrowserHarnessShim(root);
+    const venv = join(root, "browser-harness", "0.1.13");
+    const pkg = join(
+      venv,
+      "lib",
+      "python3.12",
+      "site-packages",
+      "browser_harness",
+    );
+    mkdirSync(join(venv, "bin"), { recursive: true });
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(venv, ".ready"), "");
+    writeFileSync(
+      join(venv, "bin", "python"),
+      '#!/bin/sh\nexec python3 "$@"\n',
+    );
+    writeFileSync(join(venv, "bin", "browser-harness"), "#!/bin/sh\n");
+    chmodSync(join(venv, "bin", "python"), 0o755);
+    chmodSync(join(venv, "bin", "browser-harness"), 0o755);
+    writeFileSync(
+      join(pkg, "admin.py"),
+      [
+        "# Cloudroom (#1115): fixed hints for known daemon failures. Log text is never shown.",
+        "_CLOUDROOM_HINTS = (",
+        '    ((b"Operation not permitted", b"DevToolsActivePort"), "macOS blocked reading a browser profile folder. Ask the user to turn on Full Disk Access for Cloudroom (System Settings > Privacy & Security > Full Disk Access), then quit and reopen Cloudroom."),',
+        '    ((b"chrome://inspect/#remote-debugging",), "Chrome is running without remote debugging. Ask the user to open chrome://inspect/#remote-debugging in Chrome and tick \'Allow remote debugging for this browser instance\', then retry."),',
+        '    ((b"chrome-not-running",), "No Chromium-based browser is running. Ask the user to open Chrome, then retry."),',
+        ")",
+        "",
+      ].join("\n"),
+    );
+    for (const _ of [1, 2]) {
+      const run = spawnSync(join(bin ?? "", "browser-harness"), [], {
+        env: { ...process.env, BU_NAME: "test" },
+      });
+      expect(run.status).toBe(0);
+    }
+    const upgraded = readFileSync(join(pkg, "admin.py"), "utf8");
+    expect(upgraded).toContain("room-cli computer-use setup --browser");
+    expect(upgraded).not.toContain(
+      "Ask the user to open chrome://inspect/#remote-debugging in Chrome",
+    );
+  },
+);

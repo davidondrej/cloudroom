@@ -619,9 +619,35 @@ async function downloadEach(client: CloudroomClient, paths: string[], allowed: A
   return files;
 }
 
+/** Sums the changed files (NUL-separated on stdin) before packing, so changes over the limit fail in a second, not after
+ *  a minute of gzip, and say which folders are big (a user's 1.3 GB of changes, 2026-11-26). Prints nothing under it. */
+const SIZE_CHECK = `import json, os, sys
+limit, sizes = int(sys.argv[1]), {}
+def lsize(path):
+    try: return os.lstat(path).st_size
+    except OSError: return 0
+def size(path):
+    if os.path.islink(path) or not os.path.isdir(path): return lsize(path)
+    total = 0
+    for folder, dirs, names in os.walk(path):
+        dirs[:] = [name for name in dirs if name != ".git"]
+        total += sum(lsize(os.path.join(folder, name)) for name in names)
+    return total
+for path in filter(None, sys.stdin.buffer.read().split(b"\\0")):
+    path = os.fsdecode(path)
+    top = path.removeprefix("./").split("/")[0] + ("/" if "/" in path.removeprefix("./") else "")
+    sizes[top] = sizes.get(top, 0) + size(path)
+if sum(sizes.values()) > limit:
+    print(json.dumps({"bytes": sum(sizes.values()), "top": sorted(sizes.items(), key=lambda item: -item[1])[:3]}))`;
+
+const mb = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+
 export async function cloudChanges(client: CloudroomClient, workspace: string, localHead: string | null, since: number, allowed: number | Allowance = MAX_DOWNLOAD_MB): Promise<{ archive: Buffer; base: string | null }> {
   const head = localHead?.trim();
-  const archive = `.cache/cloudroom/teleport-local-${randomUUID()}.tgz`;
+  const id = randomUUID();
+  const archive = `.cache/cloudroom/teleport-local-${id}.tgz`;
+  const list = `~/.cache/cloudroom/teleport-local-${id}.list`;
+  const limit = (typeof allowed === "number" ? allowed : allowed.mb) * 1024 * 1024;
   const skipped = [...SKIPPED, ".cloudroom"].map((name) => `-name ${quote(name)}`).join(" -o ");
   const command = [
     `cd ${quote(workspace)} || exit 1`,
@@ -629,20 +655,31 @@ export async function cloudChanges(client: CloudroomClient, workspace: string, l
     "if git rev-parse --git-dir >/dev/null 2>&1; then",
     "  proven=0; base=$(git reflog --format=%H HEAD 2>/dev/null | tail -n 1); [ -n \"$base\" ] || base=HEAD",
     head && /^[0-9a-f]{40,64}$/.test(head) ? `  git cat-file -e '${head}^{commit}' 2>/dev/null && shared=$(git merge-base HEAD ${head} 2>/dev/null) && { base=$shared; proven=1; }` : "",
-    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } | ${packChangesCommand(`~/${archive}`)} || { rm -f ~/${archive}; exit 1; }`,
+    `  { git diff -z --name-only --no-renames --diff-filter=d "$base"; git ls-files -z --others --exclude-standard; } > ${list}`,
     "else",
-    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 | ${packChangesCommand(`~/${archive}`)} || { rm -f ~/${archive}; exit 1; }`,
+    `  proven=0; find . \\( ${skipped} \\) -prune -o \\( -type f -o -type l \\) -newermt @${Math.floor(since / 1000) - 600} -print0 > ${list}`,
     "fi",
+    // Only an early answer: without Python, the download's own size check still holds.
+    `big=$(python3 -I -c ${quote(SIZE_CHECK)} ${limit} < ${list} 2>/dev/null) || big=`,
+    `if [ -n "$big" ]; then rm -f ${list}; echo "too-large $big"; exit 0; fi`,
+    `${packChangesCommand(`~/${archive}`)} < ${list} || { rm -f ~/${archive} ${list}; exit 1; }`,
+    `rm -f ${list}`,
     `echo "$proven" "$base" ~/${archive}`,
   ].join("\n");
   try {
     const slow = "The cloud file changes took over 4 minutes to pack. The thread stays in Cloud.";
     const created = (await vm(client, `timeout -k 5s 240s bash -c ${quote(command)} || { code=$?; [ $code = 124 ] && echo ${quote(slow)} >&2; exit $code; }`)).toString().trim();
-    const [proven, base, path] = (created.split("\n").pop() ?? "").split(" ");
+    const last = created.split("\n").pop() ?? "";
+    if (last.startsWith("too-large ")) {
+      const big = JSON.parse(last.slice(10)) as { bytes: number; top: [string, number][] };
+      if (!Number.isFinite(big?.bytes) || !Array.isArray(big.top)) throw new Error("The cloud sent an invalid size report.");
+      throw new ApiError(413, "cloud_changes_too_large", `The cloud changed ${mb(big.bytes)} of files, over the ${mb(limit)} limit for copying them here. Biggest: ${big.top.map(([path, bytes]) => `${String(path)} (${mb(Number(bytes))})`).join(", ")}. Delete them in the cloud or add them to .gitignore, then try again. Nothing was moved.`);
+    }
+    const [proven, base, path] = last.split(" ");
     if (!path) throw new Error("The cloud file changes could not be packed. The thread stays in Cloud.");
     return { archive: await download(client, path, allowed), base: proven === "1" && base && /^[0-9a-f]{40,64}$/.test(base) ? base : null };
   } finally {
-    await vm(client, `rm -f ~/${archive}`).catch(() => {});
+    await vm(client, `rm -f ~/${archive} ${list}`).catch(() => {});
   }
 }
 

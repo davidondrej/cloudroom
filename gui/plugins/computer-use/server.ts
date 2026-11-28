@@ -8,16 +8,19 @@ import { z } from "zod";
 import {
   ACTIVE_CHANGED_CHANNEL,
   APPROVAL_RENDERER_ID,
+  BROWSER_SETUP_RENDERER_ID,
   approvalResponseSchema,
-  appSchema,
+  browserSetupResponseSchema,
   hostContract,
   rpcContract,
   type AppIdentity,
+  type GrantedThread,
   type HostStatus,
 } from "./contract.js";
 import {
   BLOCKED_TOOLS,
   CLIPBOARD,
+  ISOLATED_BROWSER,
   LIME_CURSOR_SUFFIX,
   PID_REQUIRED_TOOLS,
   WHOLE_SCREEN,
@@ -25,18 +28,17 @@ import {
 
 const APPROVAL_WAIT_MS = 90_000;
 const APP_BUSY_MS = 60_000;
-const ALWAYS_KEY = "always-allowed";
 
 export const commands = [
   {
     name: "status",
-    summary: "Show driver, macOS permission, and approval status",
+    summary: "Show driver, macOS permission, browser control, and approval status",
     usage: "room-cli computer-use status [--json]",
   },
   {
     name: "setup",
-    summary: "Ask macOS for Accessibility (and Screen Recording with --screen-recording)",
-    usage: "room-cli computer-use setup [--screen-recording]",
+    summary: "Ask macOS for permissions, or set up background browser control (--browser)",
+    usage: "room-cli computer-use setup [--screen-recording | --browser]",
   },
   {
     name: "tools",
@@ -45,7 +47,7 @@ export const commands = [
   },
   {
     name: "call",
-    summary: "Run one Cua Driver tool; Cloudroom asks the user before each new app",
+    summary: "Run one Cua Driver tool; Cloudroom asks the user once per thread",
     usage: "room-cli computer-use call <tool> ['<json-args>'] [--purpose <text>]",
   },
 ];
@@ -65,17 +67,20 @@ export function decideGate(args: {
   | { kind: "name"; name: string }
   | { kind: "screen" }
   | { kind: "clipboard" }
+  | { kind: "isolated_browser" }
   | { kind: "error"; message: string } {
   const { tool, input } = args;
   if (BLOCKED_TOOLS.has(tool))
     return { kind: "error", message: `${tool} is not available to agents in Cloudroom.` };
+  if (tool === "browser_prepare" && input.allow_launch === true)
+    return { kind: "isolated_browser" };
   if (tool === "launch_app") {
     const name = input.bundle_id ?? input.name;
     return typeof name === "string" && name
       ? { kind: "name", name }
       : { kind: "error", message: "launch_app needs bundle_id or name." };
   }
-  if (tool === "get_desktop_state") return { kind: "screen" };
+  if (tool === "get_desktop_state" || tool === "move_cursor") return { kind: "screen" };
   // The clipboard can hold passwords and tokens, and a write replaces what the user copied (#1960).
   if (tool === "clipboard_read" || tool === "clipboard_write")
     return { kind: "clipboard" };
@@ -83,13 +88,78 @@ export function decideGate(args: {
   if (typeof input.pid === "number") return { kind: "pid", pid: input.pid };
   if (PID_REQUIRED_TOOLS.has(tool))
     return { kind: "error", message: `${tool} needs a pid so Cloudroom knows which app you are controlling. Find it with list_apps or list_windows.` };
+  if (input.delivery_mode === "foreground") return { kind: "screen" };
   return { kind: "free" };
 }
 
-export function takesForeground(tool: string, input: Record<string, unknown>): boolean {
-  return tool === "bring_to_front" || tool === "move_cursor" || input.delivery_mode === "foreground";
+const CLOUDROOM_BUNDLE_ID = "dev.cloudroom.gui";
+
+export function isCloudroomApp(key: string, selfBundleId?: string | null): boolean {
+  const target = key.trim().toLowerCase();
+  if (!target) return false;
+  const ids = [CLOUDROOM_BUNDLE_ID];
+  const extra = selfBundleId?.trim().toLowerCase();
+  if (extra && extra !== "com.github.electron" && !ids.includes(extra)) ids.push(extra);
+  return ids.some((id) => target === id || target.startsWith(`${id}.`));
 }
 
+const BROWSER_APP_RE =
+  /^(?:com\.brave\.(?:browser|origin)|com\.google\.chrome|org\.chromium\.chromium|com\.microsoft\.edgemac|company\.thebrowser\.(?:browser|dia)|ai\.perplexity\.comet|com\.apple\.safari(?:technologypreview)?|org\.mozilla\.(?:firefox(?:developeredition)?|nightly)|com\.vivaldi\.vivaldi|com\.operasoftware\.opera(?:gx)?|app\.zen-browser\.zen|com\.kagi\.kagimacos|net\.imput\.helium)(?:$|\.)|^(?:brave|google-chrome|chrome|chromium|msedge|microsoft-edge|firefox|vivaldi|opera|zen)(?:[-.]|$)/i;
+const NEW_BROWSER_WINDOW_MENU_RE = /^new\b.*\bwindow\b/i;
+
+export function isBrowserApp(key: string): boolean {
+  return BROWSER_APP_RE.test(key.trim());
+}
+
+function newTabShortcut(platform: string): string {
+  return platform === "darwin" ? "cmd+t" : "ctrl+t";
+}
+
+function keyChordTokens(tool: string, input: Record<string, unknown>): string[] {
+  if (tool === "hotkey" && Array.isArray(input.keys)) {
+    return input.keys
+      .filter((k): k is string => typeof k === "string")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  if (tool === "press_key" && typeof input.key === "string") {
+    const mods = Array.isArray(input.modifiers)
+      ? input.modifiers.filter((m): m is string => typeof m === "string")
+      : [];
+    return [...mods, ...input.key.split("+")]
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+export function blockedBrowserAction(args: {
+  tool: string;
+  input: Record<string, unknown>;
+  app: AppIdentity | null;
+  platform: string;
+}): string | null {
+  const { tool, input, app, platform } = args;
+  if (!app || !isBrowserApp(app.key)) return null;
+  const tabHint = `Open a new tab in the existing ${app.name} window instead (browser-harness, File > New Tab, or ${newTabShortcut(platform)}).`;
+  if (tool === "launch_app" && input.creates_new_application_instance === true)
+    return `Refused to launch a second ${app.name} instance. ${tabHint}`;
+  if (tool === "invoke_menu" && Array.isArray(input.path) && input.path.length > 0) {
+    const last = input.path[input.path.length - 1];
+    if (typeof last === "string" && NEW_BROWSER_WINDOW_MENU_RE.test(last.trim()))
+      return `Refused to open a new ${app.name} window (${last.trim()}). ${tabHint}`;
+  }
+  const keys = keyChordTokens(tool, input);
+  const primary =
+    platform === "darwin"
+      ? ["cmd", "command"]
+      : platform === "linux"
+        ? ["ctrl", "control"]
+        : ["cmd", "command", "ctrl", "control"];
+  if (keys.length >= 2 && keys.includes("n") && keys.some((m) => primary.includes(m)))
+    return `Refused to open a new ${app.name} window (${keys.join("+")}). ${tabHint}`;
+  return null;
+}
 const sessionFor = (threadId: string) => `cr-${threadId.slice(-24)}${LIME_CURSOR_SUFFIX}`;
 
 function fail(code: string, message: string, exitCode = 1): PluginCliResult {
@@ -97,15 +167,16 @@ function fail(code: string, message: string, exitCode = 1): PluginCliResult {
 }
 
 // Cloudroom starts Cua Driver without --grant existing-profile, so it refuses the user's own browser profile (#1555).
-const CONSENT_HINT =
-  "Cloudroom doesn't let Cua Driver attach to the user's own browser profile. For the user's logged-in browser use browser-harness. For a separate browser, call browser_prepare with \"allow_launch\":true and \"profile\":{\"mode\":\"isolated_new\"}.";
+function consentHint(platform: string) {
+  return `Cloudroom doesn't let Cua Driver attach to the user's own browser profile. Use browser-harness, or open a new tab in the existing browser window (${newTabShortcut(platform)} / File > New Tab). Don't launch a separate browser instance unless the user asks.`;
+}
 
-function withConsentHint(stdout: string) {
+function withConsentHint(stdout: string, platform: string) {
   if (!stdout.includes("browser_consent_required")) return stdout;
   try {
     const parsed = JSON.parse(stdout) as { refusal?: { code?: unknown } };
     if (parsed.refusal?.code !== "browser_consent_required") return stdout;
-    return `${JSON.stringify({ ...parsed, hint: CONSENT_HINT }, null, 2)}\n`;
+    return `${JSON.stringify({ ...parsed, hint: consentHint(platform) }, null, 2)}\n`;
   } catch {
     return stdout;
   }
@@ -124,14 +195,36 @@ export function outcomeOf(result: PluginCliResult): { outcome: string; effect: s
   }
 }
 
+type ApprovalOutcome =
+  | { outcome: "submitted"; decision: "thread" | "deny" }
+  | { outcome: "cancelled"; reason: string };
+
+const grantedThreadInfoSchema = z.object({
+  title: z.string().nullable().optional(),
+  titleFallback: z.string().nullable().optional(),
+  archivedAt: z.number().nullable().optional(),
+  deletedAt: z.number().nullable().optional(),
+});
+
+const THREAD_GRANTED_PREFIX = "thread-granted/";
+
 export default async function computerUsePlugin(room: BbPluginApi) {
   const host = room.hosts.experimental_client({ contract: hostContract });
-  const pending = new Map<string, { request: Promise<PluginInteractionResult>; startedAt: number }>();
+  const pending = new Map<string, { settled: Promise<ApprovalOutcome>; startedAt: number }>();
+  const pendingBrowserSetup = new Map<
+    string,
+    {
+      request: Promise<PluginInteractionResult>;
+      startedAt: number;
+      controller: AbortController;
+    }
+  >();
   const track = (name: string, properties: Record<string, string | number | boolean | null>) =>
     room.experimental_telemetry.capture(name, { execution: "local", ...properties });
   const busy = new Map<string, { threadId: string; at: number }>();
   const active = new Map<string, { hostId: string; appName: string | null }>();
-  const threadKey = (threadId: string) => `thread/${encodeURIComponent(threadId)}`;
+  const threadGrantedKey = (threadId: string) => `${THREAD_GRANTED_PREFIX}${encodeURIComponent(threadId)}`;
+  const legacyThreadKey = (threadId: string) => `thread/${encodeURIComponent(threadId)}`;
 
   const activeSnapshot = () => ({
     active: [...active.entries()].map(([threadId, entry]) => ({
@@ -158,18 +251,49 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     if (changed) publishActive();
   };
 
-  const readList = async (key: string) =>
-    z.array(appSchema).catch([]).parse((await room.storage.kv.get(key)) ?? []);
-  // macOS matches bundle IDs regardless of case, and approvals saved before #975 kept the typed case.
-  const listed = (list: AppIdentity[], key: string) =>
-    list.some((entry) => entry.key.toLowerCase() === key.toLowerCase());
-  const addTo = async (key: string, app: AppIdentity) => {
-    const list = await readList(key);
-    if (!listed(list, app.key)) await room.storage.kv.set(key, [...list, app]);
+  const isThreadGranted = async (threadId: string) =>
+    (await room.storage.kv.get(threadGrantedKey(threadId))) === true;
+  const grantThread = async (threadId: string) => {
+    await room.storage.kv.set(threadGrantedKey(threadId), true);
+  };
+  const listGrantedThreads = async (): Promise<GrantedThread[]> => {
+    const keys = await room.storage.kv.list(THREAD_GRANTED_PREFIX);
+    const threads: GrantedThread[] = [];
+    for (const key of keys) {
+      if ((await room.storage.kv.get(key)) !== true) continue;
+      let threadId: string;
+      try {
+        threadId = decodeURIComponent(key.slice(THREAD_GRANTED_PREFIX.length));
+      } catch {
+        continue;
+      }
+      if (!threadId) continue;
+      try {
+        const parsed = grantedThreadInfoSchema.safeParse(
+          await room.sdk.threads.get({ threadId }),
+        );
+        if (parsed.success && (parsed.data.archivedAt != null || parsed.data.deletedAt != null)) {
+          await room.storage.kv.delete(key);
+          continue;
+        }
+        const title = parsed.success
+          ? parsed.data.title?.trim() || parsed.data.titleFallback?.trim() || threadId
+          : threadId;
+        threads.push({ threadId, title });
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : String(caught);
+        if (/\b404\b|not found|does not exist/i.test(message)) {
+          await room.storage.kv.delete(key);
+          continue;
+        }
+        threads.push({ threadId, title: threadId });
+      }
+    }
+    return threads.sort((a, b) => a.title.localeCompare(b.title));
   };
 
   // A Cloud thread gets here only through Mac access (`room-cli mac computer-use` in its sandbox), so it uses this
-  // computer as itself: its sidebar highlight, approval cards, and app locks work as for a Local thread.
+  // computer as itself: its sidebar highlight, approval card, and app locks work as for a Local thread.
   async function threadInfo(threadId: string) {
     const thread = threadHostSchema.parse(await room.sdk.threads.get({ threadId, include: "host" }));
     const cloud = !thread.host && thread.executionTarget === "cloud";
@@ -198,12 +322,12 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     let error: string | null = null;
     if (id) {
       try {
-        status = await host.call("status", {}, { hostId: id });
+        status = await host.call("status", { includeBrowser: true }, { hostId: id });
       } catch (caught) {
         error = caught instanceof Error ? caught.message : String(caught);
       }
     } else error = "No connected machine.";
-    return { hostId: id, status, error, alwaysAllowed: await readList(ALWAYS_KEY) };
+    return { hostId: id, status, error, grantedThreads: await listGrantedThreads() };
   }
 
   async function identify(hostId: string, gate: ReturnType<typeof decideGate>) {
@@ -211,69 +335,13 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     if (gate.kind === "name") return host.call("appForName", { name: gate.name }, { hostId });
     if (gate.kind === "screen") return { ...WHOLE_SCREEN };
     if (gate.kind === "clipboard") return { ...CLIPBOARD };
+    if (gate.kind === "isolated_browser") return { ...ISOLATED_BROWSER };
     return null;
   }
 
-  async function askApproval(args: {
-    threadId: string;
-    app: AppIdentity;
-    tool: string;
-    purpose: string | null;
-    status: HostStatus;
-    foreground: boolean;
-  }): Promise<{ decision: "thread" | "always" | "deny" } | PluginCliResult> {
-    const { threadId, app, foreground } = args;
-    const pendingKey = foreground ? `${threadId}\0foreground\0${app.key}` : `${threadId}\0${app.key}`;
-    let entry = pending.get(pendingKey);
-    if (!entry) {
-      const request = room.ui.requestInput({
-        threadId,
-        rendererId: APPROVAL_RENDERER_ID,
-        title: foreground
-          ? `Allow this agent to bring ${app.name} to the front?`
-          : `Allow this agent to use ${app.name}?`,
-        payload: {
-          app,
-          tool: args.tool,
-          purpose: args.purpose,
-          platform: args.status.platform,
-          permissions: args.status.permissions,
-          ...(foreground ? { foreground: true } : {}),
-        },
-        timeoutMs: 60 * 60_000,
-      });
-      entry = { request, startedAt: Date.now() };
-      pending.set(pendingKey, entry);
-      void request.finally(() => pending.delete(pendingKey)).catch(() => {});
-    }
-    const { request, startedAt } = entry;
-    const report = (decision: string) =>
-      track("computer_use_approval", { app: app.key, tool: args.tool, decision, wait_ms: Date.now() - startedAt });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const result = await Promise.race([
-      request,
-      new Promise<null>((resolve) => {
-        timer = setTimeout(() => resolve(null), APPROVAL_WAIT_MS);
-      }),
-    ]).finally(() => clearTimeout(timer));
-    if (result === null) {
-      report("pending");
-      return fail(
-        "approval_pending",
-        `Cloudroom is asking the user to allow ${app.name}. Tell the user, then run the same command again. Do not end your turn.`,
-        3,
-      );
-    }
-    if (result.outcome === "cancelled") {
-      report(`cancelled_${result.reason}`);
-      return fail("approval_cancelled", `The request to use ${app.name} was cancelled (${result.reason}).`);
-    }
-    const parsed = approvalResponseSchema.parse(result.value);
-    report(parsed.decision);
-    return parsed;
-  }
-
-  async function approve(args: {
+  // One approval per thread covers all apps, dialogs, clipboard, screen, and foreground focus.
+  // Persistence runs on the interaction promise itself so clicks after the 90s CLI wait are never lost.
+  async function approveThread(args: {
     threadId: string;
     app: AppIdentity;
     tool: string;
@@ -281,32 +349,84 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     status: HostStatus;
   }): Promise<PluginCliResult | null> {
     const { threadId, app } = args;
-    const always = await readList(ALWAYS_KEY);
-    const thread = await readList(threadKey(threadId));
-    if (listed([...always, ...thread], app.key)) return null;
-    const outcome = await askApproval({ ...args, foreground: false });
-    if ("exitCode" in outcome) return outcome;
-    if (outcome.decision === "deny")
-      return fail("app_denied", `The user denied access to ${app.name}. Do not retry; ask the user what to do instead.`);
-    await addTo(outcome.decision === "always" ? ALWAYS_KEY : threadKey(threadId), app);
-    return null;
-  }
-
-  // Foreground calls take focus from the user, so ask once each time and never save the grant.
-  async function approveForeground(args: {
-    threadId: string;
-    app: AppIdentity;
-    tool: string;
-    purpose: string | null;
-    status: HostStatus;
-  }): Promise<PluginCliResult | null> {
-    const outcome = await askApproval({ ...args, foreground: true });
-    if ("exitCode" in outcome) return outcome;
-    if (outcome.decision === "deny")
+    if (await isThreadGranted(threadId)) return null;
+    let entry = pending.get(threadId);
+    if (!entry) {
+      const startedAt = Date.now();
+      const request = room.ui.requestInput({
+        threadId,
+        rendererId: APPROVAL_RENDERER_ID,
+        title: "Allow this thread to use Computer Use?",
+        payload: {
+          app,
+          tool: args.tool,
+          purpose: args.purpose,
+          platform: args.status.platform,
+          permissions: args.status.permissions,
+        },
+        timeoutMs: 60 * 60_000,
+      });
+      const settled = request.then(async (result): Promise<ApprovalOutcome> => {
+        if (result.outcome === "cancelled") {
+          track("computer_use_approval", {
+            app: app.key,
+            tool: args.tool,
+            decision: `cancelled_${result.reason}`,
+            wait_ms: Date.now() - startedAt,
+          });
+          return { outcome: "cancelled", reason: result.reason };
+        }
+        const { decision: rawDecision } = approvalResponseSchema.parse(result.value);
+        const decision = rawDecision === "always" ? "thread" : rawDecision;
+        if (decision === "thread") await grantThread(threadId);
+        track("computer_use_approval", {
+          app: app.key,
+          tool: args.tool,
+          decision,
+          wait_ms: Date.now() - startedAt,
+        });
+        return { outcome: "submitted", decision };
+      });
+      entry = { settled, startedAt };
+      pending.set(threadId, entry);
+      void settled
+        .finally(() => {
+          if (pending.get(threadId) === entry) pending.delete(threadId);
+        })
+        .catch(() => {});
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      entry.settled,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), APPROVAL_WAIT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (outcome === null) {
+      track("computer_use_approval", {
+        app: app.key,
+        tool: args.tool,
+        decision: "pending",
+        wait_ms: Date.now() - entry.startedAt,
+      });
       return fail(
-        "foreground_denied",
-        `The user denied foreground access to ${args.app.name}. Stay in the background or ask the user what to do instead.`,
+        "approval_pending",
+        "Cloudroom is asking the user to allow Computer Use in this thread. Tell the user, then run the same command again. Do not end your turn.",
+        3,
       );
+    }
+    if (outcome.outcome === "cancelled") {
+      return fail(
+        "approval_cancelled",
+        `The request to use Computer Use was cancelled (${outcome.reason}).`,
+      );
+    }
+    if (outcome.decision === "deny") {
+      return fail(
+        "app_denied",
+        "The user denied Computer Use access in this thread. Do not retry; ask the user what to do instead.",
+      );
+    }
     return null;
   }
 
@@ -348,9 +468,16 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       );
     if (gate.kind !== "free" && !app) return fail("app_not_found", "No running app has that pid.");
     seen.app = app?.key ?? null;
-    // The clipboard needs approval but no Accessibility and no app lock:
-    // the driver uses NSPasteboard (#1960).
-    const control = gate.kind !== "clipboard";
+    if (app && isCloudroomApp(app.key, status.selfBundleId))
+      return fail(
+        "app_blocked",
+        "Computer use cannot control Cloudroom itself.",
+      );
+    const browserBlocked = blockedBrowserAction({ tool, input, app, platform: status.platform });
+    if (browserBlocked) return fail("new_browser_window_blocked", browserBlocked);
+    // Clipboard (NSPasteboard, #1960) and isolated_browser (CDP launch) need approval,
+    // not macOS Accessibility or a shared-app lock.
+    const control = gate.kind !== "clipboard" && gate.kind !== "isolated_browser";
     if (app) {
       const holder = busy.get(app.key);
       if (
@@ -363,12 +490,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
           "app_busy",
           `${app.name} is being used by @thread:${holder.threadId}. Wait a minute or pick another app.`,
         );
-      const blocked = await approve({ threadId, app, tool, purpose, status });
-      if (blocked) return blocked;
-    }
-    if (takesForeground(tool, input)) {
-      const target = app ?? { key: "foreground", name: "your screen cursor" };
-      const blocked = await approveForeground({ threadId, app: target, tool, purpose, status });
+      const blocked = await approveThread({ threadId, app, tool, purpose, status });
       if (blocked) return blocked;
     }
     if (app && control) busy.set(app.key, { threadId, at: Date.now() });
@@ -397,7 +519,7 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     if (result.driverExits > 0) track("computer_use_crash", { component: "driver", count: result.driverExits });
     return {
       exitCode: result.exitCode,
-      stdout: withConsentHint(result.stdout),
+      stdout: withConsentHint(result.stdout, status.platform),
       stderr: result.stderr,
     };
   }
@@ -437,6 +559,95 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     });
   }
 
+  async function runBrowserSetup(threadId: string, hostId: string): Promise<PluginCliResult> {
+    const initial = await host.call(
+      "status",
+      { includeBrowser: true },
+      { hostId, timeoutMs: 30_000 },
+    );
+    const browserControl = initial.browserControl;
+    const pendingKey = `${threadId}\0browser-setup`;
+    const clearPendingCard = () => {
+      const stale = pendingBrowserSetup.get(pendingKey);
+      if (!stale) return;
+      pendingBrowserSetup.delete(pendingKey);
+      stale.controller.abort();
+    };
+    if (!browserControl) {
+      clearPendingCard();
+      return fail("unsupported", "This host does not report browser control status yet. Update Cloudroom and retry.");
+    }
+    if (!browserControl.supported) {
+      clearPendingCard();
+      return fail(
+        "unsupported",
+        browserControl.reason ??
+          `${browserControl.browserName} doesn't support background browser control. Use Chrome, Brave, Edge, Arc, Dia, or Comet.`,
+      );
+    }
+    if (browserControl.ready) {
+      clearPendingCard();
+      return { exitCode: 0, stdout: `${JSON.stringify({ ready: true, browserControl }, null, 2)}\n` };
+    }
+    let entry = pendingBrowserSetup.get(pendingKey);
+    if (!entry) {
+      const controller = new AbortController();
+      const request = room.ui.requestInput(
+        {
+          threadId,
+          rendererId: BROWSER_SETUP_RENDERER_ID,
+          title: `Set up browser control (${browserControl.browserName})`,
+          payload: {
+            platform: initial.platform,
+            browserControl,
+          },
+          timeoutMs: 60 * 60_000,
+        },
+        { signal: controller.signal },
+      );
+      entry = { request, startedAt: Date.now(), controller };
+      pendingBrowserSetup.set(pendingKey, entry);
+      void request
+        .finally(() => {
+          if (pendingBrowserSetup.get(pendingKey) === entry) pendingBrowserSetup.delete(pendingKey);
+        })
+        .catch(() => {});
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await Promise.race([
+      entry.request,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), APPROVAL_WAIT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (result === null) {
+      return fail(
+        "setup_pending",
+        `Cloudroom is showing the Browser control setup card for ${browserControl.browserName}. Tell the user to finish the steps and click Check & retry, then run \`room-cli computer-use setup --browser\` again. Do not end your turn.`,
+        3,
+      );
+    }
+    if (result.outcome === "cancelled") {
+      return fail("setup_cancelled", `Browser control setup was cancelled (${result.reason}).`);
+    }
+    const parsed = browserSetupResponseSchema.parse(result.value);
+    if (parsed.action === "dismiss") {
+      track("computer_use_setup", { step: "browser_control", ok: false, decision: "dismiss" });
+      return fail("setup_dismissed", "The user dismissed browser control setup. Ask what they want to do instead.");
+    }
+    const next = await host.call(
+      "status",
+      { includeBrowser: true },
+      { hostId, timeoutMs: 30_000 },
+    );
+    const ready = Boolean(next.browserControl?.ready);
+    track("computer_use_setup", { step: "browser_control", ok: ready, decision: "retry" });
+    return {
+      exitCode: ready ? 0 : 1,
+      stdout: `${JSON.stringify({ ready, browserControl: next.browserControl ?? null }, null, 2)}\n`,
+    };
+  }
+
   async function runCli(argv: string[], ctx: PluginCliContext): Promise<PluginCliResult> {
     const threadId = ctx.threadId;
     if (!threadId) return fail("no_thread", "Run this from a Cloudroom thread (ROOM_THREAD_ID is not set).");
@@ -445,10 +656,11 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     switch (argv[0]) {
       case "status": {
         const current = await settings(hostId);
-        const allowed = await readList(threadKey(threadId));
+        const allowed = await isThreadGranted(threadId);
         return { exitCode: 0, stdout: `${JSON.stringify({ ...current, allowedInThisThread: allowed }, null, 2)}\n` };
       }
       case "setup": {
+        if (argv.includes("--browser")) return runBrowserSetup(threadId, hostId);
         let status = await host.call("requestPermission", { kind: "accessibility" }, { hostId, timeoutMs: 60_000 });
         if (argv.includes("--screen-recording"))
           status = await host.call("requestPermission", { kind: "screenRecording" }, { hostId, timeoutMs: 60_000 });
@@ -462,14 +674,14 @@ export default async function computerUsePlugin(room: BbPluginApi) {
       case "call":
         return trackedCall(argv, ctx, threadId, hostId, provider, cloud);
       default:
-        return fail("usage", "Usage: room-cli computer-use status | setup | tools [<tool>] | call <tool> ['<json>']");
+        return fail("usage", "Usage: room-cli computer-use status | setup [--screen-recording | --browser] | tools [<tool>] | call <tool> ['<json>']");
     }
   }
 
   room.agents.configure(() => ({ tools: [], skills: ["computer-use"] }));
   room.cli.register({
     name: "computer-use",
-    summary: "See and control desktop apps, with a per-app approval from the user",
+    summary: "See and control desktop apps, with one approval per thread",
     commands,
     async run(argv, ctx) {
       try {
@@ -483,14 +695,29 @@ export default async function computerUsePlugin(room: BbPluginApi) {
   room.rpc.register(rpcContract, {
     getActive: () => activeSnapshot(),
     getSettings: () => settings(),
-    async removeAlwaysAllowed({ key }) {
-      const list = await readList(ALWAYS_KEY);
-      await room.storage.kv.set(ALWAYS_KEY, list.filter((entry) => entry.key !== key));
+    async revokeThread({ threadId }) {
+      await room.storage.kv.delete(threadGrantedKey(threadId));
+      await room.storage.kv.delete(legacyThreadKey(threadId));
+      await release(threadId);
       return settings();
     },
     async requestPermission({ kind }) {
       const hostId = await localHostId();
-      if (hostId) reportPermissions("permission_request", await host.call("requestPermission", { kind }, { hostId, timeoutMs: 60_000 }));
+      if (hostId) {
+        const next = await host.call("requestPermission", { kind }, { hostId, timeoutMs: 60_000 });
+        if (kind === "fullDiskAccess") {
+          track("computer_use_setup", { step: "full_disk_access_opened" });
+        } else {
+          reportPermissions("permission_request", next);
+        }
+      }
+      return settings(hostId);
+    },
+    async openBrowserInspect() {
+      const hostId = await localHostId();
+      if (hostId) {
+        await host.call("openBrowserInspect", {}, { hostId, timeoutMs: 30_000 });
+      }
       return settings(hostId);
     },
     async restart() {
@@ -523,7 +750,8 @@ export default async function computerUsePlugin(room: BbPluginApi) {
     room.events.on(event, ({ thread }) => release(thread.id));
   for (const event of ["thread.archived", "thread.deleted"] as const) {
     room.events.on(event, async ({ thread }) => {
-      await room.storage.kv.delete(threadKey(thread.id));
+      await room.storage.kv.delete(threadGrantedKey(thread.id));
+      await room.storage.kv.delete(legacyThreadKey(thread.id));
       await release(thread.id);
     });
   }

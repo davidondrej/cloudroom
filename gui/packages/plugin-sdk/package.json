@@ -17,6 +17,7 @@
   "files": [
     "bundled-types",
     "dist",
+    "NOTICE",
     "README.md"
   ],
   "exports": {

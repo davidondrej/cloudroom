@@ -78,6 +78,11 @@
       "source": "./src/reconnecting-websocket.ts",
       "types": "./src/reconnecting-websocket.ts",
       "default": "./src/reconnecting-websocket.ts"
+    },
+    "./semver": {
+      "source": "./src/semver.ts",
+      "types": "./src/semver.ts",
+      "default": "./src/semver.ts"
     }
   },
   "types": "./src/index.ts",

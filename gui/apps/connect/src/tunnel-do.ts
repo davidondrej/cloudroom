@@ -23,6 +23,8 @@ export interface Env {
 }
 
 const TUNNEL_TAG = "tunnel";
+const PHONE_EVENT_TAG = "phone-event";
+const PHONE_SESSION_ID_HEADER = "x-cloudroom-phone-session-id";
 const RESP_HEAD_TIMEOUT_MS = 30_000;
 /** The Mac pings every 10s. A sleeping Mac's socket can still look open for minutes, so a silent one is gone. */
 const HEARTBEAT_STALE_MS = 30_000;
@@ -156,6 +158,13 @@ export class TunnelDO {
       this.releaseWaiters(null);
       return new Response(null, { status: 204 });
     }
+    if (url.pathname === "/__phone-events") {
+      return this.acceptPhoneEvents(request);
+    }
+    if (request.method === "POST" && url.pathname === "/__control/phone-notify") {
+      this.signalPhones();
+      return new Response(null, { status: 202 });
+    }
     if (request.method === "POST" && url.pathname === "/__control/threads-changed") {
       this.signalThreads();
       return new Response(null, { status: 202 });
@@ -169,6 +178,11 @@ export class TunnelDO {
     ) {
       return this.state.blockConcurrencyWhile(async () => {
         this.abandonStreams("phone access revoked", "phone access revoked");
+        for (const phone of this.state.getWebSockets(PHONE_EVENT_TAG)) {
+          try {
+            phone.close(1000, "phone access revoked");
+          } catch {}
+        }
         this.releaseWaiters(null);
         return new Response(null, { status: 204 });
       });
@@ -382,6 +396,39 @@ export class TunnelDO {
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
 
+  /** Accepts a Mac-off PWA live-events WebSocket (keyed by account DO `phone:<userId>`). Hibernatable: zero idle cost. */
+  private acceptPhoneEvents(request: Request): Response {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return new Response("expected websocket", { status: 426 });
+    }
+    const sessionId = request.headers.get(PHONE_SESSION_ID_HEADER);
+    const pair = new WebSocketPair();
+    const tags = sessionId ? [PHONE_EVENT_TAG, `session:${sessionId}`] : [PHONE_EVENT_TAG];
+    pair[1].serializeAttachment({ kind: PHONE_EVENT_TAG, ...(sessionId ? { sessionId } : {}) });
+    this.state.acceptWebSocket(pair[1], tags);
+    return new Response(null, { status: 101, webSocket: pair[0] });
+  }
+
+  private phoneSignalAt = 0;
+  private phoneSignalTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Pushes a lightweight `threads-changed` event to all connected Mac-off PWAs on this account (max 1/s). */
+  private signalPhones(): void {
+    const sockets = this.state.getWebSockets(PHONE_EVENT_TAG);
+    if (sockets.length === 0) return;
+    const wait = this.phoneSignalAt + SIGNAL_EVERY_MS - Date.now();
+    if (wait > 0) {
+      this.phoneSignalTimer ??= setTimeout(() => { this.phoneSignalTimer = null; this.signalPhones(); }, wait);
+      return;
+    }
+    this.phoneSignalAt = Date.now();
+    const payload = JSON.stringify({ type: "threads-changed", at: this.phoneSignalAt });
+    for (const socket of sockets) {
+      try {
+        socket.send(payload);
+      } catch {}
+    }
+  }
+
   /** In memory only: an evicted object forgets a signal, and the app also fetches after every reconnect. */
   private signalPending = false;
   private signalAt = 0;
@@ -426,14 +473,15 @@ export class TunnelDO {
   private revokeSessionVisitors(sessionId: string): void {
     const tunnel = this.tunnelSocket();
     for (const visitor of this.state.getWebSockets(`session:${sessionId}`)) {
-      if (tunnel) {
+      const tags = this.state.getTags(visitor);
+      if (tunnel && !tags.includes(PHONE_EVENT_TAG)) {
         const { streamId } = visitor.deserializeAttachment() as { streamId: number };
         this.trySend(tunnel, encodeFrame({
           type: "close-stream", streamId, code: 1000, reason: "session revoked",
         }));
       }
       try {
-        visitor.close(1001, "session revoked");
+        visitor.close(tags.includes(PHONE_EVENT_TAG) ? 1000 : 1001, "session revoked");
       } catch {}
     }
   }
@@ -605,7 +653,8 @@ export class TunnelDO {
       this.failHttpStream(streamId, 502, httpReason);
     }
     for (const visitor of this.state.getWebSockets()) {
-      if (!this.state.getTags(visitor).includes(TUNNEL_TAG)) {
+      const tags = this.state.getTags(visitor);
+      if (!tags.includes(TUNNEL_TAG) && !tags.includes(PHONE_EVENT_TAG)) {
         if (tunnel) {
           const { streamId } = visitor.deserializeAttachment() as { streamId: number };
           this.trySend(tunnel, encodeFrame({
@@ -663,6 +712,7 @@ export class TunnelDO {
   webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): void {
     if (ws.readyState !== WS_READY_STATE_OPEN) return;
     const tags = this.state.getTags(ws);
+    if (tags.includes(PHONE_EVENT_TAG)) return;
     if (tags.includes(TUNNEL_TAG)) {
       this.lastFrameAt = Date.now();
       if (typeof message === "string") return;
@@ -807,6 +857,12 @@ export class TunnelDO {
 
   webSocketClose(ws: WebSocket, code: number, reason: string): void {
     const tags = this.state.getTags(ws);
+    if (tags.includes(PHONE_EVENT_TAG)) {
+      try {
+        ws.close(safeCloseCode(code), reason);
+      } catch {}
+      return;
+    }
     if (tags.includes(TUNNEL_TAG)) {
       const { connectedAt, mac, serverId } = tunnelInfo(ws);
       const connectedSeconds = connectedAt ? Math.round((Date.now() - connectedAt) / 1000) : null;

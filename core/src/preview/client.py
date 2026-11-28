@@ -913,15 +913,27 @@ def identity(folder):
 
 MAC_LIMIT = 16 * 1024 * 1024
 MAC_LEVELS = ('off', 'read-only', 'ask', 'full')
-# Read-only commands (ADR 0186): no file writes outside temp folders, no signals to other processes, and no tools that
-# drive apps or system settings. Beyond those named tools, they cannot run programs from the writable temp folders, open
-# apps or URLs through Launch Services, send Apple Events, create launchd jobs, or write preferences through cfprefsd.
+# Read-only commands (ADR 0186): no file writes outside their own temp folder (TEMP, their TMPDIR) and copy staging
+# (/tmp/cloudroom.*, a pull's /tmp/cloudroom-copy-*), so they can't take over other programs' temp files or sockets, like
+# tmux's (#1933). Apple's bash 3.2 ignores TMPDIR for here-documents, so it may also create and remove its own
+# /tmp/sh-thd-N, but never write into one that exists. They can listen on Unix sockets only in their own temp folder.
+# No signals to other processes, and no tools that drive apps or system settings. Beyond those named tools, they cannot
+# run programs from the temp folders, open apps or URLs through Launch Services, send Apple Events, create launchd
+# jobs, or write preferences through cfprefsd.
 # Nothing they start outlives them (end). macOS also refuses setuid tools like ps and top here; pgrep and lsof still work.
 # They also cannot reach this Mac's own servers and sockets (the app's local API, ssh-agent, Docker; DNS still works) or
 # read Cloudroom's folders beyond its tools, so they cannot act through the app or its tokens (ADR 0260). The internet works.
 READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
-             '(allow file-write* (subpath "/private/tmp") (subpath "/private/var/folders") (literal "/dev/null") (literal "/dev/zero")'
-             ' (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))'
+             '(allow file-write* (subpath (param "TEMP")) (regex #"^/private/tmp/cloudroom\\.") (regex #"^/private/tmp/cloudroom-copy-")'
+             ' (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty") (regex #"^/dev/fd/"))'
+             # bash 3.2 creates a here-document, reopens it by name, then unlinks it (redir.c). A new file needs
+             # only file-write-create; file-write-data would let a command write into another program's mid-read.
+             # bash picks the folder with access(W_OK): /var/tmp/, /tmp, /var/tmp, /usr/tmp, then the current one
+             # (tmpfile.c). Seatbelt answers that with file-write-data on the folder itself, so only /tmp gets it. That
+             # creates, renames or removes nothing there: those check the entry's own path (file-write-create,
+             # file-write-unlink), denied but for sh-thd-N, and a folder can't be opened for writing or truncated.
+             '(allow file-write-create file-write-unlink (regex #"^/private/tmp/sh-thd-[0-9]+$"))'
+             '(allow file-write-data (literal "/private/tmp"))'
              '(deny signal (target others))'
              '(deny process-exec (literal "/usr/bin/osascript") (literal "/usr/bin/open") (literal "/usr/bin/shortcuts")'
              ' (literal "/usr/bin/automator") (literal "/bin/launchctl") (literal "/usr/bin/tccutil") (literal "/usr/bin/defaults"))'
@@ -933,7 +945,11 @@ READ_ONLY = ('(version 1)(allow default)(deny file-write*)'
              # Seatbelt's localhost misses IPv4-mapped IPv6 like ::ffff:127.0.0.1, so IPv6 is blocked outright and clients fall
              # back to IPv4. It must be ip4 here: next to an ip6 rule, (remote ip "localhost:*") stops matching 127.0.0.1.
              '(deny network-outbound (remote ip4 "localhost:*") (remote ip6 "*:*") (remote unix-socket))'
-             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))')
+             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))'
+             # Unix sockets only in its own temp folder (tsx's IPC server), so it can't pose as another program's
+             # server, like tmux's (#1933). Unix binds by path as in agent-safehouse's profiles, and the path filter as
+             # for mDNSResponder above.
+             '(deny network-bind (local unix-socket (path-regex #"^/")))(allow network-bind (subpath (param "TEMP")))')
 # Cloudroom's own tools stay readable in its hidden data folder.
 READ_ONLY_TOOLS = '(allow file-read* (literal (param "DATA")) (subpath (param "DATA_BIN")) (subpath (param "DATA_HARNESS")))'
 # Older machine installers kept the relay key in a temp file, and an interrupted install left it behind.
@@ -967,12 +983,13 @@ def hidden_folders(data):
     return real_paths([data, home / '.gui-cloudroom', home / '.gui-cloudroom-dev']), real_paths(machines)
 
 
-def read_only(data, *marks):
-    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens. The sandbox
-    denies the `marks`, names no Mach service has, so end() can find all the command started."""
+def read_only(data, temp, *marks):
+    """sandbox-exec arguments for a read-only command; `data` is Cloudroom's folder, which holds its tokens, and `temp`
+    the command's own temp folder (private_temp). The sandbox denies the `marks`, names no Mach service has, so end() can
+    find all the command started."""
     data = data.resolve()  # Seatbelt matches real paths.
     folders, machines = hidden_folders(data)
-    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness',
+    params = {'DATA': data, 'DATA_BIN': data / 'bin', 'DATA_HARNESS': data / 'browser-harness', 'TEMP': temp,
               **{f'FOLDER_{n}': path for n, path in enumerate(folders)},
               **{f'MACHINE_{n}': path for n, path in enumerate(machines)}}
     subpaths = lambda name, paths: ''.join(f' (subpath (param "{name}_{n}"))' for n in range(len(paths)))
@@ -982,6 +999,15 @@ def read_only(data, *marks):
                f'(deny file-read*{subpaths("FOLDER", folders)}){READ_ONLY_TOOLS}'
                f'(deny file-read* file-write*{subpaths("MACHINE", machines)} {READ_ONLY_OLD_KEYS})')
     return ['/usr/bin/sandbox-exec', *(arg for key, path in params.items() for arg in ('-D', f'{key}={path}')), '-p', profile]
+
+
+def private_temp():
+    """A read-only command's own new temp folder, its TMPDIR, with zsh's TMPPREFIX there too, since zsh ignores TMPDIR
+    for here-documents. It is the only folder the command may write besides copy staging (READ_ONLY). Real path, for
+    Seatbelt; the caller removes it once the command ends."""
+    temp = Path('/tmp').resolve() / f'cloudroom-tmp.{uuid.uuid4().hex[:16]}'
+    temp.mkdir(0o700)
+    return temp, {**os.environ, 'TMPDIR': f'{temp}/', 'TMPPREFIX': f'{temp}/zsh'}
 
 
 def sandbox_checks():
@@ -1233,8 +1259,12 @@ COPY_MODE = '/usr/bin/stat -Lf %OLp' if sys.platform == 'darwin' else 'stat -Lc 
 # Long listings through links, where an access control list (ACL) shows as a + after the mode. On macOS a @ for extended
 # attributes hides that +, so also its entries, each on its own line.
 COPY_ACL = '/bin/ls -ldeL' if sys.platform == 'darwin' else 'ls -ldL'
-# Where read-only commands may write (READ_ONLY), so agents can swap paths there without asking.
-TEMP_FOLDERS = ('/private/tmp', '/private/var/folders')
+# Read-only commands may create and swap paths here (READ_ONLY: copy staging, their own temp folder, bash's sh-thd-N),
+# so agents can change things in it without asking (in_temp).
+PRIVATE_TMP = '/private/tmp'
+# Why a push into /tmp failed: it runs read-only (as_copy), as in jobs.rs.
+PUSH_HINT = (b'\nCloudroom: a push into /tmp runs read-only, so it can land only in /tmp/cloudroom.NAME. Push there instead, '
+             b'such as `room-cli mac push FILE /tmp/cloudroom.NAME/`, or to a folder outside /tmp.\n')
 
 
 def disk_path(path):
@@ -1264,21 +1294,16 @@ def real_folder(path):
     return real, [info.st_dev, info.st_ino]
 
 
-def in_temp(folder):
-    """Whether a real folder is inside a temp folder. Folders compare by identity, so another spelling of the same
-    folder, such as other letter case, still counts."""
-    roots = set()
-    for root in TEMP_FOLDERS:
-        with contextlib.suppress(OSError):
-            info = os.stat(root)
-            roots.add((info.st_dev, info.st_ino))
-    for path in (folder, *map(str, Path(folder).parents)):
-        if any(path == root for root in TEMP_FOLDERS):
-            return True
-        with contextlib.suppress(OSError):
-            info = os.stat(path)
-            if (info.st_dev, info.st_ino) in roots:
-                return True
+def in_temp(path):
+    """Whether a path, or a folder above it, is PRIVATE_TMP. Folders compare by identity, never by name, so /tmp, other
+    letter case, other Unicode spellings, and links into it all count, as does a path that doesn't exist yet. Nothing
+    counts where PRIVATE_TMP doesn't exist (Linux, Windows). Same answer as jobs.rs's in_temp."""
+    with contextlib.suppress(OSError):
+        root = os.stat(PRIVATE_TMP)
+        for folder in (path, *Path(path).parents):
+            with contextlib.suppress(OSError):
+                if os.path.samestat(os.stat(folder), root):
+                    return True
     return False
 
 
@@ -1309,8 +1334,8 @@ def copy_command(copy, token=None, tmp=True):
     Returns it with where the item lands, whether that is inside a folder, and whether it is in a temp folder.
 
     The place is resolved here, from the home folder like any push and through any links, so the popup names the real
-    place and the command writes nowhere else. Outside temp folders, agents can't change that path without asking. In a
-    temp folder they can, so there the command runs read-only (as_copy). It unpacks in a new, empty folder at the place
+    place and the command writes nowhere else. Outside /tmp, agents can't change that path without asking. In /tmp they
+    can, so there the command runs read-only (as_copy). It unpacks in a new, empty folder at the place
     and keeps only the named item, so an archive can't add other files or reach existing ones through a hard link. Like
     cp, the item gets a new name, which must not exist yet, or goes into a folder: it moves in if new, else is re-packed
     there so that folders merge and files replace as before. Raises ValueError for a name or place it can't use.
@@ -1339,13 +1364,17 @@ def copy_command(copy, token=None, tmp=True):
     if WINDOWS and not all(windows_name(part) for part in [*to.split('/'), final] if part not in ('', '~', '.', '..')
                            and not (len(part) == 2 and part[1] == ':')):
         raise ValueError('Invalid copy')
-    place, temp = os.path.join(folder, final), any(folder == root or folder.startswith(root + '/') for root in TEMP_FOLDERS)
+    place = os.path.join(folder, final)
+    temp = in_temp(place)  # Anywhere in /tmp, whatever its name (#1933): read-only commands can swap paths there.
+    # One that runs read-only unpacks where its sandbox may write (READ_ONLY's /tmp/cloudroom.*). Others use a hidden
+    # name read-only commands can't write.
+    scratch = 'cloudroom.' if temp else '.cloudroom.'
     taken = '{ [ ! -e "$to" ] && [ ! -L "$to" ] || taken; }'
     return (f"b={shlex.quote(posix(folder))}; n={shlex.quote(name)}; to={shlex.quote(posix(place))}; s={staged or ''}; "
             "taken() { printf '%s already exists; nothing was copied\\n' \"$to\" >&2; return 1; }; "
             + ('' if inside else f'{taken} || exit 1; ') +
             (f'mkdir -p -- "$b" && x="$b/.cloudroom.{token}" && mkdir -- "$x" && mkdir -- "$x/i" || exit 1; ' if token else
-               'mkdir -p -- "$b" && x=$(mktemp -d "$b/.cloudroom.XXXXXX") && mkdir -- "$x/i" || exit 1; ') +
+               f'mkdir -p -- "$b" && x=$(mktemp -d "$b/{scratch}XXXXXX") && mkdir -- "$x/i" || exit 1; ') +
             'clean() { find "$x" -type d -exec chmod u+rwx {} + 2>/dev/null; rm -rf "$x" $s; }; '
             "trap 'clean; exit 1' HUP INT TERM; "
             + ((f'cat {staged}/* > "$x/a.tgz"' if staged else 'cat > "$x/a.tgz"') + '; c=$?; '
@@ -1390,7 +1419,7 @@ def copy_command(copy, token=None, tmp=True):
 
 def as_copy(job):
     """A push runs only the command built here (copy_command), from the home folder, and always counts as a change. One
-    into a temp folder also runs read-only. Why it can't run, or None."""
+    into /tmp (in_temp) also runs read-only. Why it can't run, or None."""
     if job.get('copy') is None:
         return None
     token = uuid.uuid4().hex[:16] if WINDOWS else None
@@ -1717,7 +1746,7 @@ class MacJobs:
         # Refused commands are checked too, but a script file is read only for a command that will run.
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             review(core, job, mac_level(self.enabled() or {}), not refused)
-        # A push into a temp folder (as_copy) runs read-only even once approved, since agents can swap paths there.
+        # A push into /tmp (as_copy) runs read-only even once approved, since agents can swap paths there.
         sandboxed = not refused and (not job.get('write') or job.get('sandbox')) and mac_level(self.enabled() or {}) != 'full'
         if sandboxed and not self.containable():
             refused, sandboxed = "This Mac can't make sure a read-only command leaves nothing running, so it did not run.", False
@@ -1759,8 +1788,7 @@ class MacJobs:
             b = 'builtin' if login.endswith('/zsh') else 'command'
             command = (f'{b} cd -- {shlex.quote(approved)} && {b} test "$({b} pwd -P)" = {shlex.quote(approved)} '
                        f'|| {{ {b} echo {shlex.quote(changed)} >&2; {b} exit 126; }}; {command}')
-        shell = [login, '-lc', path + command]
-        command_file = None
+        shell, temp, command_file = [login, '-lc', path + command], None, None
         try:
             if refused:
                 raise PermissionError(refused)
@@ -1781,6 +1809,8 @@ class MacJobs:
                     full = f'. {shlex.quote(posix(command_file))}'
                 env = windows_job_env(full)
                 shell = [login, '-lc', '__cloudroom_cmd=$CLOUDROOM_COMMAND; unset CLOUDROOM_COMMAND; eval "unset __cloudroom_cmd\n$__cloudroom_cmd"']
+            if sandboxed:
+                temp, env = private_temp()
             with self.lock:  # A stop that arrives while the command starts either skips or kills it.
                 if job['id'] in self.cancelled:
                     self.cancelled.discard(job['id'])
@@ -1795,8 +1825,8 @@ class MacJobs:
                     process, process.job = windows_start(shell, cwd=folder, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                                          stderr=subprocess.PIPE)
                 else:
-                    process = subprocess.Popen([*read_only(data, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
-                                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
+                    process = subprocess.Popen([*read_only(data, temp, self.mark, self.boot, mark), *shell] if sandboxed else shell, cwd=folder,
+                                               env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
                 self.running[job['id']] = process
                 if sandboxed:
                     self.sandboxes[mark] = (core.key, None, process)
@@ -1834,9 +1864,9 @@ class MacJobs:
                     self.sandboxes[mark], self.contained = (None, None, None), False  # end_unwanted keeps ending it.
             # Blocked local connections fail as EPERM, or as curl's "couldn't connect".
             if sandboxed and result['code'] and any(sign in output['stderr'].lower() for sign in (b'not permitted', b'eperm', b"couldn't connect")) and b'deadlock avoided' not in output['stderr'].lower():
-                output['stderr'] += (b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files.\n"
+                output['stderr'] += PUSH_HINT if job.get('copy') else (b"\nCloudroom: Mac access is Read-only, so commands cannot change the Mac, reach its local servers or sockets, or read Cloudroom's files. They may write only in $TMPDIR, which is removed when the command ends, and in /tmp/cloudroom.NAME, which keeps files to pull later. macOS mktemp ignores $TMPDIR unless given a path: use `mktemp -d -p \"$TMPDIR\"` or `mktemp \"$TMPDIR/x.XXXXXX\"`.\n"
                                      if mac_level(self.enabled() or {}) == 'read-only' else
-                                     b"\nCloudroom: this ran read-only, without this Mac's local servers, sockets, or Cloudroom's files. To change the Mac or reach them, "
+                                     b"\nCloudroom: this ran read-only, without this Mac's local servers, sockets, or Cloudroom's files. It may write only in $TMPDIR, which is removed when the command ends, and in /tmp/cloudroom.NAME, which keeps files to pull later. macOS mktemp ignores $TMPDIR unless given a path: use `mktemp -d -p \"$TMPDIR\"` or `mktemp \"$TMPDIR/x.XXXXXX\"`. To change the Mac or reach them, "
                                      b'rerun with `room-cli mac run --write ...`; the user approves it first.\n')
             # Reading an iCloud file that "Optimize Mac Storage" moved off the Mac downloads it, which the sandbox blocks (#144).
             if sandboxed and result['code'] and b'deadlock avoided' in output['stderr'].lower():
@@ -1847,6 +1877,9 @@ class MacJobs:
                     b"Or download it first with `room-cli mac run --write 'brctl download PATH'`. The user approves either.\n")
             result['truncated'] = any(len(value) > MAC_LIMIT for value in output.values())
             result.update({name: bytes(value[:MAC_LIMIT]).hex() for name, value in output.items()})
+        finally:
+            if temp:
+                shutil.rmtree(temp, ignore_errors=True)  # Never follows links the command left there.
         if command_file:
             with contextlib.suppress(OSError):
                 command_file.unlink()

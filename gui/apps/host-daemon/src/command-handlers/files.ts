@@ -5,7 +5,7 @@
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import { fuzzyMatchPaths } from "@cloudroom/fuzzy-match";
 import type {
   HostDaemonOnlineRpcResult,
@@ -68,7 +68,7 @@ function coreFs<T>(binary: string, command: string, request: object, options?: O
 }
 
 function fileType(path: string): { mimeType: string | undefined; image: boolean; limit: number } {
-  const mimeType = mimeTypes.lookup(path) || undefined;
+  const mimeType = lookupMimeType(path) || undefined;
   // SVG is text the viewer can show and edit; other images are bytes.
   const image = Boolean(mimeType?.startsWith("image/") && mimeType !== "image/svg+xml");
   return { mimeType, image, limit: READ_FILE_BYTES };

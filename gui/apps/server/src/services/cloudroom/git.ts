@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import type { Context } from "hono";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import { z } from "zod";
 import { rawDiffFileStatSchema, workspaceStatusSchema, type RawDiffFileStat, type WorkspaceDiffTarget, type WorkspaceStatus } from "@cloudroom/domain";
 import { diffPatchEntrySchema, environmentDiffBranchesQuerySchema, environmentDiffBranchesResponseSchema, environmentDiffFileQuerySchema, environmentDiffPatchRequestSchema, environmentDiffQuerySchema, environmentStatusQuerySchema, type DiffFileEntry, type DiffPatchEntry, type EnvironmentDiffBranchesResponse, type EnvironmentDiffFileQuery, type EnvironmentDiffFileResponse, type EnvironmentDiffFilesResponse } from "@cloudroom/server-contract";
@@ -84,7 +84,7 @@ export async function cloudGitFile(run: CloudGitRun, query: EnvironmentDiffFileQ
   const target = query.target === "commit" ? `commit:${query.sha}` : query.target === "branch_committed" ? "branch" : query.target;
   const content = await core(run, ["show", target, query.side, ...(query.target === "branch_committed" || query.target === "all" ? ["--merge-base", query.mergeBaseRef] : []), "--", path]);
   if (!content) return legacy.cloudGitFile(run, query);
-  const mimeType = mimeTypes.lookup(path) || undefined;
+  const mimeType = lookupMimeType(path) || undefined;
   const image = mimeType?.startsWith("image/") === true && mimeType !== "image/svg+xml";
   const utf8 = !image && isUtf8(content);
   return { path, content: content.toString(utf8 ? "utf8" : "base64"), contentEncoding: utf8 ? "utf8" : "base64", ...(mimeType ? { mimeType } : {}), sizeBytes: content.length };

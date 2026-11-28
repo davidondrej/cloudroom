@@ -716,7 +716,9 @@ function CodeRow({ rpc, close }: { rpc: Rpc; close: () => void }) {
           <span className="text-destructive-text">{error}</span>
         ) : session ? (
           <>
-            Sign in with the other Google account, then paste the code here.{" "}
+            Sign in with another Google account, then paste the code here.{" "}
+            <strong className="font-semibold text-foreground">Local threads</strong> switch to it when an account
+            hits its limit.{" "}
             <button
               type="button"
               onClick={() => navigate.openUrl(session.url)}

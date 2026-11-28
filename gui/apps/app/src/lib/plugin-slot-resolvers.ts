@@ -333,8 +333,15 @@ export function resolveFileOpenerReplacement(args: {
   );
 }
 
-/** Plugins whose requests show as a card at the end of the chat instead of in place of the composer: paid GPU
- *  sessions (docs/scopes/gpus.md). The chat box stays where it is. */
+/** Plugins and renderers whose requests show as a card at the end of the chat instead of in place of the composer:
+ *  paid GPU sessions (docs/scopes/gpus.md) and browser control setup (docs/scopes/computer-use.md). The chat box stays where it is. */
 const CHAT_CARD_PLUGINS = new Set(["gpu"]);
-export const isChatCardPluginInteraction = (pluginId: string | undefined) =>
-  pluginId !== undefined && CHAT_CARD_PLUGINS.has(pluginId);
+const CHAT_CARD_RENDERERS = new Set(["computer-use:computer-use-browser-setup"]);
+export const isChatCardPluginInteraction = (
+  pluginId: string | undefined,
+  rendererId?: string,
+) =>
+  pluginId !== undefined &&
+  (CHAT_CARD_PLUGINS.has(pluginId) ||
+    (rendererId !== undefined &&
+      CHAT_CARD_RENDERERS.has(`${pluginId}:${rendererId}`)));

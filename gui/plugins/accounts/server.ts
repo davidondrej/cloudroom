@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -59,8 +60,17 @@ import { prepareProfile, releaseProfile, startMcpSync } from "./src/profile.js";
 import { SignInAgainError, type Secret, type SignedIn } from "./src/tokens.js";
 
 const USAGE_EVERY_MS = 5 * 60_000;
+// Claude /api/oauth/usage throttles aggressively per token; poll on a randomized 15–45 min cadence.
+const CLAUDE_POLL_MIN_MS = 15 * 60_000;
+const CLAUDE_POLL_MAX_MS = 45 * 60_000;
+const CLAUDE_MIN_GAP_MS = 5 * 60_000;
+const CLAUDE_POST_TURN_MIN_MS = 15_000;
+const CLAUDE_POST_TURN_MAX_MS = 45_000;
 // Accounts not in use are read every 12th check: hourly.
 const IDLE_USAGE_TICKS = 12;
+
+const randomDelay = (minMs: number, maxMs: number): number =>
+  minMs + Math.floor(Math.random() * (maxMs - minMs + 1));
 const MAC_NEEDS_CLOUD =
   "Approve this Mac's Claude account for Cloud first: click Use on it in Settings → Agents → Accounts.";
 const LOGIN_FAILED =
@@ -129,6 +139,8 @@ export default async function plugin(room: BbPluginApi) {
   const agyHome = (id: string) => path.join(agyDir, id);
   const readAgy = (id: string) => fs.readFile(path.join(agyHome(id), AGY_TOKEN), "utf8");
   const agyLogin = new AntigravityLogin();
+  // Sign-ins of this computer's own Antigravity login. Their HOME is the real one: never deleted.
+  const agyMacLogins = new Set<string>();
   // Sign-ins in progress: the new account's id, and when the add began (telemetry).
   const agyAdds = new Map<string, { id: string; startedAt: number }>();
   room.onDispose(() => agyLogin.stopAll());
@@ -617,7 +629,7 @@ export default async function plugin(room: BbPluginApi) {
     return claudeUsage(
       await readSecret(account.id),
       profile,
-      previous?.at && previous.windows.length ? previous : undefined,
+      previous?.windows.length ? previous : undefined,
     );
   };
   const pendingReads = new Map<
@@ -715,18 +727,63 @@ export default async function plugin(room: BbPluginApi) {
     mac &&
     (limitedUntil("claude-code", LOCAL) ||
       (current("claude-code") === LOCAL && accounts.some((a) => a.provider === "claude-code")));
-  const refreshAll = (force = false) =>
+  const refreshClaudeActive = (force = false) =>
     Promise.all([
       readMacUsage() ? refreshUsage(LOCAL, force) : undefined,
       ...accounts
         .filter(
           (account) =>
+            account.provider === "claude-code" &&
+            account.id === current("claude-code"),
+        )
+        .map((account) => refreshUsage(account, force)),
+    ]);
+  const refreshAll = (force = false, includeClaude = true) =>
+    Promise.all([
+      includeClaude ? refreshClaudeActive(force) : undefined,
+      ...accounts
+        .filter(
+          (account) =>
             account.provider === "acp-cursor" ||
-            account.id === current("claude-code") ||
             account.id === current("acp-antigravity"),
         )
         .map((account) => refreshUsage(account, force)),
     ]);
+  let claudePollTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleClaudePoll = () => {
+    if (disposed) return;
+    if (claudePollTimer !== null) clearTimeout(claudePollTimer);
+    claudePollTimer = setTimeout(() => {
+      claudePollTimer = null;
+      if (disposed) return;
+      background(refreshClaudeActive());
+      scheduleClaudePoll();
+    }, randomDelay(CLAUDE_POLL_MIN_MS, CLAUDE_POLL_MAX_MS));
+    claudePollTimer.unref();
+  };
+  let claudePostTurnTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleClaudePostTurnRefresh = (id: string) => {
+    if (disposed || claudePostTurnTimer !== null) return;
+    const lastAt = usage.get(id)?.at ?? 0;
+    if (lastAt > 0 && Date.now() - lastAt < CLAUDE_MIN_GAP_MS) return;
+    claudePostTurnTimer = setTimeout(() => {
+      claudePostTurnTimer = null;
+      if (disposed) return;
+      const latestAt = usage.get(id)?.at ?? 0;
+      if (latestAt > 0 && Date.now() - latestAt < CLAUDE_MIN_GAP_MS) return;
+      if (id === LOCAL) {
+        if (readMacUsage()) background(refreshUsage(LOCAL, true));
+        return;
+      }
+      const account = accounts.find(
+        (entry) => entry.provider === "claude-code" && entry.id === id,
+      );
+      if (account && account.id === current("claude-code")) {
+        background(refreshUsage(account, true));
+      }
+    }, randomDelay(CLAUDE_POST_TURN_MIN_MS, CLAUDE_POST_TURN_MAX_MS));
+    claudePostTurnTimer.unref();
+  };
   // Claude accounts not in use get a free read at start and every hour, one at a time. An account with no bars saved
   // yet (added before they were kept, or its first check failed) gets one reply at start, so its row isn't empty.
   const refreshIdle = async (fill = false) => {
@@ -764,7 +821,7 @@ export default async function plugin(room: BbPluginApi) {
   // A token Cloud hasn't confirmed yet is retried every few minutes, and at start.
   let ticks = 0;
   const timer = setInterval(() => {
-    background(refreshAll());
+    background(refreshAll(false, false));
     background(telemetry.daily(snapshot));
     if (++ticks % IDLE_USAGE_TICKS === 0) {
       background(refreshIdle());
@@ -774,8 +831,13 @@ export default async function plugin(room: BbPluginApi) {
   }, USAGE_EVERY_MS);
   if (cloudStale) void followInCloud(false);
   timer.unref();
-  room.onDispose(() => clearInterval(timer));
-  background(refreshAll());
+  room.onDispose(() => {
+    clearInterval(timer);
+    if (claudePollTimer !== null) clearTimeout(claudePollTimer);
+    if (claudePostTurnTimer !== null) clearTimeout(claudePostTurnTimer);
+  });
+  scheduleClaudePoll();
+  background(refreshAll(false, true));
   background(refreshIdle(true));
   if (current("acp-antigravity") !== LOCAL) background(placeAgy());
   // Plans change on Claude's side, and `claude auth status` keeps the one a login signed in with (#2534). So each full
@@ -1162,7 +1224,7 @@ export default async function plugin(room: BbPluginApi) {
       (existing.org && existing.email !== account.email)
     )
       throw new Error(
-        "That is a different Claude account. Sign in with this account's email.",
+        `That is a different Claude account. Sign out of claude.ai or open the link in a private window, then sign in with ${existing.email ?? "this account's email"}.`,
       );
     const old = existing.profile;
     await writeSecret(existing.id, secret);
@@ -1185,10 +1247,21 @@ export default async function plugin(room: BbPluginApi) {
   // One approval gives Cloud a one-year token for the Mac's own login, which then goes in use once Cloud has it.
   const saveMac = async (token: string) => {
     const login = await refreshMac();
+    if (!login)
+      throw new Error("Sign in to Claude Code on this computer first: run `claude`, then try again.");
+    // Each failure has its own message and telemetry code: they used to share one, so the cause was unknowable.
     const status = await profileAccount().catch(() => null);
-    if (!login || !status?.orgId || status.orgId !== (await tokenOrganization(token)))
+    if (!status?.orgId)
       throw new Error(
-        `Approve with ${login?.email ?? "the Claude account this Mac uses"}. Start again.`,
+        "Couldn't read this computer's Claude login. Run `claude auth status` in a terminal, then try again.",
+      );
+    const approved = await tokenOrganization(token);
+    if (!approved)
+      throw new Error("Couldn't confirm which Claude account you approved. Try again.");
+    // `claude setup-token` approves whichever account claude.ai has open in the browser, not this computer's login.
+    if (approved !== status.orgId)
+      throw new Error(
+        `Your browser approved a different Claude account than this computer uses. Sign out of claude.ai or open the link in a private window, then approve with ${login.email}.`,
       );
     await writeSecret(LOCAL, { ...claudeSecret(token), issuedAt: Date.now() });
     macCloud = { email: login.email, org: login.org, plan: status.plan };
@@ -1669,7 +1742,12 @@ export default async function plugin(room: BbPluginApi) {
           state.busy = false;
         }
       },
-      "antigravity.start": async () => {
+      "antigravity.start": async (input) => {
+        if (input?.mac) {
+          const started = await agyLogin.start(os.homedir(), true);
+          agyMacLogins.add(started.sessionId);
+          return started;
+        }
         const add = { kind: "new" as const, startedAt: Date.now() };
         telemetry.add("acp-antigravity", add, "started", "login");
         try {
@@ -1680,6 +1758,17 @@ export default async function plugin(room: BbPluginApi) {
         }
       },
       "antigravity.complete": async ({ sessionId, code }) => {
+        if (agyMacLogins.has(sessionId)) {
+          if (!isAgyCode(code)) throw new Error("Paste the code Google showed.");
+          const failed = await agyLogin.complete(sessionId, code).then(() => null, (error: unknown) => error);
+          // Cancelled meanwhile: the dialog's close already took it out.
+          if (!agyMacLogins.delete(sessionId)) throw new Error("This sign-in was cancelled.");
+          if (failed) throw failed;
+          // agy's answer decides: its status read is cached for up to a minute, so it may still say signed out.
+          background(refreshAntigravityLocal(true));
+          room.realtime.publish(ACCOUNTS_CHANGED, {});
+          return null;
+        }
         const add = {
           kind: "new" as const,
           startedAt: agyAdds.get(sessionId)?.startedAt ?? Date.now(),
@@ -1694,6 +1783,7 @@ export default async function plugin(room: BbPluginApi) {
         return null;
       },
       "antigravity.cancel": async ({ sessionId }) => {
+        agyMacLogins.delete(sessionId);
         const id = agyAdds.get(sessionId)?.id;
         agyAdds.delete(sessionId);
         agyLogin.cancel(sessionId);
@@ -1741,8 +1831,9 @@ export default async function plugin(room: BbPluginApi) {
             polled.message,
           );
         }
-        if (polled.status === "complete")
+        if (polled.status === "complete") {
           room.realtime.publish(ACCOUNTS_CHANGED, {});
+        }
         return polled;
       },
     },
@@ -1945,7 +2036,10 @@ export default async function plugin(room: BbPluginApi) {
       await noteLoginFailed(ran.id, undefined);
     const used = ran?.id ?? current(provider.data);
     const key = ran?.key ?? limitKey(provider.data, used);
-    if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) return;
+    if (!(key in limits) || began <= (limitedAt.get(key) ?? 0)) {
+      if (provider.data === "claude-code") scheduleClaudePostTurnRefresh(used);
+      return;
+    }
     const mark = limits[key];
     if (typeof mark === "object" && (mark.windowKey === "overage" || mark.windowKey.startsWith("seven_day_"))) {
       // Success on another model or on the base plan cannot clear a model or spending limit.

@@ -51,6 +51,7 @@ You are working inside Cloudroom, an IDE for managing coding agents in projects,
 - Write the tag, not the name, and never in backticks.
 - Never build thread URLs.
 - For real-browser work, read the `browser-harness` skill.
+- In the user's browser, open a new tab in the existing window, not a new window or instance, unless asked.
 {{#if local}}
 {{#if mac}}
 - To control desktop apps, read the `computer-use` skill.

@@ -866,6 +866,12 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<HostActionResponse>(),
     }),
+    forget: defineRoute({
+      path: "/hosts/:id/forget",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<HostActionResponse>(),
+    }),
     delete: defineRoute({
       path: "/hosts/:id",
       method: "delete",

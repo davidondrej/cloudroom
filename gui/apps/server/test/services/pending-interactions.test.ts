@@ -3,11 +3,31 @@ import { eq } from "drizzle-orm";
 import { describe, expect, it, vi } from "vitest";
 import {
   events as eventTable,
+  getThread,
+  hostDaemonSessions,
   listPendingInteractionsByThread,
+  markThreadDeleted,
+  openSession,
   pendingInteractions as pendingInteractionTable,
 } from "@cloudroom/db";
 import type { PendingInteractionCreate } from "@cloudroom/domain";
-import { handleHostSessionOpened } from "../../src/internal/session-owner-side-effects.js";
+import { HOST_DAEMON_PROTOCOL_VERSION } from "@cloudroom/host-daemon-contract";
+import {
+  DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+  DAEMON_DISCONNECT_GRACE_MS,
+} from "../../src/constants.js";
+import {
+  handleDaemonSocketClosed,
+  handleHostSessionOpened,
+  startRunningTurnDeadlinesAfterRestart,
+} from "../../src/internal/session-owner-side-effects.js";
+import { requestThreadStopForCurrentState } from "../../src/services/threads/thread-lifecycle.js";
+import {
+  archiveThreadAndReleaseChildren,
+  unarchiveThreadKeepingOpenParent,
+} from "../../src/services/threads/thread-ownership.js";
+import { NotificationHub } from "../../src/ws/hub.js";
+import { createMockHubSocket } from "../helpers/mock-hub-socket.js";
 import { toPendingInteraction } from "../../src/services/interactions/pending-interaction-serialization.js";
 import { PendingInteractionLifecycle } from "../../src/services/interactions/pending-interactions.js";
 import type { AppDeps } from "../../src/types.js";
@@ -754,6 +774,1541 @@ describe("pending interaction lifecycle", () => {
         status: "pending",
         statusReason: null,
       });
+    });
+  });
+
+  it("keeps a parent question and active children alive through a brief disconnect until the active-work grace expires", async () => {
+    await withTestHarness(async (harness) => {
+      vi.useFakeTimers();
+      try {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-pending-interaction-brief-disconnect",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+        });
+        const parent = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: "claude-code",
+          status: "active",
+        });
+        const children = [1, 2].map((index) => {
+          const child = seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            parentThreadId: parent.id,
+            providerId: "claude-code",
+            status: "active",
+          });
+          seedTurnStarted(harness.deps, {
+            environmentId: environment.id,
+            threadId: child.id,
+            turnId: `turn-child-${index}`,
+          });
+          return child;
+        });
+        const created = registerPendingInteraction(
+          harness.deps,
+          harness.deps.pendingInteractions,
+          {
+            threadId: parent.id,
+            turnId: "turn-parent-brief-disconnect",
+            providerId: "claude-code",
+            providerThreadId: "claude-parent-brief-disconnect",
+            providerRequestId: "ask-parent-brief-disconnect",
+            payload: createUserQuestionPayload(),
+          },
+        );
+        if (created.outcome === "rejected") {
+          throw new Error(
+            `Expected interaction registration to succeed: ${created.reason}`,
+          );
+        }
+        harness.deps.hub.registerDaemon(
+          session.id,
+          host.id,
+          createMockHubSocket(),
+        );
+
+        handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+        await vi.advanceTimersByTimeAsync(DAEMON_DISCONNECT_GRACE_MS + 5_000);
+
+        // Past the 5s disconnect grace, the question and all turns still wait for reconnect.
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get(),
+        ).toMatchObject({ status: "pending", statusReason: null });
+        expect(getThread(harness.deps.db, parent.id)?.status).toBe("active");
+        for (const child of children) {
+          expect(getThread(harness.deps.db, child.id)?.status).toBe("active");
+        }
+
+        // Reconnect the same daemon inside the 60s window and verify recovery.
+        const resumedSession = seedSession(harness.deps, host.id);
+        await handleHostSessionOpened(harness.deps, {
+          activeThreads: [parent, ...children].map((t) => ({ threadId: t.id })),
+          hostId: host.id,
+          openedSession: resumedSession,
+          previousSession: session,
+        });
+        harness.deps.hub.registerDaemon(
+          resumedSession.id,
+          host.id,
+          createMockHubSocket(),
+        );
+        await vi.advanceTimersByTimeAsync(
+          DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+        );
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get(),
+        ).toMatchObject({ status: "pending", statusReason: null });
+
+        // A second disconnect that exceeds the full active-work grace interrupts everything.
+        handleDaemonSocketClosed(harness.deps, {
+          sessionId: resumedSession.id,
+        });
+        await vi.advanceTimersByTimeAsync(
+          DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+        );
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get(),
+        ).toMatchObject({ status: "interrupted" });
+        expect(getThread(harness.deps.db, parent.id)?.status).toBe("error");
+        for (const child of children) {
+          expect(getThread(harness.deps.db, child.id)?.status).toBe("error");
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it.each([
+    ["same daemon reconnects", "instance-1", "resolved", 1],
+    ["replacement daemon takes over", "instance-restarted", "interrupted", 0],
+  ] as const)(
+    "handles a resolution submitted during a brief disconnect when %s",
+    async (_label, reconnectInstanceId, expectedStatus, expectedRpcCount) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers();
+        try {
+          const { host, session } = seedHostSession(harness.deps, {
+            id: `host-resolve-during-drop-${reconnectInstanceId}`,
+          });
+          const { project } = seedProjectWithSource(harness.deps, {
+            hostId: host.id,
+          });
+          const environment = seedEnvironment(harness.deps, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+          const parent = seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            providerId: "claude-code",
+            status: "active",
+          });
+          const created = registerPendingInteraction(
+            harness.deps,
+            harness.deps.pendingInteractions,
+            {
+              threadId: parent.id,
+              turnId: "turn-resolve-during-drop",
+              providerId: "claude-code",
+              providerThreadId: "claude-resolve-during-drop",
+              providerRequestId: `ask-resolve-during-drop-${reconnectInstanceId}`,
+              payload: createUserQuestionPayload(),
+            },
+          );
+          if (created.outcome === "rejected") {
+            throw new Error(
+              `Expected interaction registration to succeed: ${created.reason}`,
+            );
+          }
+          harness.deps.hub.registerDaemon(
+            session.id,
+            host.id,
+            createMockHubSocket(),
+          );
+
+          handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+          await vi.advanceTimersByTimeAsync(2_000);
+
+          harness.deps.pendingInteractions.resolvePendingInteraction({
+            threadId: parent.id,
+            interactionId: created.interaction.id,
+            resolution: createUserAnswerResolution(),
+          });
+          await vi.advanceTimersByTimeAsync(8_000);
+
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get(),
+          ).toMatchObject({ status: "resolving" });
+
+          const nextSession = openSession(harness.deps.db, {
+            hostId: host.id,
+            instanceId: reconnectInstanceId,
+            hostName: host.name,
+            dataDir: `/tmp/bb-host-data/${host.id}`,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+            heartbeatIntervalMs: 5_000,
+            leaseTimeoutMs: 30_000,
+          });
+          await handleHostSessionOpened(harness.deps, {
+            activeThreads:
+              reconnectInstanceId === "instance-1"
+                ? [{ threadId: parent.id }]
+                : [],
+            hostId: host.id,
+            openedSession: nextSession,
+            previousSession: session,
+          });
+
+          const sentCommands: string[] = [];
+          let threadSelectsBeforeSend = 0;
+          let countThreadSelects = reconnectInstanceId === "instance-1";
+          const client = harness.db.$client;
+          const origPrepare = client.prepare.bind(client);
+          client.prepare = ((sql: string) => {
+            if (
+              countThreadSelects &&
+              /^\s*select\b/iu.test(sql) &&
+              sql.includes('"threads"')
+            ) {
+              threadSelectsBeforeSend += 1;
+            }
+            return origPrepare(sql);
+          }) as typeof client.prepare;
+          const nextSocket = createMockHubSocket();
+          const baseSend = nextSocket.send;
+          nextSocket.send = (data: string) => {
+            baseSend(data);
+            const parsed = JSON.parse(data) as {
+              type?: string;
+              requestId?: string;
+              command?: { type: string };
+            };
+            if (
+              parsed.type === "host-rpc.request" &&
+              parsed.requestId &&
+              parsed.command
+            ) {
+              countThreadSelects = false;
+              sentCommands.push(parsed.command.type);
+              harness.deps.hub.recordHostOnlineRpcResponse({
+                sessionId: nextSession.id,
+                message: {
+                  type: "host-rpc.response",
+                  requestId: parsed.requestId,
+                  commandType: parsed.command.type as "interactive.resolve",
+                  ok: true,
+                  result: {},
+                },
+              });
+            }
+          };
+          try {
+            harness.deps.hub.registerDaemon(
+              nextSession.id,
+              host.id,
+              nextSocket,
+            );
+            await vi.advanceTimersByTimeAsync(0);
+          } finally {
+            client.prepare = origPrepare;
+          }
+
+          if (reconnectInstanceId === "instance-1") {
+            expect(threadSelectsBeforeSend).toBe(1);
+          }
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get()?.status,
+          ).toBe(expectedStatus);
+          expect(sentCommands).toHaveLength(expectedRpcCount);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    },
+  );
+
+  it.each([
+    ["same daemon returns within original grace", true, "resolved", 2],
+    ["original grace expires before second reconnect", false, "interrupted", 1],
+  ] as const)(
+    "preserves an accepted answer across a second brief disconnect before ack when %s",
+    async (_label, reconnectInTime, expectedStatus, expectedRpcCount) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers();
+        try {
+          const { host, session } = seedHostSession(harness.deps, {
+            id: `host-second-drop-${String(reconnectInTime)}`,
+          });
+          const { project } = seedProjectWithSource(harness.deps, {
+            hostId: host.id,
+          });
+          const environment = seedEnvironment(harness.deps, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+          const thread = seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            providerId: "claude-code",
+            status: "active",
+          });
+          const created = registerPendingInteraction(
+            harness.deps,
+            harness.deps.pendingInteractions,
+            {
+              threadId: thread.id,
+              turnId: `turn-second-drop-${String(reconnectInTime)}`,
+              providerId: "claude-code",
+              providerThreadId: `claude-second-drop-${String(reconnectInTime)}`,
+              providerRequestId: `req-second-drop-${String(reconnectInTime)}`,
+              payload: createCommandApprovalPayload({
+                itemId: `item-second-drop-${String(reconnectInTime)}`,
+                reason: "Run tests",
+                command: "pnpm test",
+                cwd: "/tmp/project",
+              }),
+            },
+          );
+          if (created.outcome === "rejected") {
+            throw new Error(
+              `Expected interaction registration to succeed: ${created.reason}`,
+            );
+          }
+          harness.deps.hub.registerDaemon(
+            session.id,
+            host.id,
+            createMockHubSocket(),
+          );
+
+          // First disconnect at t=0; user approves while offline at t=2s.
+          handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+          await vi.advanceTimersByTimeAsync(2_000);
+          harness.deps.pendingInteractions.resolvePendingInteraction({
+            threadId: thread.id,
+            interactionId: created.interaction.id,
+            resolution: createAllowOnceResolution(),
+          });
+          await vi.advanceTimersByTimeAsync(8_000);
+
+          // First reconnect at t=10s receives allow_once but drops at t=12s before ack.
+          const sentInteractionIds: string[] = [];
+          const secondSession = openSession(harness.deps.db, {
+            hostId: host.id,
+            instanceId: session.instanceId,
+            hostName: host.name,
+            dataDir: `/tmp/bb-host-data/${host.id}`,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+            heartbeatIntervalMs: 5_000,
+            leaseTimeoutMs: 30_000,
+          });
+          await handleHostSessionOpened(harness.deps, {
+            activeThreads: [{ threadId: thread.id }],
+            hostId: host.id,
+            openedSession: secondSession,
+            previousSession: session,
+          });
+          const unackedSocket = createMockHubSocket();
+          const baseUnackedSend = unackedSocket.send;
+          unackedSocket.send = (data: string) => {
+            baseUnackedSend(data);
+            const parsed = JSON.parse(data) as {
+              type?: string;
+              command?: { type: string; interactionId?: string };
+            };
+            if (
+              parsed.type === "host-rpc.request" &&
+              parsed.command?.type === "interactive.resolve" &&
+              parsed.command.interactionId
+            ) {
+              sentInteractionIds.push(parsed.command.interactionId);
+            }
+          };
+          harness.deps.hub.registerDaemon(
+            secondSession.id,
+            host.id,
+            unackedSocket,
+          );
+          await vi.advanceTimersByTimeAsync(2_000);
+          expect(sentInteractionIds).toEqual([created.interaction.id]);
+
+          // Second disconnect at t=12s while awaiting ack.
+          handleDaemonSocketClosed(harness.deps, {
+            sessionId: secondSession.id,
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get(),
+          ).toMatchObject({ status: "resolving" });
+
+          if (reconnectInTime) {
+            await vi.advanceTimersByTimeAsync(8_000);
+            const thirdSession = openSession(harness.deps.db, {
+              hostId: host.id,
+              instanceId: session.instanceId,
+              hostName: host.name,
+              dataDir: `/tmp/bb-host-data/${host.id}`,
+              protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+              heartbeatIntervalMs: 5_000,
+              leaseTimeoutMs: 30_000,
+            });
+            await handleHostSessionOpened(harness.deps, {
+              activeThreads: [{ threadId: thread.id }],
+              hostId: host.id,
+              openedSession: thirdSession,
+              previousSession: secondSession,
+            });
+            const finalSocket = createMockHubSocket();
+            const baseFinalSend = finalSocket.send;
+            finalSocket.send = (data: string) => {
+              baseFinalSend(data);
+              const parsed = JSON.parse(data) as {
+                type?: string;
+                requestId?: string;
+                command?: { type: string; interactionId?: string };
+              };
+              if (
+                parsed.type === "host-rpc.request" &&
+                parsed.requestId &&
+                parsed.command?.type === "interactive.resolve" &&
+                parsed.command.interactionId
+              ) {
+                sentInteractionIds.push(parsed.command.interactionId);
+                harness.deps.hub.recordHostOnlineRpcResponse({
+                  sessionId: thirdSession.id,
+                  message: {
+                    type: "host-rpc.response",
+                    requestId: parsed.requestId,
+                    commandType: "interactive.resolve",
+                    ok: true,
+                    result: {},
+                  },
+                });
+              }
+            };
+            harness.deps.hub.registerDaemon(
+              thirdSession.id,
+              host.id,
+              finalSocket,
+            );
+            await vi.advanceTimersByTimeAsync(0);
+          } else {
+            // Advance to original t=60s grace deadline (before secondSession's t=72s deadline).
+            await vi.advanceTimersByTimeAsync(
+              DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 12_000,
+            );
+          }
+
+          expect(sentInteractionIds).toHaveLength(expectedRpcCount);
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get()?.status,
+          ).toBe(expectedStatus);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    },
+  );
+
+  it("does not send a queued approval after the 60s grace deadline while waiting for a silent reconnected socket", async () => {
+    await withTestHarness(async (harness) => {
+      vi.useFakeTimers();
+      try {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-grace-deadline-silent-reconnect",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+        });
+        const thread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: "claude-code",
+          status: "active",
+        });
+        const created = registerPendingInteraction(
+          harness.deps,
+          harness.deps.pendingInteractions,
+          {
+            threadId: thread.id,
+            turnId: "turn-grace-silent-reconnect",
+            providerId: "claude-code",
+            providerThreadId: "claude-grace-silent-reconnect",
+            providerRequestId: "req-grace-silent-reconnect",
+            payload: createCommandApprovalPayload({
+              itemId: "item-grace-silent-reconnect",
+              reason: "Run deploy",
+              command: "npm run deploy",
+              cwd: "/tmp/project",
+            }),
+          },
+        );
+        if (created.outcome === "rejected") {
+          throw new Error(
+            `Expected interaction registration to succeed: ${created.reason}`,
+          );
+        }
+        harness.deps.hub.registerDaemon(
+          session.id,
+          host.id,
+          createMockHubSocket(),
+        );
+
+        // Disconnect at t=0; answer while offline at t=2s.
+        handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+        await vi.advanceTimersByTimeAsync(2_000);
+        harness.deps.pendingInteractions.resolvePendingInteraction({
+          threadId: thread.id,
+          interactionId: created.interaction.id,
+          resolution: createAllowOnceResolution(),
+        });
+
+        // Reconnect at t=59.5s with an expired lease so online-rpc waits in waitForAnsweringDaemon.
+        await vi.advanceTimersByTimeAsync(
+          DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS - 2_500,
+        );
+        const reconnectedSession = openSession(harness.deps.db, {
+          hostId: host.id,
+          instanceId: session.instanceId,
+          hostName: host.name,
+          dataDir: `/tmp/bb-host-data/${host.id}`,
+          protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+          heartbeatIntervalMs: 5_000,
+          leaseTimeoutMs: 30_000,
+        });
+        await handleHostSessionOpened(harness.deps, {
+          activeThreads: [{ threadId: thread.id }],
+          hostId: host.id,
+          openedSession: reconnectedSession,
+          previousSession: session,
+        });
+        harness.db
+          .update(hostDaemonSessions)
+          .set({ leaseExpiresAt: Date.now() - 1_000 })
+          .where(eq(hostDaemonSessions.id, reconnectedSession.id))
+          .run();
+
+        const sentCommands: string[] = [];
+        const reconnectedSocket = createMockHubSocket();
+        const baseSend = reconnectedSocket.send;
+        reconnectedSocket.send = (data: string) => {
+          baseSend(data);
+          const parsed = JSON.parse(data) as {
+            type?: string;
+            command?: { type: string };
+          };
+          if (parsed.type === "host-rpc.request" && parsed.command) {
+            sentCommands.push(parsed.command.type);
+          }
+        };
+        harness.deps.hub.registerDaemon(
+          reconnectedSession.id,
+          host.id,
+          reconnectedSocket,
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sentCommands).toEqual([]);
+
+        // Cross the 60s grace deadline at t=60s before any heartbeat arrives.
+        await vi.advanceTimersByTimeAsync(500);
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get()?.status,
+        ).toBe("interrupted");
+
+        // Heartbeat arrives at t=61.25s; interactive.resolve must never be written to the socket.
+        await vi.advanceTimersByTimeAsync(1_250);
+        harness.db
+          .update(hostDaemonSessions)
+          .set({ leaseExpiresAt: Date.now() + 30_000 })
+          .where(eq(hostDaemonSessions.id, reconnectedSession.id))
+          .run();
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(sentCommands).toEqual([]);
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get()?.status,
+        ).toBe("interrupted");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it.each(["stop", "archive", "archive-then-unarchive"] as const)(
+    "cancels a queued approval and never delivers it on reconnect after %s during disconnect",
+    async (action) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers();
+        try {
+          const { host, session } = seedHostSession(harness.deps, {
+            id: `host-resolve-cancelled-${action}`,
+          });
+          const { project } = seedProjectWithSource(harness.deps, {
+            hostId: host.id,
+          });
+          const environment = seedEnvironment(harness.deps, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+          const thread = seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            providerId: "claude-code",
+            status: "active",
+          });
+          const created = registerPendingInteraction(
+            harness.deps,
+            harness.deps.pendingInteractions,
+            {
+              threadId: thread.id,
+              turnId: `turn-cancel-${action}`,
+              providerId: "claude-code",
+              providerThreadId: `claude-cancel-${action}`,
+              providerRequestId: `req-cancel-${action}`,
+              payload: createCommandApprovalPayload({
+                itemId: `item-cancel-${action}`,
+                reason: "Run deploy",
+                command: "npm run deploy",
+                cwd: "/tmp/project",
+              }),
+            },
+          );
+          if (created.outcome === "rejected") {
+            throw new Error(
+              `Expected interaction registration to succeed: ${created.reason}`,
+            );
+          }
+          harness.deps.hub.registerDaemon(
+            session.id,
+            host.id,
+            createMockHubSocket(),
+          );
+
+          handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+          await vi.advanceTimersByTimeAsync(1_000);
+
+          harness.deps.pendingInteractions.resolvePendingInteraction({
+            threadId: thread.id,
+            interactionId: created.interaction.id,
+            resolution: createAllowOnceResolution(),
+          });
+          await vi.advanceTimersByTimeAsync(0);
+
+          if (action === "stop") {
+            requestThreadStopForCurrentState(harness.deps, thread, environment);
+          } else {
+            archiveThreadAndReleaseChildren(harness.deps, {
+              threadId: thread.id,
+            });
+            if (action === "archive-then-unarchive") {
+              unarchiveThreadKeepingOpenParent(harness.deps, thread.id);
+            }
+          }
+          await vi.advanceTimersByTimeAsync(5_000);
+
+          const nextSession = openSession(harness.deps.db, {
+            hostId: host.id,
+            instanceId: session.instanceId,
+            hostName: host.name,
+            dataDir: `/tmp/bb-host-data/${host.id}`,
+            protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+            heartbeatIntervalMs: 5_000,
+            leaseTimeoutMs: 30_000,
+          });
+          await handleHostSessionOpened(harness.deps, {
+            activeThreads: [{ threadId: thread.id }],
+            hostId: host.id,
+            openedSession: nextSession,
+            previousSession: session,
+          });
+
+          const sentCommands: string[] = [];
+          const nextSocket = createMockHubSocket();
+          const baseSend = nextSocket.send;
+          nextSocket.send = (data: string) => {
+            baseSend(data);
+            const parsed = JSON.parse(data) as {
+              type?: string;
+              requestId?: string;
+              command?: { type: string };
+            };
+            if (
+              parsed.type === "host-rpc.request" &&
+              parsed.requestId &&
+              parsed.command
+            ) {
+              sentCommands.push(parsed.command.type);
+              harness.deps.hub.recordHostOnlineRpcResponse({
+                sessionId: nextSession.id,
+                message: {
+                  type: "host-rpc.response",
+                  requestId: parsed.requestId,
+                  commandType: parsed.command.type as "interactive.resolve",
+                  ok: true,
+                  result: {},
+                },
+              });
+            }
+          };
+          harness.deps.hub.registerDaemon(nextSession.id, host.id, nextSocket);
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(
+            sentCommands.filter((type) => type === "interactive.resolve"),
+          ).toHaveLength(0);
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get()?.status,
+          ).toBe("interrupted");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    },
+  );
+
+  it("cancels a queued approval waiting on a silent host socket so stop never sends it before thread.stop", async () => {
+    await withTestHarness(async (harness) => {
+      vi.useFakeTimers();
+      try {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-resolve-cancelled-silent-socket",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+        });
+        const thread = seedThread(harness.deps, {
+          projectId: project.id,
+          environmentId: environment.id,
+          providerId: "claude-code",
+          status: "active",
+        });
+        const created = registerPendingInteraction(
+          harness.deps,
+          harness.deps.pendingInteractions,
+          {
+            threadId: thread.id,
+            turnId: "turn-silent-cancel",
+            providerId: "claude-code",
+            providerThreadId: "claude-silent-cancel",
+            providerRequestId: "req-silent-cancel",
+            payload: createCommandApprovalPayload({
+              itemId: "item-silent-cancel",
+              reason: "Run deploy",
+              command: "npm run deploy",
+              cwd: "/tmp/project",
+            }),
+          },
+        );
+        if (created.outcome === "rejected") {
+          throw new Error(
+            `Expected interaction registration to succeed: ${created.reason}`,
+          );
+        }
+
+        const sentCommands: string[] = [];
+        const socket = createMockHubSocket();
+        const baseSend = socket.send;
+        socket.send = (data: string) => {
+          baseSend(data);
+          const parsed = JSON.parse(data) as {
+            type?: string;
+            requestId?: string;
+            command?: { type: string };
+          };
+          if (
+            parsed.type === "host-rpc.request" &&
+            parsed.requestId &&
+            parsed.command
+          ) {
+            sentCommands.push(parsed.command.type);
+            harness.deps.hub.recordHostOnlineRpcResponse({
+              sessionId: session.id,
+              message: {
+                type: "host-rpc.response",
+                requestId: parsed.requestId,
+                commandType: parsed.command.type as "thread.stop",
+                ok: true,
+                result: { providerCheckpointId: null },
+              },
+            });
+          }
+        };
+        harness.deps.hub.registerDaemon(session.id, host.id, socket);
+
+        // Expire the daemon lease without closing the socket so online-rpc queues behind waitForAnsweringDaemon.
+        harness.db
+          .update(hostDaemonSessions)
+          .set({ leaseExpiresAt: Date.now() - 1_000 })
+          .where(eq(hostDaemonSessions.id, session.id))
+          .run();
+
+        harness.deps.pendingInteractions.resolvePendingInteraction({
+          threadId: thread.id,
+          interactionId: created.interaction.id,
+          resolution: createAllowOnceResolution(),
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(sentCommands).toEqual([]);
+
+        requestThreadStopForCurrentState(harness.deps, thread, environment);
+        await vi.advanceTimersByTimeAsync(0);
+
+        // Host answers again; only thread.stop may be sent, never the cancelled interactive.resolve.
+        harness.db
+          .update(hostDaemonSessions)
+          .set({ leaseExpiresAt: Date.now() + 30_000 })
+          .where(eq(hostDaemonSessions.id, session.id))
+          .run();
+        await vi.advanceTimersByTimeAsync(500);
+
+        expect(sentCommands).toEqual(["thread.stop"]);
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .get()?.status,
+        ).toBe("interrupted");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("preserves an already-sent approval reply when stop arrives before the daemon responds", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-stop-after-wire-send",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      const created = registerPendingInteraction(
+        harness.deps,
+        harness.deps.pendingInteractions,
+        {
+          threadId: thread.id,
+          turnId: "turn-stop-after-send",
+          providerId: "claude-code",
+          providerThreadId: "claude-stop-after-send",
+          providerRequestId: "req-stop-after-send",
+          payload: createCommandApprovalPayload({
+            itemId: "item-stop-after-send",
+            reason: "Run deploy",
+            command: "npm run deploy",
+            cwd: "/tmp/project",
+          }),
+        },
+      );
+      if (created.outcome === "rejected") {
+        throw new Error(
+          `Expected interaction registration to succeed: ${created.reason}`,
+        );
+      }
+
+      let resolveRequestId: string | null = null;
+      let stopRequestId: string | null = null;
+      const socket = createMockHubSocket();
+      const baseSend = socket.send;
+      socket.send = (data: string) => {
+        baseSend(data);
+        const parsed = JSON.parse(data) as {
+          type?: string;
+          requestId?: string;
+          command?: { type: string };
+        };
+        if (parsed.type === "host-rpc.request" && parsed.requestId) {
+          if (parsed.command?.type === "interactive.resolve") {
+            resolveRequestId = parsed.requestId;
+          } else if (parsed.command?.type === "thread.stop") {
+            stopRequestId = parsed.requestId;
+          }
+        }
+      };
+      harness.deps.hub.registerDaemon(session.id, host.id, socket);
+
+      const resolution = createAllowOnceResolution();
+      harness.deps.pendingInteractions.resolvePendingInteraction({
+        threadId: thread.id,
+        interactionId: created.interaction.id,
+        resolution,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(resolveRequestId).not.toBeNull();
+
+      // Stop arrives after interactive.resolve is already on the wire, before its reply.
+      requestThreadStopForCurrentState(harness.deps, thread, environment);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(stopRequestId).not.toBeNull();
+
+      const disposition = harness.deps.hub.recordHostOnlineRpcResponse({
+        sessionId: session.id,
+        message: {
+          type: "host-rpc.response",
+          requestId: resolveRequestId!,
+          commandType: "interactive.resolve",
+          ok: true,
+          result: {},
+        },
+      });
+      expect(disposition).toEqual({ handled: true });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      harness.deps.hub.recordHostOnlineRpcResponse({
+        sessionId: session.id,
+        message: {
+          type: "host-rpc.response",
+          requestId: stopRequestId!,
+          commandType: "thread.stop",
+          ok: true,
+          result: { providerCheckpointId: null },
+        },
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const settled = harness.db
+        .select()
+        .from(pendingInteractionTable)
+        .where(eq(pendingInteractionTable.id, created.interaction.id))
+        .get();
+      expect(settled?.status).toBe("resolved");
+      expect(settled?.resolution).toBe(JSON.stringify(resolution));
+    });
+  });
+
+  it.each([
+    ["same daemon reconnects", true, "resolved", 1, 0],
+    ["daemon never returns before grace expires", false, "interrupted", 0, 0],
+    [
+      "server returns after the answer's deadline",
+      true,
+      "interrupted",
+      0,
+      2 * 60 * 60 * 1000,
+    ],
+  ] as const)(
+    "recovers a persisted resolving interaction after a server restart when %s",
+    async (
+      _label,
+      shouldReconnect,
+      expectedStatus,
+      expectedRpcCount,
+      downMs,
+    ) => {
+      await withTestHarness(async (harness) => {
+        vi.useFakeTimers();
+        try {
+          const { host, session } = seedHostSession(harness.deps, {
+            id: `host-restart-resolving-${String(shouldReconnect)}`,
+          });
+          const { project } = seedProjectWithSource(harness.deps, {
+            hostId: host.id,
+          });
+          const environment = seedEnvironment(harness.deps, {
+            hostId: host.id,
+            projectId: project.id,
+          });
+          const thread = seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            providerId: "claude-code",
+            status: "active",
+          });
+          const created = registerPendingInteraction(
+            harness.deps,
+            harness.deps.pendingInteractions,
+            {
+              threadId: thread.id,
+              turnId: `turn-restart-resolving-${String(shouldReconnect)}`,
+              providerId: "claude-code",
+              providerThreadId: `claude-restart-${String(shouldReconnect)}`,
+              providerRequestId: `req-restart-${String(shouldReconnect)}`,
+              payload: createUserQuestionPayload(),
+            },
+          );
+          if (created.outcome === "rejected") {
+            throw new Error(
+              `Expected interaction registration to succeed: ${created.reason}`,
+            );
+          }
+          harness.deps.hub.registerDaemon(
+            session.id,
+            host.id,
+            createMockHubSocket(),
+          );
+
+          handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
+          await vi.advanceTimersByTimeAsync(1_000);
+          harness.deps.pendingInteractions.resolvePendingInteraction({
+            threadId: thread.id,
+            interactionId: created.interaction.id,
+            resolution: createUserAnswerResolution(),
+          });
+          await vi.advanceTimersByTimeAsync(0);
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get()?.status,
+          ).toBe("resolving");
+
+          // Simulate a server restart with a fresh Hub and PendingInteractionLifecycle.
+          vi.setSystemTime(Date.now() + downMs);
+          const restartedHub = new NotificationHub();
+          const restartedPending = new PendingInteractionLifecycle({
+            ...harness.deps,
+            hub: restartedHub,
+          });
+          restartedPending.start();
+          const restartedDeps = {
+            ...harness.deps,
+            hub: restartedHub,
+            pendingInteractions: restartedPending,
+          };
+          startRunningTurnDeadlinesAfterRestart(restartedDeps);
+
+          const sentCommands: string[] = [];
+          if (shouldReconnect) {
+            await vi.advanceTimersByTimeAsync(3_000);
+            const nextSession = openSession(harness.deps.db, {
+              hostId: host.id,
+              instanceId: session.instanceId,
+              hostName: host.name,
+              dataDir: `/tmp/bb-host-data/${host.id}`,
+              protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+              heartbeatIntervalMs: 5_000,
+              leaseTimeoutMs: 30_000,
+            });
+            await handleHostSessionOpened(restartedDeps, {
+              activeThreads: [{ threadId: thread.id }],
+              hostId: host.id,
+              openedSession: nextSession,
+              previousSession: session,
+            });
+            const nextSocket = createMockHubSocket();
+            const baseSend = nextSocket.send;
+            nextSocket.send = (data: string) => {
+              baseSend(data);
+              const parsed = JSON.parse(data) as {
+                type?: string;
+                requestId?: string;
+                command?: { type: string };
+              };
+              if (
+                parsed.type === "host-rpc.request" &&
+                parsed.requestId &&
+                parsed.command
+              ) {
+                sentCommands.push(parsed.command.type);
+                restartedHub.recordHostOnlineRpcResponse({
+                  sessionId: nextSession.id,
+                  message: {
+                    type: "host-rpc.response",
+                    requestId: parsed.requestId,
+                    commandType: parsed.command.type as "interactive.resolve",
+                    ok: true,
+                    result: {},
+                  },
+                });
+              }
+            };
+            restartedHub.registerDaemon(nextSession.id, host.id, nextSocket);
+            await vi.advanceTimersByTimeAsync(0);
+          } else {
+            await vi.advanceTimersByTimeAsync(
+              DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+            );
+          }
+
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, created.interaction.id))
+              .get()?.status,
+          ).toBe(expectedStatus);
+          expect(sentCommands).toHaveLength(expectedRpcCount);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    },
+  );
+
+  it("resumes resolving interactions in one JOIN query and survives corrupt payload rows on restart", async () => {
+    await withTestHarness(async (harness) => {
+      vi.useFakeTimers();
+      try {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-restart-single-join-corrupt",
+        });
+        const { project } = seedProjectWithSource(harness.deps, {
+          hostId: host.id,
+        });
+        const environment = seedEnvironment(harness.deps, {
+          hostId: host.id,
+          projectId: project.id,
+        });
+        const threads = [1, 2, 3].map((index) =>
+          seedThread(harness.deps, {
+            projectId: project.id,
+            environmentId: environment.id,
+            providerId: "claude-code",
+            status: "active",
+            title: `Restart recovery ${index}`,
+          }),
+        );
+        const interactions = threads.map((thread, index) => {
+          const created = registerPendingInteraction(
+            harness.deps,
+            harness.deps.pendingInteractions,
+            {
+              threadId: thread.id,
+              turnId: `turn-restart-join-${index}`,
+              providerId: "claude-code",
+              providerThreadId: `claude-restart-join-${index}`,
+              providerRequestId: `req-restart-join-${index}`,
+              payload: createUserQuestionPayload(),
+            },
+          );
+          if (created.outcome === "rejected") {
+            throw new Error(
+              `Expected interaction registration to succeed: ${created.reason}`,
+            );
+          }
+          harness.db
+            .update(pendingInteractionTable)
+            .set({
+              status: "resolving",
+              resolution: JSON.stringify(createUserAnswerResolution()),
+              ...(index === 0 ? { payload: "{" } : {}),
+            })
+            .where(eq(pendingInteractionTable.id, created.interaction.id))
+            .run();
+          return created.interaction;
+        });
+
+        const restartedHub = new NotificationHub();
+        const restartedPending = new PendingInteractionLifecycle({
+          ...harness.deps,
+          hub: restartedHub,
+        });
+        restartedPending.start();
+        const restartedDeps = {
+          ...harness.deps,
+          hub: restartedHub,
+          pendingInteractions: restartedPending,
+        };
+
+        let selectCount = 0;
+        const client = harness.db.$client;
+        const origPrepare = client.prepare.bind(client);
+        client.prepare = ((sql: string) => {
+          if (/^\s*select\b/iu.test(sql)) {
+            selectCount += 1;
+          }
+          return origPrepare(sql);
+        }) as typeof client.prepare;
+
+        try {
+          expect(() =>
+            restartedPending.resumeResolvingInteractionsAfterRestart(),
+          ).not.toThrow();
+        } finally {
+          client.prepare = origPrepare;
+        }
+
+        expect(selectCount).toBe(1);
+        expect(
+          harness.db
+            .select()
+            .from(pendingInteractionTable)
+            .where(eq(pendingInteractionTable.id, interactions[0]!.id))
+            .get()?.status,
+        ).toBe("interrupted");
+
+        const nextSession = openSession(harness.deps.db, {
+          hostId: host.id,
+          instanceId: session.instanceId,
+          hostName: host.name,
+          dataDir: `/tmp/bb-host-data/${host.id}`,
+          protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+          heartbeatIntervalMs: 5_000,
+          leaseTimeoutMs: 30_000,
+        });
+        await handleHostSessionOpened(restartedDeps, {
+          activeThreads: threads.slice(1).map((thread) => ({
+            threadId: thread.id,
+          })),
+          hostId: host.id,
+          openedSession: nextSession,
+          previousSession: session,
+        });
+        const resolvedIds: string[] = [];
+        const nextSocket = createMockHubSocket();
+        const baseSend = nextSocket.send;
+        nextSocket.send = (data: string) => {
+          baseSend(data);
+          const parsed = JSON.parse(data) as {
+            type?: string;
+            requestId?: string;
+            command?: { type: string; interactionId?: string };
+          };
+          if (
+            parsed.type === "host-rpc.request" &&
+            parsed.requestId &&
+            parsed.command?.type === "interactive.resolve" &&
+            parsed.command.interactionId
+          ) {
+            resolvedIds.push(parsed.command.interactionId);
+            restartedHub.recordHostOnlineRpcResponse({
+              sessionId: nextSession.id,
+              message: {
+                type: "host-rpc.response",
+                requestId: parsed.requestId,
+                commandType: "interactive.resolve",
+                ok: true,
+                result: {},
+              },
+            });
+          }
+        };
+        restartedHub.registerDaemon(nextSession.id, host.id, nextSocket);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(resolvedIds).toEqual([interactions[1]!.id, interactions[2]!.id]);
+        for (const interaction of interactions.slice(1)) {
+          expect(
+            harness.db
+              .select()
+              .from(pendingInteractionTable)
+              .where(eq(pendingInteractionTable.id, interaction.id))
+              .get()?.status,
+          ).toBe("resolved");
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it("avoids a redundant pending_interactions SELECT on the connected resolve path", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-connected-resolve-single-select",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      const created = registerPendingInteraction(
+        harness.deps,
+        harness.deps.pendingInteractions,
+        {
+          threadId: thread.id,
+          turnId: "turn-connected-single-select",
+          providerId: "claude-code",
+          providerThreadId: "claude-connected-single-select",
+          providerRequestId: "req-connected-single-select",
+          payload: createUserQuestionPayload(),
+        },
+      );
+      if (created.outcome === "rejected") {
+        throw new Error(
+          `Expected interaction registration to succeed: ${created.reason}`,
+        );
+      }
+      const socket = createMockHubSocket();
+      const baseSend = socket.send;
+      socket.send = (data: string) => {
+        baseSend(data);
+        const parsed = JSON.parse(data) as {
+          type?: string;
+          requestId?: string;
+          command?: { type: string };
+        };
+        if (
+          parsed.type === "host-rpc.request" &&
+          parsed.requestId &&
+          parsed.command
+        ) {
+          harness.deps.hub.recordHostOnlineRpcResponse({
+            sessionId: session.id,
+            message: {
+              type: "host-rpc.response",
+              requestId: parsed.requestId,
+              commandType: parsed.command.type as "interactive.resolve",
+              ok: true,
+              result: {},
+            },
+          });
+        }
+      };
+      harness.deps.hub.registerDaemon(session.id, host.id, socket);
+
+      let selectsById = 0;
+      const client = harness.db.$client;
+      const origPrepare = client.prepare.bind(client);
+      client.prepare = ((sql: string) => {
+        if (
+          /^\s*select\b/iu.test(sql) &&
+          sql.includes('"pending_interactions"') &&
+          sql.includes('"pending_interactions"."id" = ?')
+        ) {
+          selectsById += 1;
+        }
+        return origPrepare(sql);
+      }) as typeof client.prepare;
+
+      try {
+        harness.deps.pendingInteractions.resolvePendingInteraction({
+          threadId: thread.id,
+          interactionId: created.interaction.id,
+          resolution: createUserAnswerResolution(),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        client.prepare = origPrepare;
+      }
+
+      expect(selectsById).toBe(1);
+      expect(
+        harness.db
+          .select()
+          .from(pendingInteractionTable)
+          .where(eq(pendingInteractionTable.id, created.interaction.id))
+          .get()?.status,
+      ).toBe("resolved");
+    });
+  });
+
+  it("adds zero pending_interactions writes on ordinary archive/delete and zero thread reads on connected status-changed", async () => {
+    await withTestHarness(async (harness) => {
+      const { host, session } = seedHostSession(harness.deps, {
+        id: "host-no-extra-queries",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const ordinaryThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "claude-code",
+        status: "idle",
+      });
+      const activeThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "claude-code",
+        status: "active",
+      });
+      const created = registerPendingInteraction(
+        harness.deps,
+        harness.deps.pendingInteractions,
+        {
+          threadId: activeThread.id,
+          turnId: "turn-connected-status-no-select",
+          providerId: "claude-code",
+          providerThreadId: "claude-connected-status-no-select",
+          providerRequestId: "req-connected-status-no-select",
+          payload: createUserQuestionPayload(),
+        },
+      );
+      if (created.outcome === "rejected") {
+        throw new Error(
+          `Expected interaction registration to succeed: ${created.reason}`,
+        );
+      }
+
+      let pendingRequestId: string | null = null;
+      const socket = createMockHubSocket();
+      const baseSend = socket.send;
+      socket.send = (data: string) => {
+        baseSend(data);
+        const parsed = JSON.parse(data) as {
+          type?: string;
+          requestId?: string;
+        };
+        if (parsed.type === "host-rpc.request" && parsed.requestId) {
+          pendingRequestId = parsed.requestId;
+        }
+      };
+      harness.deps.hub.registerDaemon(session.id, host.id, socket);
+
+      const client = harness.db.$client;
+      const origPrepare = client.prepare.bind(client);
+      let pendingInteractionWrites = 0;
+      let threadSelects = 0;
+      client.prepare = ((sql: string) => {
+        if (
+          /^\s*(?:insert|update|delete)\b/iu.test(sql) &&
+          sql.includes('"pending_interactions"')
+        ) {
+          pendingInteractionWrites += 1;
+        }
+        if (/^\s*select\b/iu.test(sql) && sql.includes('"threads"')) {
+          threadSelects += 1;
+        }
+        return origPrepare(sql);
+      }) as typeof client.prepare;
+
+      try {
+        archiveThreadAndReleaseChildren(harness.deps, {
+          threadId: ordinaryThread.id,
+        });
+        markThreadDeleted(harness.db, harness.hub, {
+          threadId: ordinaryThread.id,
+        });
+        expect(pendingInteractionWrites).toBe(0);
+
+        harness.deps.pendingInteractions.resolvePendingInteraction({
+          threadId: activeThread.id,
+          interactionId: created.interaction.id,
+          resolution: createUserAnswerResolution(),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(pendingRequestId).not.toBeNull();
+
+        let observedStatusChanges = 0;
+        const stopObserving = harness.hub.onChangedMessage((message) => {
+          if (
+            message.entity === "thread" &&
+            message.id === activeThread.id &&
+            message.changes.includes("status-changed")
+          ) {
+            observedStatusChanges += 1;
+          }
+        });
+        threadSelects = 0;
+        try {
+          harness.hub.notifyThread(activeThread.id, ["status-changed"]);
+          harness.hub.notifyThread(activeThread.id, ["status-changed"], {
+            statusChange: {
+              status: "active",
+              runtime: {
+                displayStatus: "active",
+                hostReconnectGraceExpiresAt: null,
+              },
+              activity: {
+                activeWorkflowCount: 0,
+                activeBackgroundAgentCount: 0,
+                activeBackgroundCommandCount: 0,
+                activePlanModeCount: 0,
+                activeGoalCount: 0,
+              },
+              latestAttentionAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          });
+        } finally {
+          stopObserving();
+        }
+        expect(observedStatusChanges).toBe(2);
+        expect(threadSelects).toBe(0);
+
+        harness.hub.recordHostOnlineRpcResponse({
+          sessionId: session.id,
+          message: {
+            type: "host-rpc.response",
+            requestId: pendingRequestId!,
+            commandType: "interactive.resolve",
+            ok: true,
+            result: {},
+          },
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+      } finally {
+        client.prepare = origPrepare;
+      }
+
+      expect(
+        harness.db
+          .select()
+          .from(pendingInteractionTable)
+          .where(eq(pendingInteractionTable.id, created.interaction.id))
+          .get()?.status,
+      ).toBe("resolved");
     });
   });
 

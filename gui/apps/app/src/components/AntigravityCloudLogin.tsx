@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { COMPUTER } from "@cloudroom/domain/computer-name";
 import { Button } from "@cloudroom/shared-ui/button";
 import { Icon } from "@cloudroom/shared-ui/icon";
 import { PersistentResponsiveDrawerShell } from "@cloudroom/shared-ui/responsive-overlay";
@@ -13,6 +14,16 @@ import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
 import { CLOUD_LOGIN_FIXED_EVENT } from "@/lib/cloud-reconnect";
 
 export type AntigravityCloudDialogMode = "google" | "key";
+
+/** Where an Antigravity login runs. Cloud and this computer sign in apart, so each sign-in shows it plainly. */
+export function AntigravityLoginPlace({ cloud }: { cloud: boolean }) {
+  return (
+    <span className="inline-flex w-fit shrink-0 items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary-text">
+      <Icon name={cloud ? "Cloud" : "Laptop"} className="size-3.5" aria-hidden />
+      {cloud ? "Cloud threads" : `This ${COMPUTER} · Local threads`}
+    </span>
+  );
+}
 
 async function applyAntigravityResult(
   query: QueryClient,
@@ -251,8 +262,8 @@ function ComposerLogin({ account, state }: { account: string; state: "checking" 
         <AgyCheckFailed inline onRetry={() => void retryAgyChecks(query, status)} />
       ) : !mode ? (
         <>
-          <Icon name="AlertTriangle" className="size-3.5 shrink-0 text-warning-text" aria-hidden />
-          Antigravity isn't connected.
+          <AntigravityLoginPlace cloud />
+          Cloud can't use your {COMPUTER}'s Antigravity login.
           <button
             type="button"
             className="font-medium text-primary-text hover:underline disabled:opacity-50"
@@ -401,11 +412,18 @@ function AntigravityCloudDialogBody({
     >
       <div className="space-y-5">
         <div className="space-y-2">
+          <AntigravityLoginPlace cloud />
           <h2 id={titleId} className="text-xl font-semibold">
             {title}
           </h2>
           <p id={descriptionId} className="text-sm text-muted-foreground">
-            {description}
+            {description}{" "}
+            {showingKey ? null : (
+              <>
+                This login is for <strong className="font-semibold text-foreground">Cloud threads only</strong>. Your{" "}
+                {COMPUTER}'s Antigravity sign-in stays on your {COMPUTER}.
+              </>
+            )}
           </p>
         </div>
 

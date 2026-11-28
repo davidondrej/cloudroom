@@ -18,6 +18,7 @@ import type { JsonValue } from "@cloudroom/domain";
 import type { PluginMachineProviderDeclaration } from "@get-bb/plugin-sdk";
 import {
   askMachineLaunch,
+  forgetMachine,
   requestAutomaticMachineRemoval,
   requestMachineRemoval,
   requestMachineSuspension,
@@ -524,6 +525,57 @@ describe("machine retirement", () => {
       // A machine that never connected has nothing on it to clean up (#1065).
       seen(null);
       await retryMachineCleanup(harness.deps, host.id);
+      expect(remove).toHaveBeenCalledOnce();
+      expect(getHost(harness.db, host.id)?.phase).toBe("destroyed");
+      expect(getEnvironment(harness.db, environment.id)?.status).toBe(
+        "destroyed",
+      );
+    }));
+
+  it("forgets an offline machine whose cleanup failed, never an online one", async () =>
+    withTestHarness(async (harness) => {
+      const remove = vi.fn(async () => ({ status: "removed" as const }));
+      installMachineProvider({ remove });
+      installFakeGitWorktreeProvider();
+      const host = seedHost(harness.deps);
+      updateHost(harness.db, harness.hub, host.id, {
+        machineProviderId: "test-machine",
+        type: "persistent",
+        phase: "active",
+        resource: { allocation: "persistent" },
+      });
+      harness.db
+        .update(hosts)
+        .set({ lastSeenAt: 1 })
+        .where(eq(hosts.id, host.id))
+        .run();
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        providerOwnsPath: true,
+        environmentProviderId: DEFAULT_ENVIRONMENT_PROVIDER_ID.gitWorktree,
+        environmentProviderPluginId: "environment-git-worktree",
+      });
+      const refused = { body: { code: "machine_forget_refused" } };
+      await expect(forgetMachine(harness.deps, "")).rejects.toMatchObject({
+        status: 404,
+      });
+      await expect(forgetMachine(harness.deps, host.id)).rejects.toMatchObject(
+        refused,
+      );
+      expect(requestMachineRemoval(harness.deps, host.id)).toBe(true);
+      await sweepProviderMachine(harness.deps, host.id);
+      expect(getHost(harness.db, host.id)?.teardownStatus).toBe("failed");
+
+      vi.spyOn(harness.hub, "hasDaemonForHost").mockReturnValueOnce(true);
+      await expect(forgetMachine(harness.deps, host.id)).rejects.toMatchObject(
+        refused,
+      );
+
+      await forgetMachine(harness.deps, host.id);
       expect(remove).toHaveBeenCalledOnce();
       expect(getHost(harness.db, host.id)?.phase).toBe("destroyed");
       expect(getEnvironment(harness.db, environment.id)?.status).toBe(

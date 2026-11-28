@@ -893,6 +893,7 @@ export const SURFACE_GROUPS: SurfaceGroup[] = [
           "HostsArea.experimental_reconcile",
           "HostsArea.experimental_resume",
           "HostsArea.experimental_retryCleanup",
+          "HostsArea.experimental_forget",
           "PluginMachines.getResource",
           "MachineExecutorRequest",
           "MachineExecutor",

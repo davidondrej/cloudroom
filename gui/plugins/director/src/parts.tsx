@@ -126,6 +126,36 @@ export function Minutes({ value, className = "", onSave }: { value: number; clas
 
 export const MAX_THREADS_MIN = 1;
 export const MAX_THREADS_MAX = 20;
+export const COMPACT_MIN = 30;
+export const COMPACT_MAX = 95;
+export const COMPACT_PRESETS: ReadonlyArray<number> = [30, 50, 70, 85];
+
+/** Context usage percent that triggers auto-compaction (30–95). Typed freely, saved on leaving the box or on Enter. */
+export function CompactPercent({ value, disabled = false, className = "", onSave }: { value: number; disabled?: boolean; className?: string; onSave(next: number): void }) {
+  const [draft, setDraft] = useState(String(value));
+  const commit = () => {
+    const typed = Math.round(Number(draft));
+    const percent = draft.trim() === "" || Number.isNaN(typed) ? value : Math.min(COMPACT_MAX, Math.max(COMPACT_MIN, typed));
+    setDraft(String(percent));
+    if (percent !== value) onSave(percent);
+  };
+  return (
+    <Input
+      type="number"
+      min={COMPACT_MIN}
+      max={COMPACT_MAX}
+      disabled={disabled}
+      aria-label="Auto-compact percent"
+      className={`h-8 w-20 tabular-nums ${className}`}
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") commit();
+      }}
+    />
+  );
+}
 
 /** Compact − N + stepper for how many stopped threads a ping can check and unblock at once. */
 export function MaxThreads({ value, onSave }: { value: number; onSave(next: number): void }) {
@@ -204,7 +234,16 @@ export function useSettings() {
       .then(setView, (cause: unknown) => setError(message(cause)))
       .finally(() => setBusy(false));
   };
-  return { view, save, run, forget, busy, error };
+  /** Starts a thread scan after pending saves, returning the Director's thread ID on success. */
+  const scan = (onReady: (threadId: string) => void) => {
+    setBusy(true);
+    setError(null);
+    saves.current
+      .then(() => rpc.call("scanNow", null))
+      .then(({ threadId }) => onReady(threadId), (cause: unknown) => setError(message(cause)))
+      .finally(() => setBusy(false));
+  };
+  return { view, save, run, scan, forget, busy, error };
 }
 
 /** How well taught the Director is, in numbers and one sentence. */

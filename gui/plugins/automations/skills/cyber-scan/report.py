@@ -79,7 +79,7 @@ def render(data):
 def main(d):
     data = json.load(open(os.path.join(d, "report.json"), encoding="utf-8"))
     name = f"cyber-scan/report-{time.strftime('%Y%m%d-%H%M%S')}.html"
-    storage = os.environ.get("BB_THREAD_STORAGE")
+    storage = os.environ.get("ROOM_THREAD_STORAGE") or os.environ.get("BB_THREAD_STORAGE")
     path = os.path.join(storage or d, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     open(path, "w", encoding="utf-8").write(render(data))

@@ -132,6 +132,7 @@ function getScrollOffsetToRevealElement({
 }
 
 interface TopMostVisibleRow {
+  element: HTMLElement;
   rowId: string;
   offsetWithinRow: number;
 }
@@ -185,11 +186,22 @@ function getTopMostVisibleRow(
   }
 
   const rowId = visibleRow?.dataset.timelineRowId;
-  if (!rowId || !visibleRowRect) return null;
+  if (!visibleRow || !rowId || !visibleRowRect) return null;
   return {
+    element: visibleRow,
     rowId,
     offsetWithinRow: Math.max(0, scrollAreaTop - visibleRowRect.top),
   };
+}
+
+/** The top-level timeline row at the top edge of the scroll area. */
+export function getTopVisibleTimelineRow(
+  scrollArea: HTMLElement,
+): HTMLElement | null {
+  return (
+    getTopMostVisibleRow(scrollArea, getScrollAnchorRows(scrollArea).rows)
+      ?.element ?? null
+  );
 }
 
 function findTimelineRowElement(

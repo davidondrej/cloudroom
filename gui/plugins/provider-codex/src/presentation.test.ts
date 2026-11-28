@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ServerNotification as CodexServerNotification } from "./generated/codex-app-server/schema/ServerNotification.js";
 import {
+  BACKGROUND_COMMAND_PRESENTATION,
   collabAgentPresentation,
   commandPresentation,
   fileChangePresentation,
@@ -19,6 +20,10 @@ describe("codex presentation", () => {
     });
     expect(commandPresentation("zsh -c 'ls -la'").title).toBe("ls -la");
     expect(commandPresentation("cargo test").title).toBe("cargo test");
+  });
+
+  it("titles a background command with a fixed label, never its command line", () => {
+    expect(BACKGROUND_COMMAND_PRESENTATION.title).toBe("background command");
   });
 
   it("drops the headline of a blank command", () => {

@@ -838,8 +838,21 @@ async fn ready(State(manager): State<Arc<Manager>>) -> impl IntoResponse {
     )
 }
 
-async fn capabilities(State(manager): State<Arc<Manager>>) -> Json<Value> {
-    Json(manager.capabilities().await)
+#[derive(Deserialize)]
+struct CapabilitiesQuery {
+    #[serde(default = "default_true")]
+    models: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+async fn capabilities(
+    State(manager): State<Arc<Manager>>,
+    Query(query): Query<CapabilitiesQuery>,
+) -> Json<Value> {
+    Json(manager.capabilities(query.models).await)
 }
 
 #[derive(Deserialize)]

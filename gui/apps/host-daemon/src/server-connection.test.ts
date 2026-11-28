@@ -472,6 +472,47 @@ describe("ServerConnection", () => {
     }
   });
 
+  it("does not trigger heartbeat-ack-timeout after a local timer delay shorter than the lease", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { connection, logger, webSocket } = createConnectionFixture({
+      heartbeatIntervalMs: 5_000,
+      leaseTimeoutMs: 30_000,
+    });
+    try {
+      await connection.start();
+      const socket = webSocket.sockets[0];
+      if (!socket) {
+        throw new Error("Expected test socket");
+      }
+
+      // Ack at t=5s, then another heartbeat at t=10s followed by a 26s local stall
+      // (<30s lease) where timers run before the poll phase reads buffered acks.
+      await vi.advanceTimersByTimeAsync(5_000);
+      socket.onmessage?.({ data: JSON.stringify({ type: "heartbeat-ack" }) });
+      await vi.advanceTimersByTimeAsync(5_000);
+      vi.setSystemTime(31_000);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ gapMs: 26_000 }),
+        "Host daemon heartbeat timer delayed",
+      );
+      expect(socket.reconnect).not.toHaveBeenCalled();
+
+      // Genuine server silence across unblocked ticks still reconnects after the lease.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(socket.reconnect).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(socket.reconnect).toHaveBeenCalledWith(
+        1013,
+        "heartbeat-ack-timeout",
+      );
+    } finally {
+      await connection.shutdown();
+    }
+  });
+
   it("reconnects when server heartbeat acknowledgements stop", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);

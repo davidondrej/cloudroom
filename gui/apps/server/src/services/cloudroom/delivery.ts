@@ -17,6 +17,7 @@ import type { CloudMessaging } from "./messaging.js";
 import { helperDevice } from "./previews.js";
 import { copyKey, localFilesNote, localProjectNote, localProjectPath, planNewProjectCopy, reportProjectCopy, workspaceId, workspaceName, writeFilesState } from "./project-copy.js";
 import { syncLoopEnv } from "./project-loops.js";
+import { syncAllProjectsToCloud, syncProjectWithEnvToCloud } from "./project-sync.js";
 import {
   capabilitiesSchema,
   cloudPromptLimit,
@@ -97,6 +98,7 @@ export class CloudDelivery {
     void this.statusPreviews.reportOnboarding();
     void this.auth.syncLogins();
     void this.auth.uploadMacConfig();
+    syncAllProjectsToCloud(this.rt.host.deps, this.rt.sandboxes);
     void this.statusPreviews.warmRecentProject().catch(() => {});
     this.timer = setInterval(() => {
       this.rt.host.hooks.teleportRecovery?.();
@@ -358,8 +360,11 @@ export class CloudDelivery {
       target = options.workspace && options.workspace !== ROOT_WORKSPACE ? options.workspace : null;
       if (fork && !capabilities.fork) throw new ApiError(503, "cloudroom_update", "Update the cloud core to fork Cloud threads. Your message is saved.");
       const plan = { key: copyKey(sandbox, target ?? ""), branch: recovering ? undefined : baseBranch(initial?.input) };
-      // The project's loops get its current .env files (ADR 20261101-004659).
-      if (target) syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
+      // The project's loops and cloud catalog get its current .env files (ADR 20261101-004659).
+      if (target) {
+        syncLoopEnv(this.rt.host.deps, this.rt.sandboxes, thread?.projectId);
+        syncProjectWithEnvToCloud(this.rt.host.deps, thread?.projectId, this.rt.sandboxes);
+      }
       const failure = (error: unknown) => error instanceof Error ? error : new Error(String(error));
       // A copy that can't be planned fails where the user and `room-cli files wait` see it, never as nothing to copy (#337).
       [planned, started] = await Promise.all([
@@ -585,12 +590,26 @@ export class CloudDelivery {
     }
     if (pending.command === "model") {
       const parsed = modelPickSchema.parse(JSON.parse(pending.input));
-      // A Core that predates the switch (still awake from before a release) keeps its model, and so does the thread.
-      if (!harness || !await this.messaging.switchesModels(saved.coreUrl, harness, () => this.rt.capabilities(client)) || (parsed.idleSessionId && parsed.idleSessionId !== sessionId)) {
+      if (!harness || (parsed.idleSessionId && parsed.idleSessionId !== sessionId)) {
         this.messaging.keepModel(threadId, pending);
         return null;
       }
-      return client.setModel(sessionId, pending.id, parsed.model, parsed.reasoning, Boolean(parsed.idleSessionId));
+      const key = `${saved.coreUrl} ${harness}`;
+      try {
+        const result = await client.setModel(sessionId, pending.id, parsed.model, parsed.reasoning, Boolean(parsed.idleSessionId));
+        this.rt.modelSwitchers.add(key);
+        return result;
+      } catch (error) {
+        // An older Core without POST /v1/sessions/:id/model answers 404 without a code; check once before treating it as stale.
+        if (error instanceof CloudroomError && error.status === 404 && !error.code && !this.rt.modelSwitchers.has(key)) {
+          const takes = await this.messaging.switchesModels(saved.coreUrl, harness, () => this.rt.capabilities(client, null, { models: false })).catch(() => null);
+          if (takes === false) {
+            this.messaging.keepModel(threadId, pending);
+            return null;
+          }
+        }
+        throw error;
+      }
     }
     if (pending.command === "cancel") return client.cancel(sessionId, pending.id, JSON.parse(pending.input).target_request_id);
     if (pending.command === "reorder") return client.reorder(sessionId, pending.id, z.object({ order: z.array(z.string()) }).parse(JSON.parse(pending.input)).order);

@@ -23,7 +23,7 @@ const STAGED: i32 = 75;
 const SMALL: u64 = LIMIT as u64 - MIB;
 /// SHA-256 of stdin on macOS and Linux.
 const SHA: &str = "{ sha256sum 2>/dev/null || shasum -a 256; } | cut -c1-64";
-/// Read-only Mac access may write in /tmp.
+/// Read-only Mac commands may write in /tmp only under this name and a pull's `MARK` (the Mac helpers' READ_ONLY).
 const MKTEMP: &str = "mktemp -d /tmp/cloudroom.XXXXXX";
 /// Starts each pull's random mark, the line its archive follows.
 const MARK: &str = "cloudroom-copy-";

@@ -531,25 +531,46 @@ export function useRetryCloudStart(threadId: string) {
   });
 }
 
-export async function cloudroomRequestId(key: string, input: unknown): Promise<string> {
+const inFlightCloudroomRequestIds = new Set<string>();
+
+async function resolveCloudroomRequestId(
+  key: string,
+  input: unknown,
+  trackInFlight: boolean,
+): Promise<{ requestId: string; entry: { key: string; value: string }; release: () => void }> {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(input)));
   const fingerprint = Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
   const storageKey = `cloudroom-request:${key}`;
   const previous = localStorage.getItem(storageKey)?.split(":");
-  if (previous?.[0] === fingerprint && previous[1]) return previous[1];
-  const id = crypto.randomUUID();
-  localStorage.setItem(storageKey, `${fingerprint}:${id}`);
-  return id;
+  const reusable = previous?.[0] === fingerprint && previous[1] && !inFlightCloudroomRequestIds.has(previous[1]);
+  const requestId = reusable ? previous[1] : crypto.randomUUID();
+  const value = `${fingerprint}:${requestId}`;
+  if (!reusable) localStorage.setItem(storageKey, value);
+  if (trackInFlight) inFlightCloudroomRequestIds.add(requestId);
+  return {
+    requestId,
+    entry: { key: storageKey, value },
+    release: () => {
+      inFlightCloudroomRequestIds.delete(requestId);
+    },
+  };
 }
 
-/** The stored fingerprint and request ID, so a failed message restored unchanged can send with the same ID. */
-export function cloudroomRequestEntry(key: string): { key: string; value: string } | undefined {
-  const storageKey = `cloudroom-request:${key}`;
-  const value = localStorage.getItem(storageKey);
-  return value ? { key: storageKey, value } : undefined;
+export function createCloudroomRequestId(
+  key: string,
+  input: unknown,
+): Promise<{ requestId: string; entry: { key: string; value: string }; release: () => void }> {
+  return resolveCloudroomRequestId(key, input, true);
+}
+
+export async function cloudroomRequestId(key: string, input: unknown): Promise<string> {
+  return (await resolveCloudroomRequestId(key, input, false)).requestId;
 }
 
 export function clearCloudroomRequestId(key: string, expectedId?: string): void {
   const storageKey = `cloudroom-request:${key}`;
-  if (!expectedId || localStorage.getItem(storageKey)?.split(":")[1] === expectedId) localStorage.removeItem(storageKey);
+  const storedId = localStorage.getItem(storageKey)?.split(":")[1];
+  if (expectedId) inFlightCloudroomRequestIds.delete(expectedId);
+  else if (storedId) inFlightCloudroomRequestIds.delete(storedId);
+  if (!expectedId || storedId === expectedId) localStorage.removeItem(storageKey);
 }

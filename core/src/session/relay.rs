@@ -861,6 +861,34 @@ fn next_thread_report(local: &Local) -> Option<(String, Value)> {
     })
 }
 
+/// Next live turn state (`working`, `waiting`, `error`, `idle`) to report to the website for the primary session.
+/// Only reports real transitions and skips initial `idle` before any prompt has run so new sandboxes stay silent.
+fn next_turn_state(
+    local: &Local,
+    secrets: &crate::secrets::Secrets,
+) -> Option<(String, &'static str)> {
+    local.sessions.values().find_map(|s| {
+        if s.archived || s.parent_session.is_some() || s.close_request.is_some() {
+            return None;
+        }
+        let waiting_continue = local
+            .sessions
+            .values()
+            .any(|o| o.continuing.as_deref() == Some(&s.session_id));
+        if waiting_continue {
+            return None;
+        }
+        let state = s.live_turn_state(secrets.has_pending(&s.session_id));
+        if s.reported_turn_state == Some(state) {
+            return None;
+        }
+        if s.reported_turn_state.is_none() && state == "idle" && !s.has_dispatched {
+            return None;
+        }
+        Some((s.session_id.clone(), state))
+    })
+}
+
 /// Child starts the website hasn't finished, by session, request ID and the request to repeat. An archived thread's
 /// stay unstarted.
 fn pending_starts(local: &Local) -> Vec<(String, String, Value)> {
@@ -1114,7 +1142,44 @@ impl Manager {
         tokio::spawn(async move {
             let mut wait = Duration::from_secs(5);
             while !manager.is_stopping() {
-                let due = next_thread_report(&manager.local.lock().unwrap());
+                let (due, turn_due) = {
+                    let local = manager.local.lock().unwrap();
+                    let due = next_thread_report(&local);
+                    let turn = if due.is_none() {
+                        next_turn_state(&local, &manager.secrets)
+                    } else {
+                        None
+                    };
+                    (due, turn)
+                };
+                if let Some((session, turn_state)) = turn_due {
+                    let now = crate::observability::now_ms();
+                    let body = json!({
+                        "request_id": format!("turn_{now}_{turn_state}"),
+                        "session": session,
+                        "wake": manager.wake_id(),
+                        "turn_state": turn_state,
+                        "at": now,
+                    });
+                    let done = match api.post("thread", &body).await {
+                        Ok(_) | Err(ApiError::Status(400 | 403 | 404 | 409 | 410, _)) => {
+                            if let Some(s) =
+                                manager.local.lock().unwrap().sessions.get_mut(&session)
+                            {
+                                s.reported_turn_state = Some(turn_state);
+                            }
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    if done {
+                        wait = Duration::from_secs(5);
+                        continue;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(Duration::from_secs(300));
+                    continue;
+                }
                 let Some((session, report)) = due else {
                     if changed.changed().await.is_err() {
                         return;

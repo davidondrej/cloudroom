@@ -12,7 +12,9 @@ export type AddStep = "login" | "token" | "device" | "key";
 
 const SNAPSHOT_DAY = "telemetry-snapshot-day:v1";
 const CODES: [RegExp, string][] = [
-  [/same Claude account|different Claude account|^Approve with/i, "different_account"],
+  // First: its text says "terminal", which would read as login_not_started.
+  [/Couldn't read this computer's Claude login/i, "mac_login_unreadable"],
+  [/same Claude account|different Claude account/i, "different_account"],
   [/expired/i, "expired"],
   [/up to \d+ accounts/i, "max_accounts"],
   [/API key/i, "bad_key"],

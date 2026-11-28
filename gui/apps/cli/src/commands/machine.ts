@@ -93,8 +93,12 @@ async function reportMachineCleanup(
     host?.lifecycle.phase === "removing" &&
     host.lifecycle.teardown?.status === "failed"
   ) {
+    const forget =
+      host.status === "disconnected"
+        ? `\nGone for good? Forget it with: room-cli machine forget ${hostId}`
+        : "";
     throw new Error(
-      `Machine ${hostId} cleanup failed: ${host.lifecycle.message ?? "unknown error"}\nRetry with: room-cli machine retry-cleanup ${hostId}`,
+      `Machine ${hostId} cleanup failed: ${host.lifecycle.message ?? "unknown error"}\nRetry with: room-cli machine retry-cleanup ${hostId}${forget}`,
     );
   }
   console.log(done);
@@ -625,6 +629,33 @@ export function registerMachineCommands(
           hostId,
           `Machine ${hostId} cleanup retried`,
         );
+      }),
+    );
+
+  machine
+    .command("forget <id-or-name>")
+    .description(
+      "Remove an offline machine whose cleanup failed; its files stay on it",
+    )
+    .option("--yes", "Skip the confirmation prompt")
+    .option("--json", "Print machine-readable JSON output")
+    .action(
+      action(async (target: string, opts: MachineMutationCommandOptions) => {
+        const sdk = createCliRoomSdk(getUrl());
+        const hostId = await resolveMachineHostId({
+          serverUrl: getUrl(),
+          target,
+        });
+        if (
+          !opts.yes &&
+          !(await confirmDestructiveAction(
+            `Forget machine ${hostId}? Cloudroom can't reach it, so its files stay on it.`,
+          ))
+        )
+          return;
+        const result = await sdk.hosts.experimental_forget({ hostId });
+        if (outputJson(opts, result)) return;
+        await reportMachineCleanup(sdk, hostId, `Machine ${hostId} forgotten`);
       }),
     );
 

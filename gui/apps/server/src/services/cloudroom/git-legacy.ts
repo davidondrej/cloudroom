@@ -1,7 +1,7 @@
 // The bash version of `cloudroom git` (core/src/git.rs), for sandboxes whose Core predates it. Delete this file once
 // every sandbox runs Core 0.1.113 or later.
 import { isUtf8 } from "node:buffer";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import type { GitBranchRefClassification, RawDiffFileStat, WorkspaceCommitSummary, WorkspaceDiffTarget, WorkspaceFileStatus, WorkspaceStatus } from "@cloudroom/domain";
 import type { DiffPatchEntry, EnvironmentDiffBranchesResponse, EnvironmentDiffFileQuery, EnvironmentDiffFileResponse, EnvironmentDiffFilesResponse } from "@cloudroom/server-contract";
 import { parsePorcelainEntries } from "@cloudroom/host-workspace";
@@ -303,7 +303,7 @@ emit cat -- "$p"`
 s=$(git cat-file -s "$rev:$p" 2>/dev/null) || { echo "File not found." >&2; exit 6; }
 [ "$s" -le ${MAX_FILE_BYTES} ] || { echo "File is too large to show." >&2; exit 7; }
 emit git cat-file blob "$rev:$p"`}`, nul([path])))[0]?.bytes ?? Buffer.alloc(0);
-  const mimeType = mimeTypes.lookup(path) || undefined;
+  const mimeType = lookupMimeType(path) || undefined;
   const image = mimeType?.startsWith("image/") === true && mimeType !== "image/svg+xml";
   const utf8 = !image && isUtf8(content);
   return { path, content: content.toString(utf8 ? "utf8" : "base64"), contentEncoding: utf8 ? "utf8" : "base64", ...(mimeType ? { mimeType } : {}), sizeBytes: content.length };

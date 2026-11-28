@@ -1161,8 +1161,8 @@ dist-tag and `doctor` parsing) beside them.
 2. **`compareVersions` uses `semver` precedence.** Numeric prerelease
    identifiers compare numerically, text identifiers use ASCII order, and
    build metadata does not affect precedence. Invalid inputs throw
-   `TypeError`. The comparison subpath is bundled into the SDK and plugins;
-   no consumer dependency is required. Confirm the throwing contract before
+   `TypeError`. Our semver port (`@cloudroom/domain/semver`) is bundled into
+   the SDK and plugins; no consumer dependency is required. Confirm the throwing contract before
    stabilization.
 3. **The npm helpers assume a global install.** `probeNpmGlobalPackage` and
    `npmGlobalInstallSource` model one layout (npm's global prefix); pnpm,
@@ -3058,8 +3058,8 @@ default. Explicit branch inputs still pass to the concrete provider.
 ## Experimental host SDK machine operations
 
 New host methods are experimental_create, experimental_getEnrollmentCommand,
-experimental_listProviders, experimental_suspend, experimental_resume and
-experimental_retryCleanup. There are no unprefixed aliases. Creation returns a
+experimental_listProviders, experimental_suspend, experimental_resume,
+experimental_retryCleanup and experimental_forget. There are no unprefixed aliases. Creation returns a
 reserved host immediately when `wait: false`; otherwise it polls that host until
 active. The enrollment-command method exists for the manual setup UI and CLI and
 returns a credential only while that host is creating.

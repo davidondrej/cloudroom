@@ -92,6 +92,7 @@ room-cli machine reconcile <id-or-name> Reconcile compute with core’s recorded
 room-cli machine suspend <id-or-name> Suspend a provider-managed machine
 room-cli machine resume <id-or-name> Resume a machine (already active is a no-op)
 room-cli machine retry-cleanup <id-or-name> Retry failed teardown now
+room-cli machine forget <id-or-name> [--yes] Remove an offline machine whose cleanup failed; its files stay on it
 room-cli machine remove <id-or-name> [--yes] Revoke and remove a machine
 room-cli machine provider-cli status <machine>
 room-cli machine provider-cli install <machine> <provider-id>

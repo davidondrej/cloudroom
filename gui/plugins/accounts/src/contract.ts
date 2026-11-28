@@ -106,9 +106,10 @@ export const accountsRpcContract = defineRpcContract({
   },
   // Cursor accounts are added with a user API key from cursor.com/dashboard.
   "cursor.add": { input: z.object({ apiKey: z.string().max(4096) }), output: ok },
-  // Antigravity accounts sign in with Google: open the link, then paste the code Google shows.
+  // Antigravity accounts sign in with Google: open the link, then paste the code Google shows. `mac` signs in this
+  // computer's own login, as the agent's Log in does, instead of adding an account.
   "antigravity.start": {
-    input: z.null(),
+    input: z.object({ mac: z.boolean().optional() }).nullable(),
     output: z.object({ sessionId: z.string(), authorizeUrl: z.string() }),
   },
   "antigravity.complete": {

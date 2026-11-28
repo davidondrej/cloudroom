@@ -71,39 +71,60 @@ async function tryPluginCommandProxy(
   getUrl: () => string,
 ): Promise<number | undefined> {
   const proxy = await import("./plugin-cli-proxy.js");
-  const result = await proxy.fetchPluginCliContributions(getUrl());
-  if (result.outcome === "unreachable") {
-    console.error(
-      proxy.describeUnreachableServer(
-        getUrl(),
-        result.cause,
-        result.lastTimeoutMs,
-        result.attempts,
-      ),
-    );
-    return 1;
-  }
-  if (result.outcome === "invalid") {
-    // Not "unknown command": the command may exist, but discovery failed (#1494).
-    console.error(
-      `Cannot run room-cli ${candidate}: Cloudroom at ${getUrl()} ${result.detail}`,
-    );
-    return 1;
-  }
-  const match = proxy.findPluginCliCommand(result.contributions, candidate);
-  if (match === undefined) {
-    const disabledId = await proxy.findDisabledPluginForCommand(
+  const discover = async (once: boolean) => {
+    const result = await proxy.fetchPluginCliContributions(
       getUrl(),
-      candidate,
+      undefined,
+      { once },
     );
-    if (disabledId !== null) {
+    if (result.outcome === "unreachable") {
       console.error(
-        `room-cli ${candidate} is provided by the "${disabledId}" plugin, which is disabled — ` +
-          `run \`room-cli plugin enable ${disabledId}\` or enable it in Plugins.`,
+        proxy.describeUnreachableServer(
+          getUrl(),
+          result.cause,
+          result.lastTimeoutMs,
+          result.attempts,
+        ),
       );
-      return 1;
+    } else if (result.outcome === "invalid") {
+      // Not "unknown command": the command may exist, but discovery failed (#1494).
+      console.error(
+        `Cannot run room-cli ${candidate}: Cloudroom at ${getUrl()} ${result.detail}`,
+      );
     }
-    return;
+    return result.outcome === "ok" ? result.contributions : undefined;
+  };
+  const contributions = await discover(false);
+  if (contributions === undefined) return 1;
+  let match = proxy.findPluginCliCommand(contributions, candidate);
+  for (let attempt = 0; match === undefined; attempt += 1) {
+    const plugin = await proxy.findPluginStatusForCommand(getUrl(), candidate);
+    if (plugin === null) return;
+    if (plugin.status === "running") {
+      // Discovery raced the plugin finishing startup or a reload (#1930): read it once more.
+      if (attempt > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const again = await discover(true);
+      if (again === undefined) return 1;
+      match = proxy.findPluginCliCommand(again, candidate);
+      continue;
+    }
+    if (plugin.status === "disabled") {
+      console.error(
+        `room-cli ${candidate} is provided by the "${plugin.id}" plugin, which is disabled — ` +
+          `run \`room-cli plugin enable ${plugin.id}\` or enable it in Plugins.`,
+      );
+    } else {
+      // Not "unknown command": a starting or failed plugin contributes no command (#1930).
+      console.error(
+        `Cannot run room-cli ${candidate}: the "${plugin.id}" plugin that provides it is not running ` +
+          `(status: ${plugin.status}${plugin.detail ? ` — ${plugin.detail}` : ""}). Your command did not run; ` +
+          (plugin.status === "starting"
+            ? "re-run it in a few seconds."
+            : "check the plugin in Plugins."),
+      );
+    }
+    return 1;
   }
   const argv = process.argv.slice(3);
   // `room-cli PLUGIN --help` always prints help: the plugin's own, or one built from its commands.

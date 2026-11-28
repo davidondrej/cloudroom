@@ -160,6 +160,7 @@ This index lists every command path that the core CLI registers. Read the task-s
 - `room-cli machine resume`
 - `room-cli machine reconcile`
 - `room-cli machine retry-cleanup`
+- `room-cli machine forget`
 - `room-cli machine retry-update`
 - `room-cli machine provider-cli`
 - `room-cli machine provider-cli status`

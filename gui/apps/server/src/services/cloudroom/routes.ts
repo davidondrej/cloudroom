@@ -262,15 +262,6 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     const input = z.object({ popup: z.enum(POPUPS), event: z.enum(["shown", "closed"]), detail: z.enum(POPUP_DETAILS).optional() }).strict().parse(await context.req.json());
     return context.json({ ok: await recordPopup(deps, input.popup, input.event, input.detail) });
   });
-  app.post("/api/v1/cloudroom/affiliate", async (context) => {
-    try {
-      return context.json(await cloudroom(deps).sandboxes.affiliateLink());
-    } catch (error) {
-      if (!(error instanceof CloudroomError)) throw error;
-      const status = error.status ?? 503;
-      throw new ApiError(status as ConstructorParameters<typeof ApiError>[0], error.code ?? "affiliate_request", error.message);
-    }
-  });
   // The cards at the top right (docs/scopes/corner-cards.md): claims a showing, or saves the user's answer.
   app.post("/api/v1/cloudroom/corner", async (context) => {
     const input = z.object({ card: z.enum(CORNER_CARDS), key: z.string().max(80), event: z.enum(["shown", ...CORNER_ANSWERS]), variant: z.string().regex(/^[a-z0-9_-]{1,24}$/).optional() })
@@ -364,12 +355,22 @@ export function installCloudroomRoutes(app: Hono, deps: AppDeps, plugins: Plugin
     if (!parsed.success) throw new ApiError(400, "invalid_request", "Feedback must be 1 to 4,000 characters. Send a longer report as several messages.");
     return context.json(await reportBug(deps, parsed.data));
   });
-  app.get("/api/v1/cloudroom/account/referrals", async (context) => context.json(await cloudroom(deps).sandboxes.referrals("get")));
+  const referralsRouteError = (error: unknown): never => {
+    if (!(error instanceof CloudroomError)) throw error;
+    const status = error.status ?? 503;
+    throw new ApiError(status as ConstructorParameters<typeof ApiError>[0], error.code ?? "referrals_request", error.message);
+  };
+  app.get("/api/v1/cloudroom/account/referrals", async (context) => {
+    try { return context.json(await cloudroom(deps).sandboxes.referrals("get")); }
+    catch (error) { referralsRouteError(error); }
+  });
   app.get("/api/v1/cloudroom/account/usage-wave", async (context) => context.json({ wave: await cloudroom(deps).sandboxes.usageWave() }));
+  app.get("/api/v1/cloudroom/account/usage", async (context) => context.json(await cloudroom(deps).sandboxes.usageView(context.req.query("view"))));
   app.get("/api/v1/cloudroom/threads/:id/credits", async (context) => context.json(await threadCredits(deps, context.req.param("id"))));
   app.post("/api/v1/cloudroom/account/referrals", async (context) => {
     z.object({}).strict().parse(await context.req.json());
-    return context.json(await cloudroom(deps).sandboxes.referrals("create"));
+    try { return context.json(await cloudroom(deps).sandboxes.referrals("create")); }
+    catch (error) { referralsRouteError(error); }
   });
   app.post("/api/v1/cloudroom/account/more-usage", async (context) => {
     z.object({}).strict().parse(await context.req.json());

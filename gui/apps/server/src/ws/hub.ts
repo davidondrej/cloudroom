@@ -162,6 +162,7 @@ interface ThreadEventWaiter {
 }
 
 interface DaemonRegistrationWaiter {
+  removeAbortListener?: () => void;
   resolve: (registered: boolean) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
@@ -191,6 +192,13 @@ type HostOnlineRpcResponseDisposition =
       handled: false;
       reason: "session_mismatch";
     };
+
+export class HostOnlineRpcCancelledError extends Error {
+  constructor() {
+    super("Host RPC cancelled");
+    this.name = "HostOnlineRpcCancelledError";
+  }
+}
 
 export class HostOnlineRpcTimeoutError extends Error {
   constructor() {
@@ -658,7 +666,11 @@ export class NotificationHub implements DbNotifier {
   async waitForDaemonForHost(
     hostId: string,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<boolean> {
+    if (signal?.aborted) {
+      return false;
+    }
     if (this.hasDaemonForHost(hostId)) {
       return true;
     }
@@ -671,6 +683,16 @@ export class NotificationHub implements DbNotifier {
           resolve(false);
         }, timeoutMs),
       };
+      if (signal) {
+        const onAbort = () => {
+          this.deleteDaemonRegistrationWaiter(hostId, waiter);
+          resolve(false);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        waiter.removeAbortListener = () => {
+          signal.removeEventListener("abort", onAbort);
+        };
+      }
       const waiters =
         this.daemonRegistrationWaiters.get(hostId) ??
         new Set<DaemonRegistrationWaiter>();
@@ -773,8 +795,13 @@ export class NotificationHub implements DbNotifier {
   requestHostOnlineRpc(args: {
     hostId: string;
     message: HostDaemonOnlineRpcRequestMessage;
+    onSent?: () => void;
+    signal?: AbortSignal;
     timeoutMs: number;
   }): Promise<HostDaemonOnlineRpcResponseMessage> {
+    if (args.signal?.aborted) {
+      return Promise.reject(new HostOnlineRpcCancelledError());
+    }
     const sessionId = this.daemonSessionIdsByHost.get(args.hostId);
     if (!sessionId) {
       return Promise.reject(new HostOnlineRpcUnavailableError());
@@ -801,7 +828,9 @@ export class NotificationHub implements DbNotifier {
         } catch (error) {
           this.deleteHostOnlineRpcWaiter(args.message.requestId, waiter);
           reject(error instanceof Error ? error : new Error(String(error)));
+          return;
         }
+        args.onSent?.();
       },
     );
   }
@@ -1039,6 +1068,7 @@ export class NotificationHub implements DbNotifier {
     waiter: DaemonRegistrationWaiter,
   ): void {
     clearTimeout(waiter.timeout);
+    waiter.removeAbortListener?.();
     const waiters = this.daemonRegistrationWaiters.get(hostId);
     if (!waiters) {
       return;
@@ -1056,6 +1086,7 @@ export class NotificationHub implements DbNotifier {
     }
     for (const waiter of waiters) {
       clearTimeout(waiter.timeout);
+      waiter.removeAbortListener?.();
       waiter.resolve(true);
     }
     this.daemonRegistrationWaiters.delete(hostId);

@@ -744,10 +744,13 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   );
   const latestPendingInteraction = getLatestPendingInteraction(pendingInteractions);
   const hasPendingInteraction = latestPendingInteraction !== null;
-  // A GPU request is a card at the end of the chat, not a form in place of the composer.
+  // Chat-card requests (GPU approvals, browser control setup) sit at the end of the chat, not in place of the composer.
   const chatCardInteraction =
     latestPendingInteraction?.origin?.kind === "plugin" &&
-    isChatCardPluginInteraction(latestPendingInteraction.origin.pluginId)
+    isChatCardPluginInteraction(
+      latestPendingInteraction.origin.pluginId,
+      latestPendingInteraction.origin.rendererId,
+    )
       ? latestPendingInteraction
       : null;
   const { data: queuedMessagesForEditEligibility = [] } =
@@ -1201,10 +1204,13 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
   const waitingCommands = activeBackgroundCommands.filter((row) =>
     isBackgroundCommandTaskType(row.taskType),
   );
+  // A Local Codex edit stops its commands first, like Stop (#1774).
+  const sentMessageEditStopsCommands =
+    thread?.providerId === "codex" && thread.executionTarget !== "cloud";
   const sentMessageEditWaitsForBackgroundWork =
     activeWorkflows.length > 0 ||
     (thread?.activeBackgroundAgentCount ?? 0) > 0 ||
-    activeBackgroundCommands.length > 0;
+    (activeBackgroundCommands.length > 0 && !sentMessageEditStopsCommands);
   const canEditSentMessages =
     canOfferSentMessageEdit && !sentMessageEditWaitsForBackgroundWork;
   const sentMessageEditEntryRef = useRef({ canEditSentMessages, thread });
@@ -3396,7 +3402,10 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
         <PluginThreadPanelNavigationProvider
           openThreadPanel={handleOpenTimelinePluginPanel}
         >
-          {threadDetailContent}
+          {/* Marks the thread so a plugin can style its own thread (the Director's messages). */}
+          <div className="contents" data-thread-view={thread.id}>
+            {threadDetailContent}
+          </div>
         </PluginThreadPanelNavigationProvider>
       </ThreadProviderContext.Provider>
     </>

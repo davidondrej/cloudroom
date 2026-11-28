@@ -1,14 +1,14 @@
 # Computer Use
 
-Built-in computer use for Local threads. Agents call `room-cli computer-use`; the
-plugin asks the user before each new app, then forwards the call to a private
+Built-in computer use for Local threads (and Cloud threads with Mac access). Agents call `room-cli computer-use`; the
+plugin asks the user once per thread, then forwards calls to a private
 [Cua Driver](https://github.com/trycua/cua) daemon.
 
 ## How it works
 
-- **Server** (`server.ts`): CLI, per-app approval card, "always allowed" list, one-thread-per-app lock.
+- **Server** (`server.ts`): CLI, one-per-thread approval card persisted in SQLite (`plugin_kv`), one-thread-per-app lock.
 - **Host** (`host.ts`): downloads the pinned driver on first use, starts it on a private socket, runs calls, saves screenshots to files.
-- **App** (`app.tsx`): the approval card and the Settings section (macOS permissions, always-allowed apps).
+- **App** (`app.tsx`): the approval card and the Settings section (macOS permissions, driver controls).
 - **Skill** (`skills/computer-use`): teaches agents the observe, act, verify loop.
 
 ## Lifecycle

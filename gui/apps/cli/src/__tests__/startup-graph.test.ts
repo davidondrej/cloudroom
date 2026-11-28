@@ -120,7 +120,6 @@ describe("cloudroom startup module graph", () => {
     for (const fragment of [
       "/zod/",
       "/undici/",
-      "/mime-types/",
       "/node_modules/ws/",
       "/packages/config/",
       "/packages/domain/",
@@ -149,7 +148,7 @@ describe("cloudroom startup module graph", () => {
       "/apps/cli/src/commands/project.ts",
       "/packages/plugin-build/",
       "/packages/templates/src/plugin-scaffold",
-      "/mime-types/",
+      "/packages/config/src/mime-types",
     ]) {
       expect(loaded(run, fragment), fragment).toEqual([]);
     }

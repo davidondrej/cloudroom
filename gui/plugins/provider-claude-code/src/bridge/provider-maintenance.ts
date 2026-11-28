@@ -3,7 +3,7 @@ import {
   execFile,
   spawn,
 } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -51,8 +51,8 @@ const CLAUDE_RENEWS_MESSAGE =
 const CLAUDE_THROTTLED_MESSAGE =
   "Anthropic temporarily throttled this usage check. This does not mean your Claude limit is exhausted. Try again later.";
 const USAGE_THROTTLE_MIN_MS = 15_000;
-const USAGE_THROTTLE_BASE_MS = 30_000;
-const USAGE_THROTTLE_MAX_MS = 5 * 60_000;
+const USAGE_THROTTLE_BASE_MS = 5 * 60_000;
+const USAGE_THROTTLE_MAX_MS = 90 * 60_000;
 
 const usageThrottleSchema = z.object({
   tokenHash: z.string().min(1),
@@ -61,14 +61,34 @@ const usageThrottleSchema = z.object({
 });
 type UsageThrottleState = z.infer<typeof usageThrottleSchema>;
 
-let cachedUserAgent: { command: string; value: string } | null = null;
-let usageThrottle: UsageThrottleState | null | undefined = undefined;
+const cliVersionCacheSchema = z.object({
+  command: z.string().min(1),
+  mtimeMs: z.number().finite(),
+  version: z.string().min(1),
+});
 
-function throttleFilePath(): string {
+let cachedUserAgent: {
+  command: string;
+  mtimeMs: number | undefined;
+  value: string;
+} | null = null;
+
+function uidSuffix(): string {
   const uid = process.getuid?.();
+  return uid === undefined ? "" : `-${uid}`;
+}
+
+function throttleFilePath(tokenHash: string): string {
   return path.join(
     os.tmpdir(),
-    `cloudroom-claude-usage-throttle${uid === undefined ? "" : `-${uid}`}.json`,
+    `cloudroom-claude-usage-throttle${uidSuffix()}-${tokenHash.slice(0, 16)}.json`,
+  );
+}
+
+function cliVersionCachePath(): string {
+  return path.join(
+    os.tmpdir(),
+    `cloudroom-claude-cli-version${uidSuffix()}.json`,
   );
 }
 
@@ -76,41 +96,84 @@ function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-async function readUsageThrottle(): Promise<UsageThrottleState | null> {
-  if (usageThrottle !== undefined) return usageThrottle;
+async function readUsageThrottle(
+  tokenHash: string,
+): Promise<UsageThrottleState | null> {
   try {
-    const raw = await fs.readFile(throttleFilePath(), "utf8");
+    const raw = await fs.readFile(throttleFilePath(tokenHash), "utf8");
     const parsed = usageThrottleSchema.safeParse(JSON.parse(raw));
-    usageThrottle = parsed.success ? parsed.data : null;
-  } catch {
-    usageThrottle = null;
-  }
-  return usageThrottle;
+    if (parsed.success && parsed.data.tokenHash === tokenHash) {
+      return parsed.data;
+    }
+  } catch {}
+  return null;
 }
 
 async function writeUsageThrottle(next: UsageThrottleState): Promise<void> {
-  usageThrottle = next;
+  const target = throttleFilePath(next.tokenHash);
+  const payload = JSON.stringify(next);
   try {
-    await fs.writeFile?.(throttleFilePath(), JSON.stringify(next), {
-      mode: 0o600,
-    });
+    if (typeof fs.rename === "function") {
+      const tmp = `${target}.${randomUUID()}.tmp`;
+      try {
+        await fs.writeFile?.(tmp, payload, { mode: 0o600 });
+        await fs.rename(tmp, target);
+      } catch {
+        await fs.unlink?.(tmp).catch(() => {});
+      }
+    } else {
+      await fs.writeFile?.(target, payload, { mode: 0o600 });
+    }
   } catch {}
 }
 
-async function clearUsageThrottle(): Promise<void> {
-  const had = usageThrottle !== null && usageThrottle !== undefined;
-  usageThrottle = null;
-  if (!had) return;
+async function clearUsageThrottle(tokenHash: string): Promise<void> {
   try {
-    await fs.unlink?.(throttleFilePath());
+    await fs.unlink?.(throttleFilePath(tokenHash));
   } catch {}
+}
+
+function formatClaudeUserAgent(version: string | null): string {
+  return `claude-cli/${version ?? CLAUDE_MINIMUM_SUPPORTED_VERSION} (external, cli)`;
 }
 
 async function claudeUserAgent(command: string): Promise<string> {
-  if (cachedUserAgent?.command === command) return cachedUserAgent.value;
+  const mtimeMs = (await fs.stat?.(command).catch(() => null))?.mtimeMs;
+  if (
+    cachedUserAgent?.command === command &&
+    cachedUserAgent.mtimeMs === mtimeMs
+  ) {
+    return cachedUserAgent.value;
+  }
+  if (mtimeMs !== undefined) {
+    try {
+      const raw = await fs.readFile(cliVersionCachePath(), "utf8");
+      const parsed = cliVersionCacheSchema.safeParse(JSON.parse(raw));
+      if (
+        parsed.success &&
+        parsed.data.command === command &&
+        parsed.data.mtimeMs === mtimeMs
+      ) {
+        const value = formatClaudeUserAgent(parsed.data.version);
+        cachedUserAgent = { command, mtimeMs, value };
+        return value;
+      }
+    } catch {}
+  }
   const version = await readCliVersion(command).catch(() => null);
-  const value = `claude-code/${version ?? CLAUDE_MINIMUM_SUPPORTED_VERSION}`;
-  if (version !== null) cachedUserAgent = { command, value };
+  const value = formatClaudeUserAgent(version);
+  if (version !== null) {
+    cachedUserAgent = { command, mtimeMs, value };
+    if (mtimeMs !== undefined) {
+      await fs
+        .writeFile?.(
+          cliVersionCachePath(),
+          JSON.stringify({ command, mtimeMs, version }),
+          { mode: 0o600 },
+        )
+        .catch(() => {});
+    }
+  }
   return value;
 }
 
@@ -861,7 +924,8 @@ function normalizeUsage(
 
 export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
   const command = claudeExecutable();
-  if ((await resolveClaudePath(command)) === null) {
+  const resolvedCommand = await resolveClaudePath(command);
+  if (resolvedCommand === null) {
     return { supported: true, usage: { status: "not_installed" } };
   }
   const [credentials, account] = await Promise.all([
@@ -890,15 +954,12 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
     usage: { status: "error", message: CLAUDE_THROTTLED_MESSAGE, ...known },
   };
   const tokenHash = hashToken(credentials.accessToken);
-  const currentThrottle = await readUsageThrottle();
-  if (
-    currentThrottle?.tokenHash === tokenHash &&
-    Date.now() < currentThrottle.until
-  ) {
+  const currentThrottle = await readUsageThrottle(tokenHash);
+  if (currentThrottle !== null && Date.now() < currentThrottle.until) {
     return throttled;
   }
   try {
-    const userAgent = await claudeUserAgent(command);
+    const userAgent = await claudeUserAgent(resolvedCommand);
     const response = await fetchWithProxyFallback((init) =>
       fetch(CLAUDE_USAGE_URL, {
         ...init,
@@ -916,10 +977,7 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
     if (response.status === 401)
       return canRenew(credentials) ? renewing : expired;
     if (response.status === 429) {
-      const streak =
-        currentThrottle?.tokenHash === tokenHash
-          ? currentThrottle.streak + 1
-          : 1;
+      const streak = (currentThrottle?.streak ?? 0) + 1;
       const retryAfterMs =
         parseRetryAfterMs(response.headers?.get?.("retry-after")) ??
         Math.min(
@@ -943,7 +1001,9 @@ export async function getClaudeProviderUsage(): Promise<ProviderUsageResult> {
         },
       };
     }
-    await clearUsageThrottle();
+    if (currentThrottle !== null) {
+      await clearUsageThrottle(tokenHash);
+    }
     return {
       supported: true,
       usage: {
@@ -970,8 +1030,7 @@ export const __testing = {
   claudeInstallation,
   claudeUpdatePlan,
   normalizeUsage,
-  resetUsageThrottle: (clearDisk = true) => {
-    usageThrottle = clearDisk ? null : undefined;
+  resetUsageThrottle: (_clearDisk = true) => {
     cachedUserAgent = null;
   },
 };

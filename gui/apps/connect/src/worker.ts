@@ -84,6 +84,9 @@ const SESSION_ID = /^[a-f0-9-]{16,64}$/;
 const APP_HANDLE = "app";
 const LOGIN_TOKEN = /^[\w-]+\.[\w-]+\.[\w-]+$/;
 const MAC_HEADER = "x-cloudroom-mac";
+const EDGE_FALLBACK_HEADER = "x-cloudroom-edge-fallback";
+const PHONE_SESSION_ID_HEADER = "x-cloudroom-phone-session-id";
+const EDGE_STATIC_PATHS = /^\/(?:assets\/.+|sw\.js|app-files\.json|gitlab\.svg)$/;
 // Non-secret browser marker for the offline snippet library. It grants no server access.
 const OFFLINE_COOKIE = "__Host-cloudroom-offline-session";
 const NEXT_COOKIE = "__Host-cloudroom-next";
@@ -484,6 +487,31 @@ async function controlAll(env: Env, handles: string[], action: string): Promise<
   return !done.includes(false);
 }
 
+function phoneEventsStub(env: Env, userId: string): DurableObjectStub {
+  return env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(`phone:${userId}`));
+}
+
+/** Upgrades a signed-in Mac-off PWA to its account-scoped live-events WebSocket (no Mac tunnel needed). */
+function phoneEventsSocket(
+  request: Request,
+  url: URL,
+  env: Env,
+  userId: string,
+  sessionId?: string,
+): Promise<Response> | Response {
+  if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    return text("expected websocket\n", 426);
+  }
+  const origin = request.headers.get("origin");
+  if (origin !== null && origin !== url.origin) return json({ error: "Wrong origin." }, 403);
+  const headers = new Headers(request.headers);
+  headers.delete("cookie");
+  if (sessionId) headers.set(PHONE_SESSION_ID_HEADER, sessionId);
+  return phoneEventsStub(env, userId).fetch(
+    new Request(`https://phone.${env.BASE_DOMAIN}/__phone-events`, { method: "GET", headers }),
+  );
+}
+
 /** The website signed the account out everywhere (password reset, account deleted; #1920): its phones and codes go,
  *  and its Mac keys retire, so an old key can't open its Macs. With `delete_servers`, all server rows go too. Safe to repeat. */
 export async function accountSignedOut(request: Request, env: Env): Promise<Response> {
@@ -497,7 +525,13 @@ export async function accountSignedOut(request: Request, env: Env): Promise<Resp
     : await retireAccountMacs(env.DB, userId);
   const { revoked, tokenHashes } = await beginRevokeAllSessions(env.DB, userId);
   // Both always run: a phone stream that would not close must not keep every tunnel open.
-  const closed = await Promise.all([controlAll(env, await accountHandles(env.DB, userId), "revoke-visitors"), controlAll(env, toClose, "close")]);
+  const closed = await Promise.all([
+    controlAll(env, await accountHandles(env.DB, userId), "revoke-visitors"),
+    controlAll(env, toClose, "close"),
+    phoneEventsStub(env, userId)
+      .fetch(new Request(`https://phone.${env.BASE_DOMAIN}/__control/revoke-visitors`, { method: "POST" }))
+      .then((response) => response.ok, () => false),
+  ]);
   if (!closed.every(Boolean)) return json({ error: "Could not close connections. Try again." }, 503);
   await completeRevokeSessions(env.DB, tokenHashes);
   if (deleteServers) await deleteAccountServers(env.DB, userId);
@@ -506,13 +540,18 @@ export async function accountSignedOut(request: Request, env: Env): Promise<Resp
 
 /** Apps seen in this window get "threads changed"; older installs that never come back don't. */
 const SIGNAL_SEEN_MS = 30 * 86_400_000;
-/** The website says an account's Cloud threads changed (#237): each of its app computers online fetches them. Only
- *  the website may send it, with the shared secret; VPS hosts, remote hosts and phones never get it. */
+/** The website says an account's Cloud threads changed (#237): notifies connected Mac-off PWAs and (unless
+ *  `scope: "phones"`) each online app computer. Only the website may send it, with the shared secret. */
 async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const verified = await websiteCall(request, env);
   if (verified instanceof Response) return verified;
-  const { userId } = verified;
+  const { userId, body } = verified;
+  const phonesOnly = body.scope === "phones";
   ctx.waitUntil((async () => {
+    await phoneEventsStub(env, userId)
+      .fetch(new Request(`https://phone.${env.BASE_DOMAIN}/__control/phone-notify`, { method: "POST" }))
+      .catch(() => {});
+    if (phonesOnly) return;
     const seen = Date.now() - SIGNAL_SEEN_MS;
     for (const server of await accountServers(env.DB, userId)) {
       if ((server.lastSeenAt ?? 0) < seen) continue;
@@ -523,8 +562,21 @@ async function threadsChanged(request: Request, env: Env, ctx: ExecutionContext)
   return json({ ok: true }, 202);
 }
 
+async function phonesChanged(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  const verified = await websiteCall(request, env);
+  if (verified instanceof Response) return verified;
+  const { userId } = verified;
+  ctx.waitUntil(
+    phoneEventsStub(env, userId)
+      .fetch(new Request(`https://phone.${env.BASE_DOMAIN}/__control/phone-notify`, { method: "POST" }))
+      .catch(() => {}),
+  );
+  return json({ ok: true }, 202);
+}
+
 async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (request.method === "POST" && url.pathname === "/api/threads-changed") return threadsChanged(request, env, ctx);
+  if (request.method === "POST" && url.pathname === "/api/phones-changed") return phonesChanged(request, env, ctx);
   if (request.method === "POST" && url.pathname === "/api/account-signed-out") return accountSignedOut(request, env);
   if (request.method === "POST" && url.pathname === "/api/register") {
     return register(request, env);
@@ -556,19 +608,29 @@ async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext)
       }
       const { sessionIds, tokenHashes } = await beginRevokeSession(env.DB, server.userId, sessionId);
       if (sessionIds.length > 0) {
-        const closed = await Promise.all(
-          (await accountHandles(env.DB, server.userId)).map((handle) =>
+        const revokeBody = JSON.stringify({ sessionIds });
+        const closed = await Promise.all([
+          ...(await accountHandles(env.DB, server.userId)).map((handle) =>
             env.TUNNEL_DO.get(env.TUNNEL_DO.idFromName(handle))
               .fetch(
                 new Request(`https://${handle}.${env.BASE_DOMAIN}/__control/revoke-session`, {
                   method: "POST",
                   headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ sessionIds }),
+                  body: revokeBody,
                 }),
               )
               .then((response) => response.ok, () => false),
           ),
-        );
+          phoneEventsStub(env, server.userId)
+            .fetch(
+              new Request(`https://phone.${env.BASE_DOMAIN}/__control/revoke-session`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: revokeBody,
+              }),
+            )
+            .then((response) => response.ok, () => false),
+        ]);
         if (closed.includes(false)) {
           return json({ error: "Could not close that session's connections. Try again." }, 503);
         }
@@ -595,7 +657,13 @@ async function apex(request: Request, url: URL, env: Env, ctx: ExecutionContext)
     }
     if (url.pathname === "/api/phone-sessions/revoke") {
       const { revoked, tokenHashes } = await beginRevokeAllSessions(env.DB, server.userId);
-      if (!(await controlAll(env, await accountHandles(env.DB, server.userId), "revoke-visitors"))) {
+      const closed = await Promise.all([
+        controlAll(env, await accountHandles(env.DB, server.userId), "revoke-visitors"),
+        phoneEventsStub(env, server.userId)
+          .fetch(new Request(`https://phone.${env.BASE_DOMAIN}/__control/revoke-visitors`, { method: "POST" }))
+          .then((response) => response.ok, () => false),
+      ]);
+      if (!closed.every(Boolean)) {
         return json({ error: "Could not close phone connections. Try again." }, 503);
       }
       await completeRevokeSessions(env.DB, tokenHashes);
@@ -757,6 +825,9 @@ async function visitor(
       const denied = json({ error: "Sign in required." }, 401);
       return sessionRevoked ? withRevokedSession(denied) : denied;
     }
+    if (cloudPath === "events") {
+      return phoneEventsSocket(request, url, env, session?.userId ?? server.userId, session?.id);
+    }
     return cloud(request, cloudPath, url, env, token);
   }
 
@@ -788,6 +859,36 @@ async function visitor(
     return sessionRevoked ? withRevokedSession(hop) : hop;
   }
   return forward(request, env, ctx, server, target, session?.isPhone ?? false);
+}
+
+/** Serves the Cloudflare-hosted PWA static shell/assets ONLY while the user's Mac is offline.
+ *  When the Mac is online this is never called, so Mac-online keeps serving directly from the Mac. */
+async function edgeAppFallback(
+  request: Request,
+  pathname: string,
+  env: Env,
+  server: Server,
+): Promise<Response | null> {
+  if (!env.ASSETS || (request.method !== "GET" && request.method !== "HEAD")) return null;
+  const origin = new URL(request.url).origin;
+  if (wantsHtml(request)) {
+    // Request "/" rather than "/index.html": Cloudflare Workers Static Assets redirects /index.html -> / (307).
+    const asset = await env.ASSETS.fetch(new Request(`${origin}/`, { method: request.method })).catch(() => null);
+    if (!asset?.ok || !(asset.headers.get("content-type") ?? "").startsWith("text/html")) return null;
+    const response = new Response(asset.body, asset);
+    response.headers.set(EDGE_FALLBACK_HEADER, "1");
+    response.headers.set(MAC_HEADER, server.handle);
+    response.headers.set("cache-control", "no-store");
+    return response;
+  }
+  if (EDGE_STATIC_PATHS.test(pathname) || PUBLIC_APP_FILES.test(pathname)) {
+    const asset = await env.ASSETS.fetch(request).catch(() => null);
+    if (!asset?.ok) return null;
+    const response = new Response(asset.body, asset);
+    response.headers.set(EDGE_FALLBACK_HEADER, "1");
+    return response;
+  }
+  return null;
 }
 
 async function shareRedirect(env: Env, mac: Server, url: URL, token: string): Promise<Response> {
@@ -864,7 +965,14 @@ async function forward(
       reason: offline ? "mac offline" : response.status === 504 ? "timed out" : "mac error",
     });
   }
-  if (offline && wantsHtml(request)) return offlinePage(server.lastSeenAt);
+  if (offline && target === null) {
+    if (!bypassCache) {
+      const fallback = await edgeAppFallback(request, pathname, env, server);
+      if (fallback) return fallback;
+      if (wantsHtml(request)) return offlinePage(server.lastSeenAt);
+    }
+  }
+  if (offline && target !== null && wantsHtml(request)) return offlinePage(server.lastSeenAt);
   // A dropped page load gets a page that retries, not plain text. The Mac's own errors and API calls pass through.
   if (response.headers.get(TUNNEL_ERROR_HEADER) === "1" && request.method === "GET" && wantsHtml(request)) {
     return reconnectingPage(response.status);
@@ -998,7 +1106,12 @@ async function phoneApp(request: Request, url: URL, env: Env, ctx: ExecutionCont
     return shareRedirect(env, mac, url, token);
   }
   const cloudPath = CLOUD_PATH.exec(url.pathname)?.[1];
-  if (cloudPath !== undefined) return cloud(request, cloudPath, url, env, token);
+  if (cloudPath !== undefined) {
+    if (cloudPath === "events") {
+      return phoneEventsSocket(request, url, env, session.userId, session.id);
+    }
+    return cloud(request, cloudPath, url, env, token);
+  }
   if (url.pathname.startsWith("/__")) return text("Not found\n", 404);
   const { server, home } = request.method === "GET" && wantsHtml(request) ? await pageMac(request, env, token, picked) : { server: picked };
   const proxied =

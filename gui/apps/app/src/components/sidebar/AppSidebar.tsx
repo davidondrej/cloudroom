@@ -272,6 +272,15 @@ export function AppSidebar({
     setThreadShortcutKeysById(EMPTY_SIDEBAR_THREAD_SHORTCUT_KEYS);
   }, []);
 
+  const cancelThreadRevealRef = useRef<(() => void) | null>(null);
+  const scheduleThreadReveal = useCallback((threadId: string) => {
+    cancelThreadRevealRef.current?.();
+    cancelThreadRevealRef.current = revealSidebarThread(
+      sidebarRef.current,
+      threadId,
+    );
+  }, []);
+
   const openNavigationTarget = useCallback(
     (target: SidebarThreadShortcutTarget | undefined): boolean => {
       if (!target) return false;
@@ -288,7 +297,7 @@ export function AppSidebar({
       }
       closeOnMobile();
       if (target.threadId === activeThreadId) {
-        revealSidebarThread(sidebarRef.current, target.threadId);
+        scheduleThreadReveal(target.threadId);
         return true;
       }
       void navigate(
@@ -299,7 +308,7 @@ export function AppSidebar({
       );
       return true;
     },
-    [activeThreadId, closeOnMobile, navigate, store],
+    [activeThreadId, closeOnMobile, navigate, scheduleThreadReveal, store],
   );
 
   const activateThreadShortcut = useCallback(
@@ -400,9 +409,13 @@ export function AppSidebar({
 
   useEffect(() => {
     if (activeThreadId && !isHiddenHostedBody) {
-      revealSidebarThread(sidebarRef.current, activeThreadId);
+      scheduleThreadReveal(activeThreadId);
     }
-  }, [activeThreadId, isHiddenHostedBody]);
+    return () => {
+      cancelThreadRevealRef.current?.();
+      cancelThreadRevealRef.current = null;
+    };
+  }, [activeThreadId, isHiddenHostedBody, scheduleThreadReveal]);
 
   useEffect(() => {
     if (

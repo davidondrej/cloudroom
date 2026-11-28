@@ -280,6 +280,27 @@ export function registerFeedbackCommand(program: Command, getUrl: () => string, 
     }));
 }
 
+/** `room-cli usage` on this computer, the same as in Cloud threads (core/src/session/report.rs): the plan's Cloud Credits,
+ *  and with a view the last 7 UTC days, written by the website. */
+export function registerUsageCommand(program: Command, getUrl: () => string): void {
+  program.command("usage [threadId]").description("Show the account's Cloud Credits; with a thread ID, that thread and its subagents hour by hour, last 7 days")
+    .option("--days", "Credits per UTC day and by category, last 7 days")
+    .option("--threads", "Credits per thread, last 7 days (--json lists every thread)")
+    .option("--json", "Print JSON")
+    .action(action(async (threadId: string | undefined, options: JsonOutputOptions & { days?: boolean; threads?: boolean }) => {
+      const views = [options.days ? "days" : "", options.threads ? "threads" : "", threadId ?? ""].filter(Boolean);
+      if (views.length > 1) throw new Error("Use one of --days, --threads, or a thread ID.");
+      const usage = await createCliRoomSdk(getUrl()).cloudroom.usage(views[0]);
+      if (outputJson(options, usage)) return;
+      const { plan, credits, credits_limit: limit, extra_credits: extra = 0 } = usage;
+      console.log(!plan || limit === undefined ? "This account's Cloud Credits aren't metered."
+        : credits == null ? `Cloud Credits (${plan} plan) are being counted. Try again in a few minutes.`
+        : `Cloud Credits (${plan} plan): ${Math.round(credits)} of ${Math.round(limit)} used in the last 30 days (${Math.round(limit > 0 ? credits / limit * 100 : 100)}%), ${Math.round(extra)} extra credits left. Cloud sandboxes stop when none are left.`);
+      if (usage.text) console.log(`\n${usage.text}`);
+      else if (!views.length) console.log("History: room-cli usage --days, --threads, or THREAD_ID.");
+    }));
+}
+
 export function registerCloudCommands(program: Command, getUrl: () => string): void {
   const group = program.command("cloud").description("Connect this app to your Cloudroom account and VM");
   group.command("status").option("--json", "Print JSON").action(action(async (options: JsonOutputOptions) => {

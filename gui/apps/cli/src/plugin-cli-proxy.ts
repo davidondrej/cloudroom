@@ -173,6 +173,8 @@ interface FetchPluginCliContributionsOptions {
    * `room-cli status` while every `room-cli tasks` failed here (#1533).
    */
   lastWindowMs?: number;
+  /** One request of `timeoutMs`, no retries. */
+  once?: boolean;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -184,11 +186,9 @@ export async function fetchPluginCliContributions(
   options: FetchPluginCliContributionsOptions = {},
 ): Promise<PluginCliContributionsResult> {
   const sleep = options.sleep ?? defaultSleep;
-  const windows = [
-    timeoutMs,
-    timeoutMs * 2,
-    options.lastWindowMs ?? CLI_READ_TIMEOUT_MS,
-  ];
+  const windows = options.once
+    ? [timeoutMs]
+    : [timeoutMs, timeoutMs * 2, options.lastWindowMs ?? CLI_READ_TIMEOUT_MS];
   for (let attempt = 0; attempt < windows.length; attempt += 1) {
     const window = windows[attempt]!;
     try {
@@ -256,11 +256,24 @@ export async function fetchPluginCliContributions(
   return { outcome: "invalid", detail: MALFORMED_CONTRIBUTIONS };
 }
 
-export async function findDisabledPluginForCommand(
+// Builtin plugins whose command differs from their ID: a plugin that is still starting
+// contributes no command, so this is how `room-cli loop` finds Loops (#1930).
+const PLUGIN_ID_BY_COMMAND: Readonly<Record<string, string>> = {
+  automation: "automations",
+  loop: "automations",
+  secret: "secrets",
+  team: "organization",
+  instructions: "custom-instructions",
+};
+
+export async function findPluginStatusForCommand(
   baseUrl: string,
   name: string,
   timeoutMs: number = CONTRIBUTIONS_TIMEOUT_MS,
-): Promise<string | null> {
+): Promise<{ id: string; status: string; detail: string | null } | null> {
+  const id = Object.hasOwn(PLUGIN_ID_BY_COMMAND, name)
+    ? PLUGIN_ID_BY_COMMAND[name]
+    : name;
   try {
     const response = await cliFetch(`${baseUrl}/api/v1/plugins`, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -269,15 +282,24 @@ export async function findDisabledPluginForCommand(
     const parsed = (await response.json()) as { plugins?: unknown } | null;
     if (!Array.isArray(parsed?.plugins)) return null;
     const match = parsed.plugins.find(
-      (entry): entry is { id: string } =>
+      (entry) =>
         typeof entry === "object" &&
         entry !== null &&
-        (entry as { id?: unknown }).id === name &&
-        typeof (entry as { enabled?: unknown }).enabled === "boolean" &&
-        ((entry as { enabled?: unknown }).enabled === false ||
-          (entry as { status?: unknown }).status === "disabled"),
-    );
-    return match === undefined ? null : match.id;
+        (entry as { id?: unknown }).id === id &&
+        typeof (entry as { enabled?: unknown }).enabled === "boolean",
+    ) as { enabled: boolean; status?: unknown; statusDetail?: unknown } | undefined;
+    if (match === undefined) return null;
+    const status = match.enabled
+      ? typeof match.status === "string"
+        ? match.status
+        : "running"
+      : "disabled";
+    return {
+      id: id!,
+      status,
+      detail:
+        typeof match.statusDetail === "string" ? match.statusDetail : null,
+    };
   } catch {
     return null;
   }

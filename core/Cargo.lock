@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "cloudroom"
-version = "0.1.131"
+version = "0.1.132"
 dependencies = [
  "axum",
  "flate2",

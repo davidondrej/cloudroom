@@ -5,7 +5,7 @@ import {
   cloudFilesExist,
 } from "../../services/cloudroom/teleport-local.js";
 import { extractThreadContextWindowUsage } from "@cloudroom/thread-view";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import { clearTimelineOrderingContextCache } from "../../services/threads/timeline-context-order.js";
 import path from "node:path";
 import {
@@ -914,7 +914,7 @@ export function registerThreadDataRoutes(app: Hono, deps: AppDeps): void {
           headers: setUntrustedFileHeaders(
             new Headers({
               "content-type":
-                mimeTypes.lookup(query.path) || "application/octet-stream",
+                lookupMimeType(query.path) || "application/octet-stream",
             }),
           ),
         },

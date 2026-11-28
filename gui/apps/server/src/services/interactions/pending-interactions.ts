@@ -1,5 +1,7 @@
+import { and, eq } from "drizzle-orm";
 import {
   createPendingInteraction,
+  environments,
   getActivePendingInteractionForThread,
   getEnvironment,
   getPendingInteraction,
@@ -10,9 +12,11 @@ import {
   interruptPendingInteractionsForPlugin,
   listActivePluginPendingInteractions,
   listPendingInteractionsByThread,
+  pendingInteractions,
   setPendingInteractionInterrupted,
   setPendingInteractionResolved,
   setPendingInteractionResolving,
+  threads,
   type PendingInteractionRow,
   type DbNotifier,
   type DbTransaction,
@@ -28,12 +32,18 @@ import {
   type PendingInteraction,
   type PendingInteractionCreate,
   type PendingInteractionResolution,
+  type Thread,
   type ThreadChangeMetadata,
 } from "@cloudroom/domain";
 import type { HostDaemonCommand } from "@cloudroom/host-daemon-contract";
-import type { CommandResultReportForType } from "../../internal/command-result-side-effects.js";
+import {
+  emptyCommandResultSideEffects,
+  type CommandResultReportForType,
+} from "../../internal/command-result-side-effects.js";
+import { DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS } from "../../constants.js";
 import { ApiError } from "../../errors.js";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
+import type { ServerChangedMessage } from "../../ws/hub.js";
 import { productionErrorLogFields } from "../lib/error-log-fields.js";
 import {
   threadEnvironmentUnavailableDetails,
@@ -49,8 +59,15 @@ import {
 } from "./pending-interaction-serialization.js";
 import {
   LIVE_DAEMON_COMMAND_TIMEOUT_MS,
-  startLiveHostCommand,
+  buildLiveHostCommandFailureReport,
+  createLiveHostCommandExecution,
+  runLiveHostCommand,
+  runLiveHostCommandSettlement,
 } from "../hosts/live-command.js";
+import {
+  isHostOnlineRpcCancelledError,
+  isHostUnavailableApiError,
+} from "../hosts/online-rpc.js";
 import {
   pendingInteractionResolutionEquals,
   validatePendingInteractionResolution,
@@ -120,6 +137,13 @@ interface PluginInteractionWaiter {
   resolve: (result: PluginInteractionResult) => void;
   timer: ReturnType<typeof setTimeout>;
   removeAbortListener: () => void;
+}
+
+interface InFlightInteractionResolution {
+  cancelReason: string | null;
+  controller: AbortController;
+  sentOnWire: boolean;
+  threadId: string;
 }
 
 interface GetThreadInteractionArgs {
@@ -218,6 +242,39 @@ function getUnsupportedPendingInteractionReason(
   return null;
 }
 
+const MAX_INTERACTIVE_RESOLVE_DISCONNECT_RETRIES = 5;
+
+function hostDisconnectGraceDeadlineAt(
+  hub: Pick<AppDeps["hub"], "getDaemonDisconnectedAt">,
+  hostId: string,
+  fallbackStartAt?: number,
+): number | null {
+  const disconnectedAt = hub.getDaemonDisconnectedAt(hostId);
+  const startAt = disconnectedAt ?? fallbackStartAt ?? null;
+  if (startAt === null) {
+    return null;
+  }
+  return Math.min(
+    startAt + DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+    Date.now() + DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+  );
+}
+
+function interactionStopReasonForThread(
+  thread: Pick<Thread, "archivedAt" | "deletedAt" | "status"> | null,
+): string | null {
+  if (!thread || thread.deletedAt !== null) {
+    return "thread-deleted";
+  }
+  if (thread.archivedAt !== null) {
+    return "Thread archived while awaiting user interaction";
+  }
+  if (thread.status === "stopping") {
+    return "Thread stopped by user request";
+  }
+  return null;
+}
+
 function buildInteractiveResolveCommand(
   args: BuildInteractiveResolveCommandArgs,
 ): Extract<HostDaemonCommand, { type: "interactive.resolve" }> {
@@ -274,6 +331,10 @@ function notifyInteractionChanged({
 export class PendingInteractionLifecycle {
   private readonly deps: CreateLifecycleDeps;
   private readonly pluginWaiters = new Map<string, PluginInteractionWaiter>();
+  private readonly inFlightResolutions = new Map<
+    string,
+    InFlightInteractionResolution
+  >();
   private pluginDirectory: PendingInteractionPluginDirectory | null = null;
   private started = false;
   private interactionSettledListener: ThreadInteractionSettledListener | null =
@@ -305,6 +366,9 @@ export class PendingInteractionLifecycle {
       return;
     }
     this.started = true;
+    this.deps.hub.onChangedMessage((message) => {
+      this.handleChangedMessage(message);
+    });
     this.settleInterruptedRows(
       listActivePluginPendingInteractions(this.deps.db).flatMap((row) => {
         const updated = setPendingInteractionInterrupted(this.deps.db, {
@@ -314,6 +378,109 @@ export class PendingInteractionLifecycle {
         return updated ? [updated] : [];
       }),
     );
+  }
+
+  /**
+   * Resumes persisted provider resolutions whose in-memory delivery wait was
+   * lost to a server restart. Each keeps the deadline it had when answered;
+   * past it, the answer expires instead of reaching the daemon.
+   */
+  resumeResolvingInteractionsAfterRestart(): void {
+    const resolvingRows = this.deps.db
+      .select({
+        interaction: pendingInteractions,
+        threadId: threads.id,
+        threadProjectId: threads.projectId,
+        threadArchivedAt: threads.archivedAt,
+        threadDeletedAt: threads.deletedAt,
+        threadStatus: threads.status,
+        environmentId: environments.id,
+        environmentHostId: environments.hostId,
+      })
+      .from(pendingInteractions)
+      .leftJoin(threads, eq(pendingInteractions.threadId, threads.id))
+      .leftJoin(environments, eq(threads.environmentId, environments.id))
+      .where(
+        and(
+          eq(pendingInteractions.originKind, "provider"),
+          eq(pendingInteractions.status, "resolving"),
+        ),
+      )
+      .all();
+
+    for (const row of resolvingRows) {
+      if (this.inFlightResolutions.has(row.interaction.id)) {
+        continue;
+      }
+      let interaction: PendingInteraction;
+      try {
+        interaction = toPendingInteraction(row.interaction);
+      } catch {
+        const updated = setPendingInteractionInterrupted(this.deps.db, {
+          id: row.interaction.id,
+          statusReason:
+            "Server restarted before interaction resolution could be delivered",
+        });
+        if (updated && row.threadId !== null && row.threadProjectId !== null) {
+          this.deps.hub.notifyThread(
+            row.interaction.threadId,
+            ["interactions-changed"],
+            {
+              hasPendingInteraction: false,
+              projectId: row.threadProjectId,
+            },
+          );
+          this.notifyInteractionSettled(row.interaction.threadId);
+        }
+        continue;
+      }
+      if (
+        isPluginPendingInteraction(interaction) ||
+        interaction.resolution === null
+      ) {
+        this.interruptPendingInteractionById({
+          interactionId: row.interaction.id,
+          reason:
+            "Server restarted before interaction resolution could be delivered",
+        });
+        continue;
+      }
+      const thread =
+        row.threadId !== null && row.threadStatus !== null
+          ? {
+              archivedAt: row.threadArchivedAt,
+              deletedAt: row.threadDeletedAt,
+              status: row.threadStatus,
+            }
+          : null;
+      const stopReason = interactionStopReasonForThread(thread);
+      if (stopReason !== null) {
+        this.interruptPendingInteractionById({
+          interactionId: row.interaction.id,
+          reason: stopReason,
+        });
+        continue;
+      }
+      if (row.environmentId === null || row.environmentHostId === null) {
+        this.interruptPendingInteractionById({
+          interactionId: row.interaction.id,
+          reason: "Thread environment is unavailable after server restart",
+        });
+        continue;
+      }
+      const command = buildInteractiveResolveCommand({
+        environmentId: row.environmentId,
+        interaction,
+        resolution: interaction.resolution,
+      });
+      this.startInteractiveResolveDelivery({
+        command,
+        graceDeadlineAt:
+          row.interaction.updatedAt + DAEMON_ACTIVE_WORK_DISCONNECT_GRACE_MS,
+        hostId: row.environmentHostId,
+        interactionId: interaction.id,
+      });
+    }
   }
 
   setThreadInteractionSettledListener(
@@ -660,6 +827,13 @@ export class PendingInteractionLifecycle {
         (current.status === "resolving" || current.status === "resolved") &&
         pendingInteractionResolutionEquals(current.resolution, args.resolution)
       ) {
+        if (
+          current.status === "resolving" &&
+          !isPluginPendingInteraction(current) &&
+          !this.inFlightResolutions.has(current.id)
+        ) {
+          this.retryUnattachedResolvingInteraction(current, args.resolution);
+        }
         return current;
       }
 
@@ -703,6 +877,7 @@ export class PendingInteractionLifecycle {
       return null;
     }
 
+    this.cancelInFlightResolution(args.interactionId);
     const interaction = toPendingInteraction(updated);
     this.settleInteractionTerminalStateInTransaction(deps, interaction);
     return interaction;
@@ -712,6 +887,7 @@ export class PendingInteractionLifecycle {
     deps: PendingInteractionTransactionDeps,
     args: InterruptPendingInteractionArgs,
   ): PendingInteraction | null {
+    this.cancelInFlightResolution(args.interactionId);
     const updated = setPendingInteractionInterrupted(deps.db, {
       id: args.interactionId,
       statusReason: args.reason,
@@ -794,6 +970,9 @@ export class PendingInteractionLifecycle {
   private settleInterruptedRows(
     rows: PendingInteractionRow[],
   ): PendingInteraction[] {
+    for (const row of rows) {
+      this.cancelInFlightResolution(row.id);
+    }
     const interactions = rows.map(toPendingInteraction);
     for (const interaction of interactions) {
       this.settleInterruptedPluginWaiter(interaction);
@@ -808,6 +987,9 @@ export class PendingInteractionLifecycle {
     deps: PendingInteractionTransactionDeps,
     rows: PendingInteractionRow[],
   ): PendingInteraction[] {
+    for (const row of rows) {
+      this.cancelInFlightResolution(row.id);
+    }
     const interactions = rows.map(toPendingInteraction);
     for (const interaction of interactions) {
       this.settleInteractionTerminalStateInTransaction(deps, interaction);
@@ -822,6 +1004,14 @@ export class PendingInteractionLifecycle {
     args: QueueInteractionResolutionCommandArgs,
   ): PendingInteractionRow | null {
     const thread = getThread(this.deps.db, args.interaction.threadId);
+    const stopReason = interactionStopReasonForThread(thread);
+    if (stopReason !== null) {
+      this.interruptPendingInteractionById({
+        interactionId: args.interaction.id,
+        reason: stopReason,
+      });
+      return null;
+    }
     if (!thread?.environmentId) {
       throwThreadEnvironmentUnavailable(
         threadEnvironmentUnavailableDetails("never_attached", null),
@@ -849,23 +1039,444 @@ export class PendingInteractionLifecycle {
     );
 
     if (updated) {
-      startLiveHostCommand(
-        { ...this.deps, pendingInteractions: this },
-        {
-          command,
-          hostId: environment.hostId,
-          timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
-          onError: ({ error }) => {
-            this.deps.logger.warn(
-              { err: error, interactionId: args.interaction.id },
-              "Live interactive resolve command failed",
-            );
-          },
-        },
-      );
+      this.startInteractiveResolveDelivery({
+        command,
+        hostId: environment.hostId,
+        initialThread: thread,
+        interactionId: args.interaction.id,
+      });
     }
 
     return updated;
+  }
+
+  private retryUnattachedResolvingInteraction(
+    interaction: PendingInteraction,
+    resolution: PendingInteractionResolution,
+  ): void {
+    const thread = getThread(this.deps.db, interaction.threadId);
+    const stopReason = interactionStopReasonForThread(thread);
+    if (stopReason !== null) {
+      const interrupted = this.interruptPendingInteractionById({
+        interactionId: interaction.id,
+        reason: stopReason,
+      });
+      throw buildResolveConflictError(interrupted ?? interaction);
+    }
+    if (!thread?.environmentId) {
+      throwThreadEnvironmentUnavailable(
+        threadEnvironmentUnavailableDetails("never_attached", null),
+      );
+    }
+    const environment = getEnvironment(this.deps.db, thread.environmentId);
+    if (!environment) {
+      throwThreadEnvironmentUnavailable(
+        threadEnvironmentUnavailableDetails("destroyed", null),
+      );
+    }
+    this.startInteractiveResolveDelivery({
+      command: buildInteractiveResolveCommand({
+        environmentId: environment.id,
+        interaction,
+        resolution,
+      }),
+      hostId: environment.hostId,
+      initialThread: thread,
+      interactionId: interaction.id,
+    });
+  }
+
+  private startInteractiveResolveDelivery(args: {
+    command: InteractiveResolveCommand;
+    graceDeadlineAt?: number;
+    hostId: string;
+    initialThread?: ReturnType<typeof getThread>;
+    interactionId: string;
+  }): void {
+    if (this.inFlightResolutions.has(args.interactionId)) {
+      return;
+    }
+    const inFlight: InFlightInteractionResolution = {
+      cancelReason: null,
+      controller: new AbortController(),
+      sentOnWire: false,
+      threadId: args.command.threadId,
+    };
+    this.inFlightResolutions.set(args.interactionId, inFlight);
+    void this.deliverInteractiveResolveCommand({
+      ...args,
+      inFlight,
+    }).catch(() => {});
+  }
+
+  cancelInFlightResolutionsForThread(args: {
+    reason: string;
+    threadId: string;
+  }): void {
+    const interactionIds = this.inFlightResolutionIdsForThread(args.threadId);
+    if (interactionIds.length === 0) {
+      return;
+    }
+    for (const interactionId of interactionIds) {
+      const inFlight = this.inFlightResolutions.get(interactionId);
+      if (!inFlight) {
+        continue;
+      }
+      inFlight.cancelReason = args.reason;
+      if (!inFlight.controller.signal.aborted) {
+        inFlight.controller.abort();
+      }
+      // Once interactive.resolve is already on the wire, let the daemon's reply
+      // settle the interaction (matching main) while aborting any future retry.
+      if (!inFlight.sentOnWire) {
+        this.interruptPendingInteractionById({
+          interactionId,
+          reason: args.reason,
+        });
+      }
+    }
+  }
+
+  private cancelInFlightResolution(interactionId: string): void {
+    const inFlight = this.inFlightResolutions.get(interactionId);
+    if (inFlight && !inFlight.controller.signal.aborted) {
+      inFlight.controller.abort();
+    }
+  }
+
+  private deleteInFlightResolution(
+    interactionId: string,
+    controller: AbortController,
+  ): void {
+    if (
+      this.inFlightResolutions.get(interactionId)?.controller === controller
+    ) {
+      this.inFlightResolutions.delete(interactionId);
+    }
+  }
+
+  private inFlightResolutionIdsForThread(threadId: string): string[] {
+    if (this.inFlightResolutions.size === 0) {
+      return [];
+    }
+    const interactionIds: string[] = [];
+    for (const [interactionId, entry] of this.inFlightResolutions) {
+      if (entry.threadId === threadId && !entry.controller.signal.aborted) {
+        interactionIds.push(interactionId);
+      }
+    }
+    return interactionIds;
+  }
+
+  private hasInFlightResolutionForThread(threadId: string): boolean {
+    for (const entry of this.inFlightResolutions.values()) {
+      if (entry.threadId === threadId && !entry.controller.signal.aborted) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private handleChangedMessage(message: ServerChangedMessage): void {
+    if (
+      message.entity !== "thread" ||
+      !this.hasInFlightResolutionForThread(message.id)
+    ) {
+      return;
+    }
+    if (
+      message.changes.includes("archived-changed") &&
+      message.metadata?.archived === true
+    ) {
+      this.cancelInFlightResolutionsForThread({
+        threadId: message.id,
+        reason: "Thread archived while awaiting user interaction",
+      });
+      return;
+    }
+    if (message.changes.includes("thread-deleted")) {
+      this.cancelInFlightResolutionsForThread({
+        threadId: message.id,
+        reason: "thread-deleted",
+      });
+      return;
+    }
+    if (
+      message.changes.includes("status-changed") &&
+      message.metadata?.statusChange?.status === "stopping"
+    ) {
+      this.cancelInFlightResolutionsForThread({
+        threadId: message.id,
+        reason: "Thread stopped by user request",
+      });
+    }
+  }
+
+  private interruptPendingInteractionById(args: {
+    interactionId: string;
+    reason: string;
+  }): PendingInteraction | null {
+    this.cancelInFlightResolution(args.interactionId);
+    const updated = setPendingInteractionInterrupted(this.deps.db, {
+      id: args.interactionId,
+      statusReason: args.reason,
+    });
+    if (!updated) {
+      return null;
+    }
+    const interaction = toPendingInteraction(updated);
+    this.settleInterruptedPluginWaiter(interaction);
+    this.settleInteractionTerminalState(interaction);
+    return interaction;
+  }
+
+  private async settleInteractiveResolveFailureReport(args: {
+    command: InteractiveResolveCommand;
+    commandDeps: CreateLifecycleDeps & {
+      pendingInteractions: PendingInteractionLifecycle;
+    };
+    error: Error;
+    execution: ReturnType<typeof createLiveHostCommandExecution>;
+  }): Promise<void> {
+    const failureReport = buildLiveHostCommandFailureReport({
+      command: args.command,
+      completedAt: Date.now(),
+      error: args.error,
+      execution: args.execution,
+    });
+    await runLiveHostCommandSettlement(args.commandDeps, (settlementDeps) => {
+      this.settleInteractiveResolveCommandResultInTransaction({
+        command: args.command,
+        deps: settlementDeps,
+        report: failureReport,
+      });
+      return emptyCommandResultSideEffects();
+    });
+  }
+
+  private async deliverInteractiveResolveCommand(args: {
+    command: InteractiveResolveCommand;
+    graceDeadlineAt?: number;
+    hostId: string;
+    inFlight: InFlightInteractionResolution;
+    initialThread?: ReturnType<typeof getThread>;
+    interactionId: string;
+  }): Promise<void> {
+    const commandDeps = { ...this.deps, pendingInteractions: this };
+    const execution = createLiveHostCommandExecution(args.hostId);
+    const { signal } = args.inFlight.controller;
+    let graceDeadlineAt = args.graceDeadlineAt ?? null;
+    let cachedThread = args.initialThread;
+    let disconnectRetries = 0;
+    let needsRecheck = false;
+
+    try {
+      for (;;) {
+        if (signal.aborted) {
+          return;
+        }
+        if (!this.deps.hub.hasDaemonForHost(args.hostId)) {
+          if (graceDeadlineAt === null) {
+            graceDeadlineAt = hostDisconnectGraceDeadlineAt(
+              this.deps.hub,
+              args.hostId,
+            );
+          }
+          const waitMs =
+            graceDeadlineAt === null
+              ? 0
+              : Math.max(0, graceDeadlineAt - Date.now());
+          if (waitMs > 0) {
+            cachedThread = undefined;
+            needsRecheck = true;
+            await this.deps.hub.waitForDaemonForHost(
+              args.hostId,
+              waitMs,
+              signal,
+            );
+            if (signal.aborted) {
+              return;
+            }
+          }
+        }
+
+        if (needsRecheck) {
+          const current = getPendingInteraction(
+            this.deps.db,
+            args.interactionId,
+          );
+          if (current?.status !== "resolving") {
+            return;
+          }
+          const thread = getThread(this.deps.db, args.command.threadId);
+          const stopReason = interactionStopReasonForThread(thread);
+          if (stopReason !== null) {
+            this.interruptPendingInteractionById({
+              interactionId: args.interactionId,
+              reason: stopReason,
+            });
+            return;
+          }
+          cachedThread = thread;
+          needsRecheck = false;
+        }
+
+        if (signal.aborted) {
+          return;
+        }
+
+        const remainingGraceMs =
+          graceDeadlineAt === null ? null : graceDeadlineAt - Date.now();
+        if (remainingGraceMs !== null && remainingGraceMs <= 0) {
+          await this.settleInteractiveResolveFailureReport({
+            command: args.command,
+            commandDeps,
+            error: new ApiError(
+              502,
+              "host_unavailable",
+              "Host is not connected",
+              false,
+            ),
+            execution,
+          });
+          return;
+        }
+
+        const sessionIdBeforeSend = this.deps.hub.getDaemonSessionIdForHost(
+          args.hostId,
+        );
+        const preserveOnDisconnect =
+          sessionIdBeforeSend !== null &&
+          disconnectRetries < MAX_INTERACTIVE_RESOLVE_DISCONNECT_RETRIES;
+
+        let graceDeadlineExpired = false;
+        let attemptSignal: AbortSignal = signal;
+        let graceTimer: ReturnType<typeof setTimeout> | null = null;
+        let removeParentAbortListener: (() => void) | null = null;
+        const clearGraceTimer = () => {
+          if (graceTimer !== null) {
+            clearTimeout(graceTimer);
+            graceTimer = null;
+          }
+        };
+        if (remainingGraceMs !== null) {
+          const attemptController = new AbortController();
+          const onParentAbort = () => attemptController.abort();
+          signal.addEventListener("abort", onParentAbort, { once: true });
+          removeParentAbortListener = () =>
+            signal.removeEventListener("abort", onParentAbort);
+          graceTimer = setTimeout(() => {
+            graceTimer = null;
+            graceDeadlineExpired = true;
+            attemptController.abort();
+          }, remainingGraceMs);
+          attemptSignal = attemptController.signal;
+        }
+        const threadForCommand = cachedThread;
+        cachedThread = undefined;
+        try {
+          await runLiveHostCommand(commandDeps, {
+            command: args.command,
+            execution,
+            hostId: args.hostId,
+            onSent: () => {
+              args.inFlight.sentOnWire = true;
+              clearGraceTimer();
+            },
+            preserveOnHostUnavailable: preserveOnDisconnect,
+            signal: attemptSignal,
+            ...(threadForCommand !== undefined
+              ? { thread: threadForCommand }
+              : {}),
+            timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
+          });
+          return;
+        } catch (error) {
+          const normalized =
+            error instanceof Error ? error : new Error(String(error));
+          if (isHostOnlineRpcCancelledError(normalized)) {
+            if (graceDeadlineExpired && !signal.aborted) {
+              await this.settleInteractiveResolveFailureReport({
+                command: args.command,
+                commandDeps,
+                error: new ApiError(
+                  502,
+                  "host_unavailable",
+                  "Host is not connected",
+                  false,
+                ),
+                execution,
+              });
+            }
+            return;
+          }
+          if (preserveOnDisconnect && isHostUnavailableApiError(normalized)) {
+            if (signal.aborted) {
+              if (args.inFlight.cancelReason !== null) {
+                this.interruptPendingInteractionById({
+                  interactionId: args.interactionId,
+                  reason: args.inFlight.cancelReason,
+                });
+              } else {
+                await this.settleInteractiveResolveFailureReport({
+                  command: args.command,
+                  commandDeps,
+                  error: normalized,
+                  execution,
+                });
+              }
+              return;
+            }
+            const currentSessionId = this.deps.hub.getDaemonSessionIdForHost(
+              args.hostId,
+            );
+            const sessionDisconnectedOrReplaced =
+              currentSessionId === null ||
+              currentSessionId !== sessionIdBeforeSend;
+            if (sessionDisconnectedOrReplaced) {
+              if (graceDeadlineAt === null) {
+                graceDeadlineAt = hostDisconnectGraceDeadlineAt(
+                  this.deps.hub,
+                  args.hostId,
+                  Date.now(),
+                );
+              }
+              if (
+                graceDeadlineAt !== null &&
+                graceDeadlineAt > Date.now() &&
+                disconnectRetries < MAX_INTERACTIVE_RESOLVE_DISCONNECT_RETRIES
+              ) {
+                disconnectRetries += 1;
+                args.inFlight.sentOnWire = false;
+                needsRecheck = true;
+                continue;
+              }
+            }
+            await this.settleInteractiveResolveFailureReport({
+              command: args.command,
+              commandDeps,
+              error: normalized,
+              execution,
+            });
+          }
+          if (!signal.aborted) {
+            this.deps.logger.warn(
+              { err: normalized, interactionId: args.interactionId },
+              "Live interactive resolve command failed",
+            );
+          }
+          return;
+        } finally {
+          clearGraceTimer();
+          removeParentAbortListener?.();
+        }
+      }
+    } finally {
+      this.deleteInFlightResolution(
+        args.interactionId,
+        args.inFlight.controller,
+      );
+    }
   }
 
   private requireInteraction(interactionId: string): PendingInteraction {

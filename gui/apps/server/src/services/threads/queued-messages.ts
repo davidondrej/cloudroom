@@ -18,6 +18,7 @@ import {
   threadHasProviderSession,
   events,
   listStoredTurnInputAcceptedRowsByClientRequestIds,
+  listStoredTurnRejectedRowsByClientRequestIds,
   type ClaimedQueuedThreadMessageRow,
   type DbConnection,
   type DbQueryConnection,
@@ -25,7 +26,7 @@ import {
   type QueuedThreadMessageEligibility,
   type QueuedThreadMessageRow,
 } from "@cloudroom/db";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, sql } from "drizzle-orm";
 import {
   queuedMessageSystemNoticeSchema,
   type QueuedMessageSystemNotice,
@@ -45,6 +46,7 @@ import type {
   AppDeps,
   LoggedPendingInteractionWorkSessionDeps,
 } from "../../types.js";
+import { COMMAND_TIMEOUT_MS } from "../../constants.js";
 import { ApiError } from "../../errors.js";
 import {
   isCommandTimeoutError,
@@ -710,9 +712,11 @@ export async function sendQueuedMessageNow(
       threadId: args.threadId,
     });
   } catch (error) {
-    // The drain may have delivered it first; the sender must not resend (#1954).
-    if (wasQueuedMessageDrainAccepted(deps.db, args)) {
-      return { delivery: "sent" };
+    // The drain may have dispatched it first; the sender must not resend (#1954).
+    const drained = drainedQueuedMessageStatus(deps.db, args);
+    if (drained === "sent") return { delivery: "sent" };
+    if (drained === "awaiting" && error instanceof ApiError && error.status === 404) {
+      throw queuedMessageAwaitingAcknowledgementError();
     }
     throw error;
   }
@@ -729,17 +733,24 @@ export async function sendQueuedMessageNow(
 }
 
 /**
- * The drain sent this row on this thread, and the provider accepted it.
- * Forks copy acceptances without a provider thread, so those never count.
+ * What became of a row the drain consumed on this thread: "sent" once the
+ * provider accepted it, "awaiting" while its request is surely still pending
+ * (#2816), else null as before. A start's failure is not tied to its request,
+ * and a timeout settles none, so pending ends at any later thread error or
+ * Stop, or after the command timeout. Forks copy only accepted requests, without a
+ * provider thread, so a copy is neither.
  */
-export function wasQueuedMessageDrainAccepted(
+export function drainedQueuedMessageStatus(
   db: DbConnection,
   args: { queuedMessageId: string; threadId: string },
-): boolean {
-  if (getQueuedThreadMessage(db, args.queuedMessageId) !== null) return false;
-  const requestIds = db
+): "sent" | "awaiting" | null {
+  if (getQueuedThreadMessage(db, args.queuedMessageId) !== null) return null;
+  const requests = db
     .select({
+      createdAt: events.createdAt,
       id: sql<ClientTurnRequestId>`json_extract(${events.data}, '$.requestId')`,
+      sequence: events.sequence,
+      target: sql<string | null>`json_extract(${events.data}, '$.target.kind')`,
     })
     .from(events)
     .where(
@@ -749,13 +760,45 @@ export function wasQueuedMessageDrainAccepted(
         sql`json_extract(${events.data}, '$.queuedMessageId') = ${args.queuedMessageId}`,
       ),
     )
-    .all()
-    .map((row) => row.id);
-  return listStoredTurnInputAcceptedRowsByClientRequestIds(db, {
+    .all();
+  const query = (clientRequestIds: ClientTurnRequestId[]) => ({
     threadId: args.threadId,
-    clientRequestIds: requestIds,
+    clientRequestIds,
     afterSequence: 0,
-  }).some((row) => row.providerThreadId !== null);
+  });
+  const accepted = (ids: ClientTurnRequestId[]) =>
+    listStoredTurnInputAcceptedRowsByClientRequestIds(db, query(ids));
+  if (accepted(requests.map((row) => row.id)).some((row) => row.providerThreadId !== null)) {
+    return "sent";
+  }
+  const cutoff = Date.now() - COMMAND_TIMEOUT_MS;
+  const pending = requests.some(
+    (row) =>
+      row.target !== "thread-start" &&
+      row.createdAt > cutoff &&
+      accepted([row.id]).length === 0 &&
+      listStoredTurnRejectedRowsByClientRequestIds(db, query([row.id])).length === 0 &&
+      db
+        .select({ id: events.id })
+        .from(events)
+        .where(
+          and(
+            eq(events.threadId, args.threadId),
+            inArray(events.type, ["system/error", "system/thread/interrupted"]),
+            gt(events.sequence, row.sequence),
+          ),
+        )
+        .get() === undefined,
+  );
+  return pending ? "awaiting" : null;
+}
+
+export function queuedMessageAwaitingAcknowledgementError(): ApiError {
+  return new ApiError(
+    409,
+    "queued_message_awaiting_acknowledgement",
+    "Queued message was sent and is waiting for the agent to confirm it. Don't send it again.",
+  );
 }
 
 export async function sendNextQueuedMessageIfPresent(

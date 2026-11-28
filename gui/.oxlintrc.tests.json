@@ -20,7 +20,7 @@
               "apps/app/src/views/thread-detail/PaneMaximizeButton.test.tsx": 2,
               "apps/app/src/views/thread-detail/SplitThreadArea.test.tsx": 2,
               "apps/connect/src/timeout.test.ts": 1,
-              "apps/connect/src/worker.test.ts": 5,
+              "apps/connect/src/worker.test.ts": 7,
               "apps/desktop/test/app-process.test.ts": 1,
               "apps/desktop/test/desktop-auto-update.test.ts": 2,
               "apps/desktop/test/desktop-browser-broker-snapshots.test.ts": 1,

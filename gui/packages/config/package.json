@@ -152,6 +152,11 @@
       "source": "./src/spawn-request.ts",
       "types": "./src/spawn-request.ts",
       "default": "./src/spawn-request.ts"
+    },
+    "./mime-types": {
+      "source": "./src/mime-types.ts",
+      "types": "./src/mime-types.ts",
+      "default": "./src/mime-types.ts"
     }
   },
   "scripts": {

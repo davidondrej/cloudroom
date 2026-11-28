@@ -9,12 +9,57 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { expect, it } from "vitest";
+import { createBridgeRecorder } from "../src/bridge-kit/bridge-recorder.js";
 
 const REDACT_SCRIPT = new URL(
   "../../../scripts/provider-recordings/redact.mjs",
   import.meta.url,
 );
+
+it("masks the ACP tool token in new recordings and exports of older recordings", () => {
+  const root = mkdtempSync(join(tmpdir(), "bb-recording-redact-"));
+  const raw = join(root, "raw");
+  const output = join(root, "output");
+  const recorder = createBridgeRecorder({ dir: raw });
+  const marker = "fixture-marker";
+  const env = [
+    { name: "BB_ACP_DYNAMIC_TOOL_TOKEN", value: marker },
+    { name: "LANG", value: "en_US" },
+    { name: "EMPTY_TOKEN", value: "" },
+  ];
+  const line = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "session/new",
+    params: { mcpServers: [{ name: "bb-bridge", env }] },
+  });
+  try {
+    const stdin = new PassThrough();
+    recorder.recordChildIo({ stdin }, { threadId: "thr_acp" });
+    stdin.write(line + "\n");
+    expect(stdin.read().toString()).toBe(line + "\n");
+
+    // Older recordings reach the export command without the recorder's current masking.
+    writeFileSync(join(raw, "legacy.ndjson"), JSON.stringify({ line }) + "\n");
+    execFileSync(process.execPath, [
+      fileURLToPath(REDACT_SCRIPT), raw, output, "--home", "/home/tester",
+    ]);
+
+    const masked = line.replace(marker, "REDACTED");
+    for (const file of [
+      join(raw, "thr_acp", "bridge→provider.ndjson"),
+      join(output, "legacy.ndjson"),
+    ]) {
+      const saved = JSON.parse(readFileSync(file, "utf8")) as { line: string };
+      expect.soft(saved.line, file).toBe(masked);
+    }
+  } finally {
+    recorder.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("redacts every documented GitHub token prefix", () => {
   const root = mkdtempSync(join(tmpdir(), "bb-recording-redact-"));

@@ -1551,7 +1551,14 @@ function markThreadStopRequested(
   notificationBuffer.flushInto(deps.hub);
 
   const currentThread = getThread(deps.db, args.threadId);
-  return currentThread?.status === "stopping";
+  if (currentThread?.status !== "stopping") {
+    return false;
+  }
+  deps.pendingInteractions.cancelInFlightResolutionsForThread({
+    reason: pendingInteractionStopReason(args.interruptionReason),
+    threadId: args.threadId,
+  });
+  return true;
 }
 
 function dispatchThreadStopCommand(
@@ -1669,6 +1676,12 @@ function requestPreStartThreadStop(
     { behavior: "immediate" },
   );
   notificationBuffer.flushInto(deps.hub);
+  if (!result.finalized) {
+    deps.pendingInteractions.cancelInFlightResolutionsForThread({
+      reason: pendingInteractionStopReason("manual-stop"),
+      threadId: thread.id,
+    });
+  }
   if (result.abandonedProvider) {
     cancelAbandonedProviderCreations(deps, thread.id);
   }

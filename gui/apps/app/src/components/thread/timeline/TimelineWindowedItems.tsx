@@ -1,9 +1,14 @@
+// Explicit opt-out for TanStack Virtual's mutable Virtualizer instance.
+"use no memo";
+
 import {
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type SyntheticEvent,
 } from "react";
 import { useComposedRefs } from "@/hooks/useComposedRefs";
@@ -11,7 +16,6 @@ import {
   defaultRangeExtractor,
   useVirtualizer,
   type Range,
-  type Virtualizer,
 } from "@tanstack/react-virtual";
 import {
   DEFAULT_WINDOWING_MIN_ITEM_COUNT,
@@ -21,17 +25,15 @@ import {
 } from "./TimelineWindowedItemsLoader.js";
 
 const TIMELINE_WINDOW_OVERSCAN_ITEMS = 8;
-const TIMELINE_WINDOW_IDLE_DELAY_MS = 300;
 const TIMELINE_WINDOW_MAX_INTERACTION_PINS = 24;
 
 const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 const GET_NO_SCROLL_ELEMENT = () => null;
-
-interface ScrollSample {
-  at: number;
-  fast: boolean;
-  offset: number;
-}
+const WINDOWED_ITEM_STYLE: CSSProperties = {
+  position: "absolute",
+  left: 0,
+  width: "100%",
+};
 
 function measureBorderBox(
   element: HTMLElement,
@@ -72,11 +74,7 @@ export function TimelineWindowedItems({
   const [scrollMargin, setScrollMargin] = useState(0);
   const [interactionPins, setInteractionPins] = useState<readonly string[]>([]);
   const containerElementRef = useRef<HTMLDivElement>(null);
-  const scrollSampleRef = useRef<ScrollSample>({
-    at: 0,
-    fast: false,
-    offset: 0,
-  });
+  const shownRef = useRef(false);
   const windowingEnabled = configured && scrollRootUsable;
   const resolvedGetScrollElement = getScrollElement ?? GET_NO_SCROLL_ELEMENT;
 
@@ -118,11 +116,7 @@ export function TimelineWindowedItems({
       const index = Number(element.dataset.index);
       const height = measureBorderBox(element, entry);
       const key = Number.isInteger(index) ? itemKeys[index] : undefined;
-      if (
-        key !== undefined &&
-        height > 0 &&
-        element.dataset.timelineWindowedRealized === "true"
-      ) {
+      if (key !== undefined && height > 0) {
         recordTimelineMeasurement(measurements, key, height);
       }
       return height > 0 ? height : estimateSize(index);
@@ -136,31 +130,6 @@ export function TimelineWindowedItems({
       return [...indexes].sort((left, right) => left - right);
     },
     [forcedIndexes],
-  );
-  const handleVirtualizerChange = useCallback(
-    (
-      instance: Virtualizer<HTMLElement, HTMLDivElement>,
-      scrolling: boolean,
-    ) => {
-      const sample = scrollSampleRef.current;
-      if (!scrolling) {
-        sample.fast = false;
-        sample.at = 0;
-        sample.offset = instance.scrollOffset ?? sample.offset;
-        return;
-      }
-      const now = performance.now();
-      const offset = instance.scrollOffset ?? 0;
-      const elapsed = sample.at === 0 ? 0 : now - sample.at;
-      const distance = Math.abs(offset - sample.offset);
-      const viewportSize = instance.scrollRect?.height ?? 0;
-      sample.fast =
-        (sample.at === 0 || elapsed <= 100) &&
-        distance >= Math.max(200, viewportSize * 0.5);
-      sample.at = now;
-      sample.offset = offset;
-    },
-    [],
   );
   const initialOffset = useCallback(
     () => resolvedGetScrollElement()?.scrollTop ?? 0,
@@ -177,9 +146,7 @@ export function TimelineWindowedItems({
     getItemKey,
     getScrollElement: resolvedGetScrollElement,
     initialOffset,
-    isScrollingResetDelay: TIMELINE_WINDOW_IDLE_DELAY_MS,
     measureElement,
-    onChange: handleVirtualizerChange,
     overscan: TIMELINE_WINDOW_OVERSCAN_ITEMS,
     rangeExtractor,
     scrollMargin,
@@ -205,36 +172,69 @@ export function TimelineWindowedItems({
     );
   }, [configured, resolvedGetScrollElement]);
 
+  // Track active visibility in a layout effect so cleanup runs synchronously
+  // during React <Activity mode="hidden"> before paint and before any
+  // ResizeObserver height-0 callback can un-window a hidden thread.
   useLayoutEffect(() => {
-    if (!configured) return;
-    const updateRootUsability = () => {
-      const scrollElement = resolvedGetScrollElement();
-      if (scrollElement !== null) {
-        setScrollRootUsable(scrollElement.clientHeight > 0);
-      }
+    shownRef.current = true;
+    return () => {
+      shownRef.current = false;
     };
-    const scrollElement = resolvedGetScrollElement();
-    if (scrollElement === null) {
-      const frame = requestAnimationFrame(() => {
-        updateRootUsability();
+  }, []);
+
+  // Passive effects run after ancestor refs (like BottomAnchoredScrollBody's
+  // scrollAreaRef) attach and restore scrollTop — including after React
+  // <Activity> transitions hidden -> visible, where child useLayoutEffect runs
+  // before the parent ref re-attaches and TanStack Virtual's _willUpdate() sees
+  // null. Re-sync scrollOffset and re-attach the virtualizer here so scroll
+  // listeners never stay detached.
+  useEffect(() => {
+    if (!configured) return;
+    let frame: number | null = null;
+    let observer: ResizeObserver | null = null;
+
+    const attach = (): boolean => {
+      if (!shownRef.current) return false;
+      const scrollElement = resolvedGetScrollElement();
+      if (scrollElement === null) return false;
+
+      const sync = () => {
+        if (!shownRef.current) return;
+        const usable = scrollElement.clientHeight > 0;
+        setScrollRootUsable(usable);
         updateScrollGeometry();
+        if (virtualizer.scrollElement !== scrollElement) {
+          virtualizer.scrollOffset = scrollElement.scrollTop;
+          if (usable && virtualizer.options.enabled) {
+            virtualizer._willUpdate();
+          }
+        }
+      };
+
+      sync();
+      if (typeof ResizeObserver !== "undefined") {
+        observer = new ResizeObserver(sync);
+        observer.observe(scrollElement);
+        const containerParent = containerElementRef.current?.parentElement;
+        if (containerParent !== null && containerParent !== undefined) {
+          observer.observe(containerParent);
+        }
+      }
+      return true;
+    };
+
+    if (!attach()) {
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        attach();
       });
-      return () => cancelAnimationFrame(frame);
     }
-    updateRootUsability();
-    updateScrollGeometry();
-    if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      updateRootUsability();
-      updateScrollGeometry();
-    });
-    observer.observe(scrollElement);
-    const containerParent = containerElementRef.current?.parentElement;
-    if (containerParent !== null && containerParent !== undefined) {
-      observer.observe(containerParent);
-    }
-    return () => observer.disconnect();
-  }, [configured, resolvedGetScrollElement, updateScrollGeometry]);
+
+    return () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      observer?.disconnect();
+    };
+  }, [configured, resolvedGetScrollElement, updateScrollGeometry, virtualizer]);
 
   useLayoutEffect(updateScrollGeometry);
 
@@ -256,9 +256,8 @@ export function TimelineWindowedItems({
   if (!windowingEnabled) {
     return (
       <>
-        {itemKeys.map((key, index) =>
+        {itemKeys.map((_, index) =>
           renderItem(index, {
-            isRealized: true,
             itemIndex: undefined,
             itemRef: NOOP_ITEM_REF,
             itemStyle: undefined,
@@ -269,7 +268,6 @@ export function TimelineWindowedItems({
     );
   }
 
-  const fastScrolling = scrollSampleRef.current.fast;
   const virtualItemsByIndex = new Map(
     virtualizer.getVirtualItems().map((item) => [item.index, item]),
   );
@@ -288,27 +286,14 @@ export function TimelineWindowedItems({
       onClickCapture={retainInteractedItem}
       onFocusCapture={retainInteractedItem}
     >
-      {virtualItems.map((item) => {
-        const isRealized = !fastScrolling || forcedIndexes.has(item.index);
-        return renderItem(item.index, {
-          isRealized,
+      {virtualItems.map((item) =>
+        renderItem(item.index, {
           itemIndex: item.index,
           itemRef: virtualizer.measureElement,
-          itemStyle: {
-            position: "absolute",
-            left: 0,
-            width: "100%",
-            ...(isRealized
-              ? undefined
-              : {
-                  height: item.size,
-                  minHeight: item.size,
-                  overflow: "hidden",
-                }),
-          },
+          itemStyle: WINDOWED_ITEM_STYLE,
           windowingEnabled: true,
-        });
-      })}
+        }),
+      )}
     </div>
   );
 }

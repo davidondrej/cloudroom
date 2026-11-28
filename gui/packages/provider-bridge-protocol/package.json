@@ -48,13 +48,11 @@
   "dependencies": {
     "@cloudroom/domain": "workspace:*",
     "@cloudroom/process-utils": "workspace:*",
-    "semver": "^7.7.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^22.0.0",
-    "@types/semver": "^7.7.1",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   }
 }

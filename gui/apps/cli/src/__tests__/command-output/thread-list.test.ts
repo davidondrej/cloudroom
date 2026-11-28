@@ -147,14 +147,17 @@ describe("room-cli thread list command output", () => {
     ]);
     stubServerApi({
       "v1.threads.$get": list,
-      "v1.projects.$get": async () => [],
+      // A sandboxed caller can read threads but not project names (#1688).
+      "v1.projects.$get": async () => {
+        throw new Error("HTTP 401: Caller proof required");
+      },
     });
 
     await runCommand(["thread", "list"], register);
 
-    expect(collectLogPayloads(vi.mocked(console.log)).join("\n")).toContain(
-      "idle (pinned)",
-    );
+    const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
+    expect(output).toContain("idle (pinned)");
+    expect(output).toContain("proj-1");
   });
 
   it("room-cli thread list hides the personal project label", async () => {

@@ -1,9 +1,11 @@
 import { Command } from "commander";
 import { threadStatusValues } from "@cloudroom/domain";
+import { CALLER_PROOF_TIMED_OUT_MESSAGE } from "@cloudroom/config/caller-proof";
+import { BbRequestTimeoutError } from "@cloudroom/sdk";
 import { action } from "../../action.js";
 import { CLI_READ_TIMEOUT_MS, createCliRoomSdk } from "../../client.js";
 import { resolveExplicitIdFlag } from "../../context-env.js";
-import { joinValues, outputJson } from "../helpers.js";
+import { getErrorMessage, joinValues, outputJson } from "../helpers.js";
 import { parseStatus } from "./count.js";
 import { pickFields, printJsonLines, printThreadTable } from "./list-output.js";
 
@@ -149,7 +151,20 @@ export function registerListCommand(
           console.log("No threads found");
           return;
         }
-        const projects = await sdk.projects.list({ includePersonal: false });
+        // Project names are optional and need caller proof (thread reads don't),
+        // so a denied lookup keeps the rows and shows project IDs instead.
+        // A timeout, or a proof that timed out on a busy app, still fails.
+        const projects = await sdk.projects
+          .list({ includePersonal: false })
+          .catch((error: unknown) => {
+            if (
+              error instanceof BbRequestTimeoutError ||
+              getErrorMessage(error).includes(CALLER_PROOF_TIMED_OUT_MESSAGE)
+            ) {
+              throw error;
+            }
+            return [];
+          });
         const projectNames = new Map(
           projects.map((project) => [project.id, project.name]),
         );

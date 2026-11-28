@@ -102,13 +102,13 @@ function isCommand(input: readonly PromptInput[]): boolean {
 export function withDraftEdits(
   threadId: string,
   input: PromptInput[],
-): { input: PromptInput[]; commit: () => void } {
-  const unchanged = { input, commit: () => {} };
+): { input: PromptInput[]; commit: () => void; rollback: () => void } {
+  const unchanged = { input, commit: () => {}, rollback: () => {} };
   if (input.length === 0 || isCommand(input)) return unchanged;
   const pending = threadDraftKeys(threadId).flatMap((key) => {
     const record = readDraft(key);
     return record !== null && hasUnsentEdits(record)
-      ? [{ key, text: record.text }]
+      ? [{ key, text: record.text, previousSent: record.sent }]
       : [];
   });
   if (pending.length === 0) return unchanged;
@@ -122,6 +122,13 @@ export function withDraftEdits(
         const current = readDraft(draft.key);
         if (current !== null)
           writeDraft(draft.key, { ...current, sent: draft.text });
+      }
+    },
+    rollback: () => {
+      for (const draft of pending) {
+        const current = readDraft(draft.key);
+        if (current !== null && current.sent === draft.text)
+          writeDraft(draft.key, { ...current, sent: draft.previousSent });
       }
     },
   };

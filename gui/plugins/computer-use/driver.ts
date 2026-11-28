@@ -56,3 +56,4 @@ export const LIME_CURSOR_SUFFIX = "-8";
 
 export const WHOLE_SCREEN = { key: "whole-screen", name: "the whole screen" } as const;
 export const CLIPBOARD = { key: "clipboard", name: "the clipboard" } as const;
+export const ISOLATED_BROWSER = { key: "isolated-browser", name: "a separate browser instance" } as const;

@@ -58,6 +58,18 @@ export function commandPresentation(command: string): DeltaPresentation {
   );
 }
 
+/** Other threads see it, so it never names the command line (#1774). */
+export const BACKGROUND_COMMAND_LABEL = "background command";
+
+export const BACKGROUND_COMMAND_PRESENTATION: DeltaPresentation = {
+  label: {
+    pending: "Running background command",
+    completed: "Background command finished",
+  },
+  icon: { glyph: "Terminal" },
+  title: BACKGROUND_COMMAND_LABEL,
+};
+
 export function fileChangePresentation(
   paths: readonly string[],
 ): DeltaPresentation {

@@ -6,7 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { isCloudGithubLoginError } from "@cloudroom/domain";
 import { sdk } from "@/lib/sdk";
 import { isCloudGithubLoginMissing } from "@/components/thread/timeline/CloudLoginRow";
-import { cloudReasoningLevels, cloudroomStatusSchema, useCloudroomThreadWorkspace } from "./cloudroom-queries";
+import { clearCloudroomRequestId, cloudReasoningLevels, cloudroomStatusSchema, createCloudroomRequestId, useCloudroomThreadWorkspace } from "./cloudroom-queries";
 
 vi.mock("@/lib/sdk", () => ({ sdk: { cloudroom: { threadWorkspace: vi.fn() } } }));
 const clients: QueryClient[] = [];
@@ -60,4 +60,17 @@ it("detects missing or rejected Cloud GitHub logins without matching GitLab or n
   expect(isCloudGithubLoginMissing({ phase: "error", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(true);
   expect(isCloudGithubLoginMissing({ phase: "error", gitHost: "gitlab", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(false);
   expect(isCloudGithubLoginMissing({ phase: "complete", completed: 0, total: 0, error: "Cloud sandboxes have no working GitHub login." })).toBe(false);
+});
+
+it("gives overlapping identical Cloud sends distinct IDs while reusing the ID on retry after failure", async () => {
+  localStorage.clear();
+  const input = { id: "thread-1", input: [{ type: "text", text: "continue", mentions: [] }] };
+  const first = await createCloudroomRequestId("thread-1", input);
+  const second = await createCloudroomRequestId("thread-1", input);
+  expect(second.requestId).not.toBe(first.requestId);
+  second.release();
+  const retry = await createCloudroomRequestId("thread-1", input);
+  expect(retry.requestId).toBe(second.requestId);
+  first.release();
+  clearCloudroomRequestId("thread-1", retry.requestId);
 });

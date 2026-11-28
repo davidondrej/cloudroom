@@ -24,7 +24,7 @@ import {
   type PromptInput,
 } from "@cloudroom/domain";
 import type { UploadedPromptAttachment } from "@cloudroom/server-contract";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import { ApiError } from "../../errors.js";
 import { heicToJpeg } from "./heic-to-jpeg.js";
 
@@ -206,7 +206,7 @@ export async function readAttachment(
   return {
     content: await readFile(resolved),
     etag: `"${fileStat.size.toString(16)}-${Math.floor(fileStat.mtimeMs).toString(16)}"`,
-    mimeType: mimeTypes.lookup(resolved) || undefined,
+    mimeType: lookupMimeType(resolved) || undefined,
   };
 }
 

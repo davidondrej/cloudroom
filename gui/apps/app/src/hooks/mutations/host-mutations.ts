@@ -41,6 +41,22 @@ export function useRemoveHost() {
   });
 }
 
+export function useForgetHost() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    meta: {
+      showErrorToast: false,
+    },
+    mutationFn: async (hostId: string) => {
+      await sdk.hosts.experimental_forget({ hostId });
+    },
+    onSuccess: () => {
+      invalidateHostListQueries({ queryClient });
+    },
+  });
+}
+
 interface UpdateHostPermissionCeilingRequest {
   hostId: string;
   maxPermissionMode: PermissionMode;

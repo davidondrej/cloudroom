@@ -109,8 +109,8 @@ async function clientAttachmentMimeType(
   clientPath: string,
   bytes: Uint8Array,
 ): Promise<string> {
-  const { default: mimeTypes } = await import("mime-types");
-  const inferred = mimeTypes.lookup(clientPath);
+  const { lookupMimeType } = await import("@cloudroom/config/mime-types");
+  const inferred = lookupMimeType(clientPath);
   return typeof inferred === "string"
     ? inferred
     : (inferPngMimeType(bytes) ?? "application/octet-stream");

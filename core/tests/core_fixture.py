@@ -515,6 +515,11 @@ class ReplayTests(unittest.TestCase):
         calls = lambda: len((self.repo / 'model-list-calls').read_text().splitlines()) if (self.repo / 'model-list-calls').exists() else 0
         codex_models = lambda: next(h for h in self.service.request('GET', '/v1/capabilities')['harnesses'] if h['id'] == 'codex')['models']
 
+        # ?models=false returns capability flags without probing model catalogs.
+        fast = self.service.request('GET', '/v1/capabilities?models=false')
+        self.assertEqual(calls(), 0)
+        self.assertNotIn('models', next(h for h in fast['harnesses'] if h['id'] == 'codex'))
+
         # Consecutive /v1/capabilities calls hit the cache.
         self.assertTrue(codex_models())
         self.assertTrue(codex_models())

@@ -586,7 +586,7 @@ describe("MarkdownPreview thread mentions", () => {
       [],
     );
 
-    expect(await screen.findByText("Unavailable thread")).not.toBeNull();
+    expect(await screen.findByText("Review Unavailable thread")).not.toBeNull();
     expect(sdk.threads.resolveMentions).toHaveBeenCalledTimes(1);
   });
 
@@ -626,7 +626,8 @@ describe("MarkdownPreview thread mentions", () => {
     const view = render(tree, { wrapper });
 
     await waitFor(() => {
-      expect(screen.getAllByText("Shared mention target")).toHaveLength(3);
+      expect(screen.getByText("Title Shared mention target")).not.toBeNull();
+      expect(screen.getAllByText("Shared mention target")).toHaveLength(2);
     });
     expect(
       screen.getAllByRole("link", { name: "Shared mention target" }),

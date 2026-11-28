@@ -568,7 +568,23 @@ async function handleRequest(message) {
       return;
     }
     case "thread/backgroundTerminals/clean":
+      // `cleanNotifications`: what the ended commands report, like exits.
+      for (const entry of script?.cleanNotifications ?? []) {
+        notify(entry.method, withThreadId(entry.params, params.threadId));
+      }
       respond(id, {});
+      return;
+    case "thread/backgroundTerminals/list":
+      // `backgroundTerminals`: item IDs of the commands still running. Without
+      // it, an older Codex that lacks this method.
+      if (script?.backgroundTerminals === undefined) {
+        respondError(id, -32601, `Unknown method "${method}"`);
+        return;
+      }
+      respond(id, {
+        data: script.backgroundTerminals.map((itemId) => ({ itemId })),
+        nextCursor: null,
+      });
       return;
     case "thread/archive":
       // The real app-server moves the rollout into its archived dir, so a

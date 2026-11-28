@@ -269,15 +269,21 @@ export function promptModelShortcuts(
       name,
       description: `Switch to ${known ?? `the newest ${name.charAt(0).toUpperCase()}${name.slice(1)}`} in ${harnessName}`,
       icon: harness?.icon,
-      onSelect: async () => {
-        const model = "models" in source ? known : newestModel(await source.loadModels(providerId), name);
-        // Rejecting drops a held Enter, so the prompt never goes to the old model.
-        if (!model) {
-          appToast.error(`${harnessName} lists no ${name} model.`);
-          throw new Error(`${harnessName} lists no ${name} model`);
-        }
-        await selectModel({ providerId, model });
-      },
+      onSelect:
+        "models" in source
+          ? () => {
+              // Existing threads already know the model and wait for the switch inside useSendThreadMessage.
+              void Promise.resolve(selectModel({ providerId, model: known! })).catch(() => {});
+            }
+          : async () => {
+              const model = newestModel(await source.loadModels(providerId), name);
+              // Rejecting drops a held Enter, so the prompt never goes to the old model.
+              if (!model) {
+                appToast.error(`${harnessName} lists no ${name} model.`);
+                throw new Error(`${harnessName} lists no ${name} model`);
+              }
+              await selectModel({ providerId, model });
+            },
     });
   }
   return shortcuts.length > 0 ? shortcuts : undefined;

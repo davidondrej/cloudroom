@@ -10,6 +10,8 @@ import { prepareCodexGuard } from "@get-bb/plugin-sdk/internal/command-guard";
 import {
   isRecord,
   isStandaloneBuiltinCompactCommand,
+  backgroundTaskItemStatus,
+  LOCAL_BASH_TASK_TYPE,
   approvalInteractionOutcomeSchema,
   type DynamicTool,
   type PromptInput,
@@ -72,7 +74,11 @@ import {
 } from "../interactive-requests.js";
 import { codexMcpStartupReason } from "../delta-translation.js";
 import { parseModelsResponse } from "../models.js";
-import { macOsPermissionPresentation } from "../presentation.js";
+import {
+  BACKGROUND_COMMAND_LABEL,
+  BACKGROUND_COMMAND_PRESENTATION,
+  macOsPermissionPresentation,
+} from "../presentation.js";
 import {
   codexManagedPolicyError,
   keepShellEnvironmentSetKeys,
@@ -521,6 +527,16 @@ interface CodexBridgeSession {
   releasePromise: Promise<void> | null;
   /** Aborted when a Stop or Archive waits for this thread or it is released. */
   stopRequested: AbortController;
+  /** Running exec commands by Codex item ID; `shown` once their turn ended. */
+  runningExecs: Map<
+    string,
+    {
+      turnId: string | undefined;
+      /** Started with a processId: not waiting for approval. */
+      spawned: boolean;
+      shown: boolean;
+    }
+  >;
 }
 
 const sessionsByRoomThreadId = new Map<string, CodexBridgeSession>();
@@ -561,6 +577,11 @@ function releaseSession(session: CodexBridgeSession): Promise<void> {
   }
   session.closing = true;
   session.stopRequested.abort();
+  endShownExecs(
+    session,
+    "stopped",
+    "Cloudroom ended this Codex session, which stopped the command.",
+  );
   if (sessionsByRoomThreadId.get(session.bbThreadId) === session) {
     sessionsByRoomThreadId.delete(session.bbThreadId);
   }
@@ -715,6 +736,183 @@ function toProviderRuntimeEvent(
   } as ProviderRuntimeEvent;
 }
 
+// Codex keeps an exec_command process running after its turn ends and sends
+// item/completed when it exits, even between turns. Shown as a background
+// command, it keeps idle cleanup from ending its app-server, and its exit or
+// loss is recorded instead of a later "Unknown process id" (#1774).
+const codexExecEventSchema = z
+  .object({
+    threadId: z.string().optional(),
+    turnId: z.string().optional(),
+    turn: z
+      .object({ id: z.string().min(1), status: z.string().optional() })
+      .passthrough()
+      .optional(),
+    item: z
+      .object({
+        type: z.literal("commandExecution"),
+        id: z.string().min(1),
+        processId: z.string().nullish(),
+        exitCode: z.number().nullish(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+function backgroundExecDelta(
+  itemId: string,
+  taskStatus: "running" | "completed" | "failed" | "stopped",
+  end: { providerTurnId: string } | { summary?: string; error?: string },
+): ThreadDelta {
+  const key = { providerItemId: `${itemId}:background` };
+  const item = {
+    type: "backgroundTask" as const,
+    familyId: itemId,
+    taskType: LOCAL_BASH_TASK_TYPE,
+    description: BACKGROUND_COMMAND_LABEL,
+    status: backgroundTaskItemStatus(taskStatus),
+    taskStatus,
+    skipTranscript: false,
+  };
+  const presentation = BACKGROUND_COMMAND_PRESENTATION;
+  return "providerTurnId" in end
+    ? { kind: "item.open", key, item, presentation, ...end }
+    : {
+        kind: "item.close",
+        key,
+        status: item.status,
+        item: { ...item, ...end },
+        presentation,
+      };
+}
+
+function trackCodexExecs(
+  session: CodexBridgeSession,
+  method: string,
+  params: unknown,
+): ThreadDelta[] {
+  if (!["turn/completed", "item/started", "item/completed"].includes(method)) {
+    return [];
+  }
+  const parsed = codexExecEventSchema.safeParse(params);
+  // Subagents share this app-server; only this thread's turns show its commands.
+  if (!parsed.success || parsed.data.threadId !== session.codexThreadId) {
+    return [];
+  }
+  const { turnId, turn, item } = parsed.data;
+  if (method === "turn/completed" && turn !== undefined) {
+    // Stop interrupts first, then cleans up its commands: nothing to show. One
+    // still waiting for approval never sends item/completed, so drop it here.
+    if (turn.status === "interrupted") {
+      for (const [itemId, exec] of session.runningExecs) {
+        if (!exec.shown && exec.turnId === turn.id) {
+          session.runningExecs.delete(itemId);
+        }
+      }
+      return [];
+    }
+    const shown: ThreadDelta[] = [];
+    const approved: string[] = [];
+    for (const [itemId, exec] of session.runningExecs) {
+      if (exec.shown) continue;
+      if (!exec.spawned) {
+        approved.push(itemId);
+        continue;
+      }
+      exec.shown = true;
+      shown.push(
+        backgroundExecDelta(itemId, "running", {
+          providerTurnId: turn.id,
+        }),
+      );
+    }
+    if (approved.length > 0) void showListedExecs(session, approved, turn.id);
+    return shown;
+  }
+  if (item === undefined) return [];
+  if (method === "item/started") {
+    // An approval-gated exec starts without a processId and gets no second
+    // item/started once approved: checked when its turn ends.
+    session.runningExecs.set(item.id, {
+      turnId,
+      spawned: Boolean(item.processId),
+      shown: false,
+    });
+    return [];
+  }
+  const exec = session.runningExecs.get(item.id);
+  if (exec === undefined) return [];
+  session.runningExecs.delete(item.id);
+  if (!exec.shown) return [];
+  const exitCode = item.exitCode ?? null;
+  return [
+    backgroundExecDelta(item.id, exitCode === 0 ? "completed" : "failed", {
+      summary: `Exited with code ${exitCode ?? "unknown"}`,
+    }),
+  ];
+}
+
+const backgroundTerminalsListResultSchema = z
+  .object({ data: z.array(z.object({ itemId: z.string() }).passthrough()) })
+  .passthrough();
+
+/**
+ * An approved exec never reports its processId, and one that then failed to
+ * start (say, a missing cwd) never sends item/completed. One check per turn
+ * end shows those Codex still runs and drops the rest. Codex before 0.140.0
+ * can't list them, so they're dropped too: unprotected, as before this fix,
+ * but never a row that stays open forever.
+ */
+async function showListedExecs(
+  session: CodexBridgeSession,
+  itemIds: readonly string[],
+  providerTurnId: string,
+): Promise<void> {
+  let listed = new Set<string>();
+  if (session.connection !== null && session.codexThreadId !== null) {
+    try {
+      const { data } = await session.connection.request({
+        method: "thread/backgroundTerminals/list",
+        params: { threadId: session.codexThreadId },
+        resultSchema: backgroundTerminalsListResultSchema,
+        timeoutMs: INTERRUPT_SETTLEMENT_TIMEOUT_MS,
+      });
+      listed = new Set(data.map((terminal) => terminal.itemId));
+    } catch {
+      // Unknown method on an older Codex, or Codex went away.
+    }
+  }
+  const shown: ThreadDelta[] = [];
+  for (const itemId of itemIds) {
+    const exec = session.runningExecs.get(itemId);
+    if (exec === undefined || exec.shown) continue;
+    if (!listed.has(itemId)) {
+      session.runningExecs.delete(itemId);
+      continue;
+    }
+    exec.shown = true;
+    shown.push(backgroundExecDelta(itemId, "running", { providerTurnId }));
+  }
+  sendThreadDeltas(session, shown);
+}
+
+/** Records shown commands as ended when their app-server goes away. */
+function endShownExecs(
+  session: CodexBridgeSession,
+  taskStatus: "failed" | "stopped",
+  error: string,
+): void {
+  const ended: ThreadDelta[] = [];
+  for (const [itemId, exec] of session.runningExecs) {
+    if (exec.shown) {
+      ended.push(backgroundExecDelta(itemId, taskStatus, { error }));
+    }
+  }
+  session.runningExecs.clear();
+  sendThreadDeltas(session, ended);
+}
+
 function handleChildNotification(
   roomThreadId: string,
   serial: number,
@@ -725,6 +923,7 @@ function handleChildNotification(
   if (!session) {
     return;
   }
+  const execDeltas = trackCodexExecs(session, method, params);
   if (method === "thread/started") {
     const parsed = codexThreadStartedNotificationSchema.safeParse(params);
     if (parsed.success) {
@@ -748,7 +947,8 @@ function handleChildNotification(
   const deltas = session.translator.translateEvent(
     toProviderRuntimeEvent(method, params),
   );
-  sendThreadDeltas(session, deltas);
+  // Shown before its turn's boundary: a new item needs an open turn.
+  sendThreadDeltas(session, [...execDeltas, ...deltas]);
   for (const delta of deltas) {
     if (delta.kind === "provider.error" && delta.willRetry !== true) {
       emitTerminalAccountErrorHint(session, delta);
@@ -922,6 +1122,11 @@ function handleChildExit(
   session.connection = null;
 
   const openTurnIds = [...session.openCodexTurnIds];
+  endShownExecs(
+    session,
+    "failed",
+    `Codex exited unexpectedly (code ${info.code ?? "null"}, signal ${info.signal ?? "null"}), which stopped the command.`,
+  );
   const message = `codex app-server exited unexpectedly (code ${info.code ?? "null"}, signal ${info.signal ?? "null"})${info.stderrTail ? `: ${info.stderrTail}` : ""}`;
   sendThreadDeltas(
     session,
@@ -1215,6 +1420,7 @@ async function constructThreadSession(
     previousChildExit: null,
     releasePromise: null,
     stopRequested: new AbortController(),
+    runningExecs: new Map(),
   };
   sessionsByRoomThreadId.set(args.threadId, session);
   if (existing) {
@@ -1508,6 +1714,7 @@ function registerResumableSession(session: CodexBridgeSession): void {
     previousChildExit: null,
     releasePromise: null,
     stopRequested: new AbortController(),
+    runningExecs: new Map(),
   });
 }
 
@@ -2014,15 +2221,18 @@ async function handleThreadStop(
   sendThreadDeltas(session, openSubAgents);
   // Codex stays up for the next turn once nothing of this thread still runs.
   // Sub-agents only end with Codex itself.
-  if (
-    params.keepSession === true &&
-    settled &&
-    openSubAgents.length === 0 &&
-    (await endBackgroundTerminals(session.connection, session.codexThreadId))
-  ) {
-    session.stopRequested = new AbortController();
-    sendResult(id, { ok: true, sessionKept: true });
-    return;
+  if (params.keepSession === true && settled && openSubAgents.length === 0) {
+    // The cleanup ends every command: record them as stopped before this
+    // result, so the server's settle finds them closed and their late exits
+    // can't close them again as failed.
+    endShownExecs(session, "stopped", "Stop ended the command.");
+    if (
+      await endBackgroundTerminals(session.connection, session.codexThreadId)
+    ) {
+      session.stopRequested = new AbortController();
+      sendResult(id, { ok: true, sessionKept: true });
+      return;
+    }
   }
   await releaseSession(session);
   sendResult(id, { ok: true });

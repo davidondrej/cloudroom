@@ -13,6 +13,7 @@ import {
 import type { EnvironmentRow } from "@cloudroom/db";
 import {
   changedMessageSchema,
+  threadScope,
   turnScope,
   type ServiceTier,
   type Thread,
@@ -20,6 +21,7 @@ import {
 } from "@cloudroom/domain";
 import { groupHostDaemonEvents } from "@cloudroom/host-daemon-contract";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { COMMAND_TIMEOUT_MS } from "../../src/constants.js";
 import type { TelemetryService } from "../../src/services/system/telemetry.js";
 import * as threadEvents from "../../src/services/threads/thread-events.js";
 import { runQueuedMessageDispatch } from "../../src/services/threads/queued-message-dispatch.js";
@@ -1725,7 +1727,7 @@ describe("service tier execution lifecycle", () => {
     });
   });
 
-  it("reports a queued message the drain already delivered as sent (#1954)", async () => {
+  it("reports a drained queued message as awaiting, then sent (#1954, #2816)", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedProviderThreadFixture({
         harness,
@@ -1744,17 +1746,56 @@ describe("service tier execution lifecycle", () => {
       await sendNextQueuedMessageIfPresent(harness.deps, {
         threadId: thread.id,
       });
-      const send = (threadId: string) =>
+      const send = (threadId: string, id = queued.id) =>
         harness.app.request(
-          `/api/v1/threads/${threadId}/queued-messages/${queued.id}/send`,
+          `/api/v1/threads/${threadId}/queued-messages/${id}/send`,
           {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ mode: "auto" }),
           },
         );
-      // Not accepted by the provider yet: still unknown, as before.
-      expect((await send(thread.id)).status).toBe(404);
+      // Not accepted by the provider yet: known and awaiting, never resent (#2816).
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const awaiting = await send(thread.id);
+        expect(awaiting.status).toBe(409);
+        expect(await awaiting.json()).toMatchObject({
+          code: "queued_message_awaiting_acknowledgement",
+        });
+      }
+      expect((await send(thread.id, "queued-unknown")).status).toBe(404);
+      // Base's 404 once pending is not sure: a failed start (no request-linked
+      // rejection) or a submit past the command timeout with no settlement.
+      const seedRequest = (id: string, sequence: number, createdAt?: number) =>
+        seedStoredEvent(harness.deps, {
+          data: { requestId: `request-${id}`, queuedMessageId: id, target: { kind: "new-turn" } },
+          scope: threadScope(),
+          sequence,
+          threadId: thread.id,
+          type: "client/turn/requested",
+          ...(createdAt === undefined ? {} : { createdAt }),
+        });
+      seedRequest("queued-start-2816", 90);
+      seedStoredEvent(harness.deps, {
+        data: { code: "thread_command_failed", message: "Command thread.start failed" },
+        scope: threadScope(),
+        sequence: 91,
+        threadId: thread.id,
+        type: "system/error",
+      });
+      expect((await send(thread.id, "queued-start-2816")).status).toBe(404);
+      // Stop then a failed start: settlement drops the failure, Stop ends pending.
+      seedRequest("queued-stopped-2816", 92);
+      seedStoredEvent(harness.deps, {
+        data: { reason: "manual-stop" },
+        scope: threadScope(),
+        sequence: 93,
+        threadId: thread.id,
+        type: "system/thread/interrupted",
+      });
+      expect((await send(thread.id, "queued-stopped-2816")).status).toBe(404);
+      seedRequest("queued-stale-2816", 94, Date.now() - COMMAND_TIMEOUT_MS - 1);
+      expect((await send(thread.id, "queued-stale-2816")).status).toBe(404);
       const [submit] = listQueuedThreadCommands(
         harness,
         "turn.submit",

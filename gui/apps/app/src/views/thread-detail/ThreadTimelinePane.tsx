@@ -4,6 +4,7 @@ import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/pr
 import { EmbeddedThreadChat } from "@/components/thread/embedded-chat";
 import type { ThreadTimelineSurfaceProps } from "@/components/thread/timeline/ThreadTimelineSurface";
 import { ScanProgress } from "@/components/thread/scan-progress/ScanProgress";
+import { ScrollToPromptButton } from "@/components/thread/toc/ScrollToPromptButton";
 import { ThreadTableOfContents } from "@/components/thread/toc/ThreadTableOfContents";
 
 interface ThreadTimelinePaneProps extends ThreadTimelineSurfaceProps {
@@ -30,14 +31,20 @@ export function ThreadTimelinePane({
       variant="hosted-footer"
       footer={footer}
       scrollOverlay={
-        <ThreadTableOfContents
-          contextBoundarySeq={surface.contextBoundarySeq}
-          threadId={surface.threadId}
-          timelineRows={surface.timelineRows}
-          hasOlderTimelineRows={surface.hasOlderTimelineRows}
-          loadOlderTimelineRows={surface.onLoadOlderRows}
-          onNavigateToRow={setTimelineNavigationTargetRowId}
-        />
+        <>
+          <ScrollToPromptButton
+            timelineRows={surface.timelineRows}
+            onNavigateToRow={setTimelineNavigationTargetRowId}
+          />
+          <ThreadTableOfContents
+            contextBoundarySeq={surface.contextBoundarySeq}
+            threadId={surface.threadId}
+            timelineRows={surface.timelineRows}
+            hasOlderTimelineRows={surface.hasOlderTimelineRows}
+            loadOlderTimelineRows={surface.onLoadOlderRows}
+            onNavigateToRow={setTimelineNavigationTargetRowId}
+          />
+        </>
       }
       surface={{
         ...surface,

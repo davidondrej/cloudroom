@@ -1,6 +1,10 @@
 import { renderTemplate } from "@cloudroom/templates";
 import { getThread, threads, updateThread } from "@cloudroom/db";
-import type { PromptInput } from "@cloudroom/domain";
+import {
+  RAW_THREAD_ID_PATTERN_SOURCE,
+  type PromptInput,
+  type PromptTextMention,
+} from "@cloudroom/domain";
 import { and, desc, eq, isNotNull, isNull, ne } from "drizzle-orm";
 import type { AppDeps, LoggedWorkSessionDeps } from "../../types.js";
 import { Type } from "@earendil-works/pi-ai";
@@ -52,15 +56,83 @@ interface RawGeneratedThreadMetadata {
   title: string;
 }
 
-export function cleanPromptText(input: PromptInput[]): string {
-  return input
-    .filter((part) => part.type === "text")
-    // Hidden notes for the agent (like a fork's "[Local fork]" note) never name a thread.
-    .filter((part) => part.visibility !== "agent-only")
-    .map((part) => part.text.trim())
-    .join(" ")
+const SERIALIZED_MENTION_TOKEN_PATTERN =
+  /@(?:thread|project|section|folder):[A-Za-z0-9_-]+/gu;
+const STANDALONE_RAW_THREAD_ID_PATTERN = new RegExp(
+  `(?<![\\p{L}\\p{N}_.+\\-/\\\\])${RAW_THREAD_ID_PATTERN_SOURCE}(?![\\p{L}\\p{N}_+\\-/\\\\]|\\.(?=[\\p{L}\\p{N}_]))`,
+  "gu",
+);
+const THREAD_MENTION_LOOKUP_PATTERN = new RegExp(
+  `@thread:([A-Za-z0-9_-]+)|(?<![\\p{L}\\p{N}_.+\\-/\\\\])(${RAW_THREAD_ID_PATTERN_SOURCE})(?![\\p{L}\\p{N}_+\\-/\\\\]|\\.(?=[\\p{L}\\p{N}_]))`,
+  "gu",
+);
+
+function replacePromptTextMentions(
+  text: string,
+  mentions: readonly PromptTextMention[] | undefined,
+): string {
+  if (!mentions || mentions.length === 0) return text;
+  const sorted = [...mentions].sort((left, right) => left.start - right.start);
+  let out = "";
+  let cursor = 0;
+  for (const mention of sorted) {
+    if (
+      mention.start < cursor ||
+      mention.end <= mention.start ||
+      mention.end > text.length
+    ) {
+      continue;
+    }
+    out += text.slice(cursor, mention.start);
+    out += mention.resource.label.trim();
+    cursor = mention.end;
+  }
+  return out + text.slice(cursor);
+}
+
+function stripMentionTokens(value: string): string {
+  return value
+    .replace(SERIALIZED_MENTION_TOKEN_PATTERN, "")
+    .replace(STANDALONE_RAW_THREAD_ID_PATTERN, "")
     .replace(/\s+/gu, " ")
     .trim();
+}
+
+function resolveThreadMentionsForNaming(
+  db: AppDeps["db"],
+  value: string,
+): string {
+  if (!value) return "";
+  const resolved = value.replace(
+    THREAD_MENTION_LOOKUP_PATTERN,
+    (_match, serializedId?: string, rawId?: string) => {
+      const id = serializedId ?? rawId;
+      if (!id) return "";
+      const thread = getThread(db, id);
+      const title = thread?.title ?? thread?.titleFallback;
+      return title ? stripMentionTokens(title) : "";
+    },
+  );
+  return stripMentionTokens(resolved);
+}
+
+export function cleanPromptText(input: PromptInput[]): string {
+  return (
+    input
+      .filter((part) => part.type === "text")
+      // Hidden notes for the agent (like a fork's "[Local fork]" note) never name a thread.
+      .filter((part) => part.visibility !== "agent-only")
+      .map((part) => replacePromptTextMentions(part.text, part.mentions).trim())
+      .join(" ")
+      .replace(/\s+/gu, " ")
+      .trim()
+  );
+}
+
+function clampTitleText(text: string): string {
+  return text.length <= MAX_GENERATED_TITLE_LENGTH
+    ? text
+    : `${text.slice(0, MAX_GENERATED_TITLE_LENGTH - 3)}...`;
 }
 
 export function deriveTitleFallback(input: PromptInput[]): string | null {
@@ -68,7 +140,7 @@ export function deriveTitleFallback(input: PromptInput[]): string | null {
   if (text.length === 0) {
     return null;
   }
-  return text.length <= 80 ? text : `${text.slice(0, 77)}...`;
+  return clampTitleText(text);
 }
 
 export function shouldGenerateThreadTitle(input: PromptInput[]): boolean {
@@ -76,10 +148,9 @@ export function shouldGenerateThreadTitle(input: PromptInput[]): boolean {
 }
 
 export function sanitizeGeneratedTitle(value: string): string | null {
-  const title = value
-    .replace(/\s+/gu, " ")
-    .trim()
+  const title = stripMentionTokens(value)
     .replace(/^["'`]+|["'`.]+$/gu, "")
+    .trim()
     .slice(0, MAX_GENERATED_TITLE_LENGTH)
     .trim();
   return title.length > 0 ? title : null;
@@ -119,7 +190,10 @@ function normalizeGeneratedThreadMetadata(
 
 /** A configured BB_INFERENCE_FALLBACK wins. Otherwise naming falls back to the other harness, so one signed-out
  *  harness never blocks it; the primary still gets a final retry. */
-export function namingFallbackModel(config: AppDeps["config"], model: string): string {
+export function namingFallbackModel(
+  config: AppDeps["config"],
+  model: string,
+): string {
   if (config.inferenceFallbackModel !== config.inferenceModel) {
     return config.inferenceFallbackModel;
   }
@@ -151,7 +225,13 @@ function otherThreadTitles(
     .orderBy(desc(threads.updatedAt))
     .limit(OTHER_TITLES_LIMIT)
     .all()
-    .map((row) => row.title?.slice(0, MAX_GENERATED_TITLE_LENGTH) ?? "");
+    .map((row) =>
+      resolveThreadMentionsForNaming(deps.db, row.title ?? "").slice(
+        0,
+        MAX_GENERATED_TITLE_LENGTH,
+      ),
+    )
+    .filter((title) => title.length > 0);
 }
 
 export async function generateThreadMetadataWithOutcome(
@@ -159,7 +239,7 @@ export async function generateThreadMetadataWithOutcome(
   args: ThreadMetadataGenerationArgs,
 ): Promise<ThreadMetadataGenerationOutcome> {
   const startedAt = Date.now();
-  const fallback = deriveTitleFallback(args.input);
+  const rawPrompt = cleanPromptText(args.input);
   const complete = (
     metadata: GeneratedThreadMetadata | null,
     reason?: ThreadMetadataGenerationOutcomeReason,
@@ -169,7 +249,18 @@ export async function generateThreadMetadataWithOutcome(
     ...(reason ? { reason } : {}),
   });
 
-  if (!fallback) {
+  if (rawPrompt.length === 0) {
+    return complete(null, "empty-input");
+  }
+
+  const cleanedPrompt = clampTitleText(
+    resolveThreadMentionsForNaming(deps.db, rawPrompt),
+  );
+  const agentReply = resolveThreadMentionsForNaming(
+    deps.db,
+    args.agentReply ?? "",
+  );
+  if (cleanedPrompt.length === 0 && agentReply.length === 0) {
     return complete(null, "empty-input");
   }
 
@@ -177,8 +268,8 @@ export async function generateThreadMetadataWithOutcome(
   const model =
     preferences["threadNaming.model"].value ?? deps.config.inferenceModel;
   const prompt = renderTemplate("generateThreadMetadata", {
-    agentReply: args.agentReply ?? "",
-    cleanedPrompt: fallback,
+    agentReply,
+    cleanedPrompt,
     otherTitles: otherThreadTitles(deps, args.threadId)
       .map((title) => `- ${title}`)
       .join("\n"),

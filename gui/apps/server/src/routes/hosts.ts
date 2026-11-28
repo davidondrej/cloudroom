@@ -49,6 +49,7 @@ import {
   startMachineSuspension,
   startMachineReconciliation,
   retryMachineCleanup,
+  forgetMachine,
   sweepProviderMachine,
 } from "../services/machines/provider-orchestration.js";
 import { getMachineEnrollmentService } from "../services/machines/machine-services.js";
@@ -240,6 +241,12 @@ export function registerHostRoutes(
   post(routes.retryCleanup, async (context) => {
     assertHostManagementAllowed(context);
     await retryMachineCleanup(deps, context.req.param("id"));
+    return context.json({ ok: true as const });
+  });
+
+  post(routes.forget, async (context) => {
+    assertHostManagementAllowed(context);
+    await forgetMachine(deps, context.req.param("id"));
     return context.json({ ok: true as const });
   });
 

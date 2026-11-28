@@ -8,7 +8,6 @@ import {
   type ReactNode,
 } from "react";
 import {
-  useIsMutating,
   useMutationState,
   useQueryClient,
 } from "@tanstack/react-query";
@@ -294,12 +293,15 @@ function EmbeddedThreadChatWithComposer({
   const activePendingInteraction = getLatestPendingInteraction(
     pendingInteractionsQuery.data,
   );
-  // Like the main thread: a plugin request (the Secrets form) replaces the composer; only a chat card (a GPU) keeps it.
+  // Like the main thread: a plugin request (the Secrets form) replaces the composer; chat cards (GPU, browser setup) keep it.
   const hasComposerBlockingPendingInteraction =
     activePendingInteraction !== null &&
     !(
       activePendingInteraction.origin?.kind === "plugin" &&
-      isChatCardPluginInteraction(activePendingInteraction.origin.pluginId)
+      isChatCardPluginInteraction(
+        activePendingInteraction.origin.pluginId,
+        activePendingInteraction.origin.rendererId,
+      )
     );
   const pendingInteractionsInitialLoading = isPendingInteractionStateUnknown(
     pendingInteractionsQuery.data,
@@ -335,24 +337,35 @@ function EmbeddedThreadChatWithComposer({
     errorMessage: "Failed to save thread execution settings.",
     reasoning: true,
   });
-  const pendingSwitch = useMutationState({
+  const pendingSwitchEntry = useMutationState({
     filters: {
       mutationKey: ["thread-update", threadId],
       exact: true,
       status: "pending",
     },
-    select: (mutation) =>
-      mutation.state.variables as UpdateThreadRequest | undefined,
+    select: (mutation) => ({
+      variables: mutation.state.variables as UpdateThreadRequest | undefined,
+      submittedAt: mutation.state.submittedAt,
+    }),
   })
-    .filter((variables) => typeof variables?.model === "string")
+    .filter((entry) => typeof entry.variables?.model === "string")
     .at(-1);
-  const isExecutionUpdatePending =
-    useIsMutating({ mutationKey: ["thread-update", threadId] }) > 0;
+  const pendingSwitch = pendingSwitchEntry?.variables;
+  const isHarnessSwitchPending =
+    pendingSwitch?.providerId !== undefined &&
+    pendingSwitch.providerId !== threadProviderId;
+  const pendingCloudReasoning = setCloudReasoning.isPending
+    ? setCloudReasoning.variables
+    : undefined;
   const cloudReasoning =
-    pendingSwitch?.reasoningLevel ??
-    (setCloudReasoning.isPending ? setCloudReasoning.variables : undefined) ??
-    cloudState.data?.reasoning ??
-    "medium";
+    pendingCloudReasoning !== undefined &&
+    (setCloudReasoning.submittedAt ?? 0) >=
+      (pendingSwitchEntry?.submittedAt ?? 0)
+      ? pendingCloudReasoning
+      : (pendingSwitch?.reasoningLevel ??
+        pendingCloudReasoning ??
+        cloudState.data?.reasoning ??
+        "medium");
   const cloudModel = pendingSwitch?.model ?? cloudState.data?.model;
   const cloudSessionId = cloudState.data?.sessionId ?? null;
 
@@ -599,7 +612,8 @@ function EmbeddedThreadChatWithComposer({
   );
   const [composerFocusNonce, setComposerFocusNonce] = useState(0);
   const [inlineComposerFocusNonce, setInlineComposerFocusNonce] = useState(0);
-  const [isTurnSubmitting, setIsTurnSubmitting] = useState(false);
+  const [pendingTurnSubmitCount, setPendingTurnSubmitCount] = useState(0);
+  const isTurnSubmitting = pendingTurnSubmitCount > 0;
   const isMountedRef = useRef(false);
   useEffect(() => {
     isMountedRef.current = true;
@@ -755,12 +769,12 @@ function EmbeddedThreadChatWithComposer({
     const submittedDraft = promptDraft.getCurrent();
     const submittedInput = promptDraftToInput(submittedDraft);
     if (runCopyCommand(submittedDraft)) return false;
-    if (submittedInput.length === 0 || isTurnSubmitting) {
+    if (submittedInput.length === 0) {
       return false;
     }
     const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
-    setIsTurnSubmitting(true);
+    setPendingTurnSubmitCount((count) => count + 1);
     try {
       await defaultSendOrQueueInput(submittedInput);
       return true;
@@ -776,13 +790,12 @@ function EmbeddedThreadChatWithComposer({
       return false;
     } finally {
       if (isMountedRef.current) {
-        setIsTurnSubmitting(false);
+        setPendingTurnSubmitCount((count) => Math.max(0, count - 1));
       }
     }
   }, [
     defaultSendOrQueueInput,
     displayStatus,
-    isTurnSubmitting,
     promptDraft,
     runCopyCommand,
     dismissBottomAttachmentFailures,
@@ -803,7 +816,7 @@ function EmbeddedThreadChatWithComposer({
   const hasPromptDraftInput = currentPromptDraftInput.length > 0;
   const canSubmitModifierShortcut = canSubmitFollowUpShortcut({
     hasPromptDraftInput,
-    isFollowUpSubmitting: isTurnSubmitting,
+    isFollowUpSubmitting: false,
     isQueueMutationPending,
     queuedMessageCount: queuedMessages.length,
     runtimeDisplayStatus: displayStatus,
@@ -830,7 +843,7 @@ function EmbeddedThreadChatWithComposer({
 
     const cleared = promptDraft.clearIfCurrentMatches(submittedDraft);
     dismissBottomAttachmentFailures();
-    setIsTurnSubmitting(true);
+    setPendingTurnSubmitCount((count) => count + 1);
     void sendThreadMessage
       .mutateAsync({
         id: threadId,
@@ -854,7 +867,7 @@ function EmbeddedThreadChatWithComposer({
       })
       .finally(() => {
         if (isMountedRef.current) {
-          setIsTurnSubmitting(false);
+          setPendingTurnSubmitCount((count) => Math.max(0, count - 1));
         }
       });
   }, [
@@ -1067,7 +1080,7 @@ function EmbeddedThreadChatWithComposer({
         entries: [],
         onSelectEntry: promptDraft.setDraft,
       } satisfies HistoryConfig,
-      isFollowUpSubmitting: isTurnSubmitting,
+      isFollowUpSubmitting: false,
       message: currentPromptDraft.text,
       mentionRanges: currentPromptDraft.mentions,
       onChangeMessage: promptDraft.setTextAndMentions,
@@ -1088,7 +1101,6 @@ function EmbeddedThreadChatWithComposer({
       displayStatus,
       handleModifierSubmit,
       handleSubmit,
-      isTurnSubmitting,
       promptDraft.setDraft,
       promptDraft.setTextAndMentions,
       steerActiveThreadOnEnter,
@@ -1178,7 +1190,7 @@ function EmbeddedThreadChatWithComposer({
   const bottomExecutionConfig = useMemo(
     () => ({
       providerRouting: executionOptionsRouting,
-      disabled: isExecutionUpdatePending || Boolean(pendingModel),
+      disabled: isHarnessSwitchPending,
       onSelectModel: handleSelectModel,
       selectModel: ({
         providerId: shortcutProviderId,
@@ -1224,13 +1236,12 @@ function EmbeddedThreadChatWithComposer({
       handleReasoningChange,
       handleSelectModel,
       hasMultipleProviders,
-      isExecutionUpdatePending,
+      isHarnessSwitchPending,
       isLoadingModels,
       modelLoadFailed,
       modelLoadError,
       modelOptions,
       moreModelOptions,
-      pendingModel,
       pendingSwitch?.providerId,
       providerOptions,
       reasoningOptions,

@@ -48,8 +48,9 @@ import { parseSafeRelativeRoutePath } from "../relative-route-path.js";
 import { validatePromptAttachmentReferences } from "../../services/projects/attachments.js";
 import {
   createQueuedMessageForThread,
+  drainedQueuedMessageStatus,
+  queuedMessageAwaitingAcknowledgementError,
   sendQueuedMessageNow,
-  wasQueuedMessageDrainAccepted,
 } from "../../services/threads/queued-messages.js";
 import {
   ensureThreadIsNotAwaitingUserInteraction,
@@ -304,14 +305,14 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     ensureThreadQueueIsWritable(thread);
     // A delivered message stays "sent" even if its turn now asks the user (#1954).
-    if (
-      wasQueuedMessageDrainAccepted(deps.db, {
-        queuedMessageId: context.req.param("queuedMessageId"),
-        threadId: thread.id,
-      })
-    ) {
+    const drained = drainedQueuedMessageStatus(deps.db, {
+      queuedMessageId: context.req.param("queuedMessageId"),
+      threadId: thread.id,
+    });
+    if (drained === "sent") {
       return context.json({ ok: true, delivery: "sent" as const });
     }
+    if (drained === "awaiting") throw queuedMessageAwaitingAcknowledgementError();
     ensureThreadIsNotAwaitingUserInteraction(deps, thread.id);
     const result = await sendQueuedMessageNow(deps, {
       queuedMessageId: context.req.param("queuedMessageId"),

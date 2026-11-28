@@ -14,7 +14,7 @@ import {
   stat,
 } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import { resolvePluginNpmCli } from "@cloudroom/plugin-build";
 import {
   omitNpmScriptPolicyEnv,

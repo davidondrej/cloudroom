@@ -216,7 +216,7 @@ describe("ThreadDetailHeader", () => {
     );
   });
 
-  it("renders serialized mentions in the thread title as pills", () => {
+  it("renders serialized mentions in the thread title as plain text", () => {
     const { container } = render(
       <PaneContext.Provider value={PANE_CONTEXT}>
         <ThreadDetailHeader
@@ -230,15 +230,16 @@ describe("ThreadDetailHeader", () => {
       </PaneContext.Provider>,
     );
 
-    expect(screen.getByTitle("docs/foo.test.ts")).not.toBeNull();
-    expect(screen.getByText("thr_worker")).not.toBeNull();
+    expect(
+      screen.getByText("Review foo.test.ts with thr_worker"),
+    ).not.toBeNull();
     expect(
       container.querySelectorAll('[data-prompt-mention="true"]'),
-    ).toHaveLength(2);
+    ).toHaveLength(0);
     expect(screen.queryByText("@thread:thr_worker")).toBeNull();
   });
 
-  it("renders a raw thread id in the title as an unlinked mention pill", () => {
+  it("renders a raw thread id in the title as plain text", () => {
     const mentionedThread = makeThreadListEntry({
       id: "thr_dcwivn5n8w",
       projectId: "proj_target",
@@ -246,7 +247,7 @@ describe("ThreadDetailHeader", () => {
       titleFallback: "Raw title target",
     });
 
-    render(
+    const { container } = render(
       <ThreadTitleMentionResourcesProvider
         sectionNamesById={new Map()}
         projectNamesById={new Map()}
@@ -265,19 +266,27 @@ describe("ThreadDetailHeader", () => {
       </ThreadTitleMentionResourcesProvider>,
     );
 
-    const pill = screen.getByText("Raw title target");
-    expect(pill.closest('[data-prompt-mention="true"]')).not.toBeNull();
-    expect(pill.closest("a")).toBeNull();
-    expect(screen.queryByText("thr_dcwivn5n8w")).toBeNull();
-    expect(screen.getByText(/docs\/foo\.ts/u)).not.toBeNull();
+    expect(
+      screen.getByText("Continue from Raw title target docs/foo.ts"),
+    ).not.toBeNull();
+    expect(container.querySelector('[data-prompt-mention="true"]')).toBeNull();
+    expect(screen.queryByText(/thr_dcwivn5n8w/u)).toBeNull();
   });
 
   it.each([
-    ["straight closing quote", 'Review "thr_dcwivn5n8w."'],
-    ["curly closing quote", "Review “thr_dcwivn5n8w.”"],
+    [
+      "straight closing quote",
+      'Review "thr_dcwivn5n8w."',
+      'Review "Quoted title target."',
+    ],
+    [
+      "curly closing quote",
+      "Review “thr_dcwivn5n8w.”",
+      "Review “Quoted title target.”",
+    ],
   ])(
-    "renders a sentence-final raw id before a %s in a title",
-    (_label, title) => {
+    "renders a sentence-final raw id before a %s in a title as plain text",
+    (_label, title, expectedText) => {
       const mentionedThread = makeThreadListEntry({
         id: "thr_dcwivn5n8w",
         projectId: "proj_target",
@@ -285,7 +294,7 @@ describe("ThreadDetailHeader", () => {
         titleFallback: "Quoted title target",
       });
 
-      render(
+      const { container } = render(
         <ThreadTitleMentionResourcesProvider
           sectionNamesById={new Map()}
           projectNamesById={new Map()}
@@ -304,10 +313,11 @@ describe("ThreadDetailHeader", () => {
         </ThreadTitleMentionResourcesProvider>,
       );
 
-      const pill = screen.getByText("Quoted title target");
-      expect(pill.closest('[data-prompt-mention="true"]')).not.toBeNull();
-      expect(pill.closest("a")).toBeNull();
-      expect(screen.queryByText("thr_dcwivn5n8w")).toBeNull();
+      expect(screen.getByText(expectedText)).not.toBeNull();
+      expect(
+        container.querySelector('[data-prompt-mention="true"]'),
+      ).toBeNull();
+      expect(screen.queryByText(/thr_dcwivn5n8w/u)).toBeNull();
     },
   );
 

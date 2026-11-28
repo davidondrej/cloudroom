@@ -128,6 +128,16 @@ const MAX_REVEAL_FRAMES = 30;
 
 const MAX_STICKY_ADJUSTMENTS = 10;
 
+const SCROLL_EPSILON_PX = 0.5;
+
+function clampScrollTop(scroller: HTMLElement, scrollTop: number): number {
+  const maxScrollTop = Math.max(
+    0,
+    scroller.scrollHeight - scroller.clientHeight,
+  );
+  return Math.min(maxScrollTop, Math.max(0, scrollTop));
+}
+
 function getStickyTierOverlap(root: HTMLElement, row: HTMLElement): number {
   const { top: rowTop, bottom: rowBottom } = row.getBoundingClientRect();
   let coveredBottom = rowTop;
@@ -141,48 +151,204 @@ function getStickyTierOverlap(root: HTMLElement, row: HTMLElement): number {
   return coveredBottom - rowTop;
 }
 
+function getPinnedStickyHeaderBottom(
+  root: HTMLElement,
+  scroller: HTMLElement,
+  row: HTMLElement,
+): number {
+  const scrollerRect = scroller.getBoundingClientRect();
+  let visibleTop = scrollerRect.top;
+  for (const tier of root.querySelectorAll("[data-sidebar-sticky-tier]")) {
+    if (tier.contains(row)) continue;
+    const rect = tier.getBoundingClientRect();
+    if (rect.height <= 0) continue;
+    const stickyTop = parseFloat(getComputedStyle(tier).top);
+    if (
+      !Number.isFinite(stickyTop) ||
+      rect.top - scrollerRect.top > stickyTop + 1
+    ) {
+      continue;
+    }
+    const shield = parseFloat(getComputedStyle(tier, "::after").height) || 0;
+    const bottom = rect.bottom + shield;
+    if (bottom > visibleTop && bottom < scrollerRect.bottom) {
+      visibleTop = bottom;
+    }
+  }
+  return visibleTop;
+}
+
+type SidebarRowVisibility = "visible" | "partial" | "hidden";
+
+function getSidebarRowVisibility(
+  root: HTMLElement,
+  scroller: HTMLElement,
+  row: HTMLElement,
+): SidebarRowVisibility {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  const stickyOverlap = getStickyTierOverlap(root, row);
+  const visibleTop = Math.max(scrollerRect.top, rowRect.top + stickyOverlap);
+  const visibleBottom = Math.min(scrollerRect.bottom, rowRect.bottom);
+  if (visibleBottom - visibleTop <= SCROLL_EPSILON_PX) {
+    return "hidden";
+  }
+  if (
+    rowRect.top >= scrollerRect.top - SCROLL_EPSILON_PX &&
+    rowRect.bottom <= scrollerRect.bottom + SCROLL_EPSILON_PX &&
+    stickyOverlap <= SCROLL_EPSILON_PX
+  ) {
+    return "visible";
+  }
+  return "partial";
+}
+
+function nudgeSidebarRowIntoView(
+  root: HTMLElement,
+  scroller: HTMLElement,
+  row: HTMLElement,
+): void {
+  const scrollerRect = scroller.getBoundingClientRect();
+  const rowRect = row.getBoundingClientRect();
+  if (rowRect.bottom > scrollerRect.bottom + SCROLL_EPSILON_PX) {
+    scroller.scrollTop = clampScrollTop(
+      scroller,
+      scroller.scrollTop + (rowRect.bottom - scrollerRect.bottom),
+    );
+  } else if (rowRect.top < scrollerRect.top - SCROLL_EPSILON_PX) {
+    scroller.scrollTop = clampScrollTop(
+      scroller,
+      scroller.scrollTop - (scrollerRect.top - rowRect.top),
+    );
+  }
+  scrollRowBelowStickyTiers(root, row);
+}
+
+function centerElementInViewportRange(
+  scroller: HTMLElement,
+  element: HTMLElement,
+  visibleTop: number,
+  visibleBottom: number,
+): void {
+  const rect = element.getBoundingClientRect();
+  const delta = rect.top + rect.height / 2 - (visibleTop + visibleBottom) / 2;
+  if (Math.abs(delta) <= SCROLL_EPSILON_PX) return;
+  scroller.scrollTop = clampScrollTop(scroller, scroller.scrollTop + delta);
+}
+
 function scrollRowBelowStickyTiers(root: HTMLElement, row: HTMLElement): void {
-  const scroller = row.closest('[data-sidebar="content"]');
+  const scroller = row.closest<HTMLElement>('[data-sidebar="content"]');
   if (!scroller) return;
   for (let attempt = 0; attempt < MAX_STICKY_ADJUSTMENTS; attempt++) {
     const overlap = getStickyTierOverlap(root, row);
-    if (overlap <= 0.5) return;
+    if (overlap <= SCROLL_EPSILON_PX) return;
     const scrollTop = scroller.scrollTop;
-    scroller.scrollTop = scrollTop - overlap;
+    scroller.scrollTop = clampScrollTop(scroller, scrollTop - overlap);
     if (scroller.scrollTop === scrollTop) return;
   }
+}
+
+function centerSidebarRow(
+  root: HTMLElement,
+  row: HTMLElement,
+  forceCenter: boolean,
+): void {
+  const scroller = row.closest<HTMLElement>('[data-sidebar="content"]');
+  if (!scroller) {
+    row.scrollIntoView({ block: "center" });
+    return;
+  }
+  if (scroller.clientHeight <= 0) return;
+  if (!forceCenter) {
+    const visibility = getSidebarRowVisibility(root, scroller, row);
+    if (visibility === "visible") return;
+    if (visibility === "partial") {
+      nudgeSidebarRowIntoView(root, scroller, row);
+      return;
+    }
+  }
+
+  const scrollerRect = scroller.getBoundingClientRect();
+  centerElementInViewportRange(
+    scroller,
+    row,
+    scrollerRect.top,
+    scrollerRect.bottom,
+  );
+
+  // Refine once after scrolling so sticky headers pinned at the target
+  // position define the real unobstructed top edge.
+  const visibleTop = getPinnedStickyHeaderBottom(root, scroller, row);
+  if (visibleTop > scrollerRect.top + SCROLL_EPSILON_PX) {
+    centerElementInViewportRange(scroller, row, visibleTop, scrollerRect.bottom);
+  }
+
+  scrollRowBelowStickyTiers(root, row);
 }
 
 export function revealSidebarThread(
   root: HTMLElement | null,
   threadId: string,
   framesLeft = MAX_REVEAL_FRAMES,
-): void {
-  if (!root) return;
-  const row = [
-    ...root.querySelectorAll<HTMLAnchorElement>(
-      SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR,
-    ),
-  ].find((element) => element.dataset.sidebarThreadId === threadId);
-  if (row) {
-    row.scrollIntoView({ block: "nearest" });
-    scrollRowBelowStickyTiers(root, row);
-    return;
-  }
-  const placeholder = [
-    ...root.querySelectorAll(`[${SIDEBAR_WINDOWED_NAV_ATTRIBUTE}]`),
-  ].find((element) =>
-    element
-      .getAttribute(SIDEBAR_WINDOWED_NAV_ATTRIBUTE)
-      ?.split(" ")
-      .some((pair) => pair.startsWith(`${threadId}:`)),
-  );
-  placeholder?.scrollIntoView({ block: "nearest" });
-  if (framesLeft > 0) {
-    requestAnimationFrame(() =>
-      revealSidebarThread(root, threadId, framesLeft - 1),
+): () => void {
+  if (!root) return () => {};
+  let cancelled = false;
+  let frameId: number | null = null;
+  let revealedPlaceholder = false;
+
+  const attempt = (remaining: number) => {
+    if (cancelled) return;
+    const row = [
+      ...root.querySelectorAll<HTMLAnchorElement>(
+        SIDEBAR_THREAD_SHORTCUT_TARGET_SELECTOR,
+      ),
+    ].find((element) => element.dataset.sidebarThreadId === threadId);
+    if (row) {
+      centerSidebarRow(root, row, revealedPlaceholder);
+      return;
+    }
+    const placeholder = [
+      ...root.querySelectorAll<HTMLElement>(
+        `[${SIDEBAR_WINDOWED_NAV_ATTRIBUTE}]`,
+      ),
+    ].find((element) =>
+      element
+        .getAttribute(SIDEBAR_WINDOWED_NAV_ATTRIBUTE)
+        ?.split(" ")
+        .some((pair) => pair.startsWith(`${threadId}:`)),
     );
-  }
+    if (placeholder && !revealedPlaceholder) {
+      const scroller = placeholder.closest<HTMLElement>(
+        '[data-sidebar="content"]',
+      );
+      if (!scroller) {
+        placeholder.scrollIntoView({ block: "center" });
+      } else if (scroller.clientHeight > 0) {
+        const scrollerRect = scroller.getBoundingClientRect();
+        centerElementInViewportRange(
+          scroller,
+          placeholder,
+          scrollerRect.top,
+          scrollerRect.bottom,
+        );
+      }
+      revealedPlaceholder = true;
+    }
+    if (remaining > 0) {
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        attempt(remaining - 1);
+      });
+    }
+  };
+
+  attempt(framesLeft);
+  return () => {
+    cancelled = true;
+    if (frameId !== null) {
+      cancelAnimationFrame(frameId);
+    }
+  };
 }
 
 function findSidebarProjectSection(

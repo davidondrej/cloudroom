@@ -1,7 +1,7 @@
 import { isUtf8 } from "node:buffer";
 import fs from "node:fs/promises";
 import path from "node:path";
-import mimeTypes from "mime-types";
+import { lookupMimeType } from "@cloudroom/config/mime-types";
 import type {
   HostReadFileIfNoneMatch,
   HostReadFileRelativeDotfilePolicy,
@@ -314,7 +314,7 @@ export async function readFileFromGitRef(
     );
   }
   const gitRelativePath = relativePath.split(path.sep).join("/");
-  const mimeType = mimeTypes.lookup(args.resultPath) || undefined;
+  const mimeType = lookupMimeType(args.resultPath) || undefined;
   const fileSizeLimitBytes = getFileSizeLimitBytes();
 
   let blob;
@@ -374,7 +374,7 @@ export async function readFileForTransport(
     throw new CommandDispatchError("invalid_path", "Path is a FIFO, not a file");
   }
 
-  const mimeType = mimeTypes.lookup(args.resultPath) || undefined;
+  const mimeType = lookupMimeType(args.resultPath) || undefined;
   const fileSizeLimitBytes = getFileSizeLimitBytes();
   if (stat.size > fileSizeLimitBytes) {
     throw new CommandDispatchError(
@@ -424,7 +424,7 @@ export async function readRootRelativeFileForTransport(
     );
   }
 
-  const mimeType = mimeTypes.lookup(relativePath.resultPath) || undefined;
+  const mimeType = lookupMimeType(relativePath.resultPath) || undefined;
   const fileContents = await fs
     .readFile(readablePath)
     .catch((error: unknown) => throwMissingTargetOrRethrow(readArgs, error));

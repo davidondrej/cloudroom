@@ -12,7 +12,7 @@ import {
   HOST_DAEMON_PROTOCOL_VERSION,
   hostDaemonServerWsMessageSchema,
 } from "@cloudroom/host-daemon-contract";
-import { threadScope, turnScope } from "@cloudroom/domain";
+import { threadScope, turnScope, type ThreadEvent } from "@cloudroom/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { settleDanglingBackgroundTasks } from "../../src/services/threads/background-task-reconciliation.js";
 import { runStartupRecoverySweep } from "../../src/services/system/periodic-sweeps.js";
@@ -522,9 +522,10 @@ describe("background-task lifecycle reconciliation triggers", () => {
     },
   );
 
-  it("settles open tasks after the disconnect grace elapses without a reconnect", async () => {
+  it("settles open tasks after the disconnect grace elapses without a reconnect, until that daemon reports their end", async () => {
     await withTestHarness(async (harness) => {
-      const { session, thread } = seedOpenBackgroundTaskThread(harness);
+      const { host, session, thread, itemId } =
+        seedOpenBackgroundTaskThread(harness);
 
       vi.useFakeTimers();
       handleDaemonSocketClosed(harness.deps, { sessionId: session.id });
@@ -534,6 +535,52 @@ describe("background-task lifecycle reconciliation triggers", () => {
       vi.advanceTimersByTime(DAEMON_DISCONNECT_GRACE_MS + 1);
       expect(listSettledBackgroundTaskItems(harness, thread.id)).toEqual([
         { status: "interrupted", taskStatus: "stopped" },
+      ]);
+
+      // The same daemon comes back and reports the real end (#1774).
+      vi.useRealTimers();
+      const opened = await harness.app.request("/internal/session/open", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          hostId: host.id,
+          instanceId: "instance-1",
+          hostName: host.name,
+          hasMachineCredential: false,
+          platform: "darwin",
+          dataDir: "/tmp/host-daemon-task-late-end",
+          localApiPort: null,
+          protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
+          activeThreads: [],
+        }),
+      });
+      const { sessionId } = (await opened.json()) as { sessionId: string };
+      const { item } = backgroundTaskItemData({
+        itemId,
+        status: "completed",
+        taskStatus: "completed",
+      });
+      await harness.app.request("/internal/session/events", {
+        method: "POST",
+        headers: internalAuthHeaders(harness, { hostId: host.id }),
+        body: JSON.stringify({
+          sessionId,
+          eventGroups: groupHostDaemonEvents([
+            createTestDaemonEventEnvelope({
+              event: {
+                type: "item/backgroundTask/completed",
+                threadId: thread.id,
+                providerThreadId: "claude-session-1",
+                scope: threadScope(),
+                item,
+              } as ThreadEvent,
+            }),
+          ]),
+        }),
+      });
+      expect(listSettledBackgroundTaskItems(harness, thread.id)).toEqual([
+        { status: "interrupted", taskStatus: "stopped" },
+        { status: "completed", taskStatus: "completed" },
       ]);
     });
   });

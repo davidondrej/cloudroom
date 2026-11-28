@@ -40,7 +40,6 @@
     "@cloudroom/host-daemon-contract": "workspace:*",
     "bb-app": "workspace:*",
     "electron-updater": "^6.8.11",
-    "semver": "^7.7.0",
     "ws": "^8.19.0",
     "zod": "^4.3.6"
   },
@@ -52,7 +51,6 @@
     "@cloudroom/server-contract": "workspace:*",
     "@cloudroom/tsconfig": "workspace:*",
     "@types/node": "^24.9.0",
-    "@types/semver": "^7.7.0",
     "@types/ws": "^8.18.1",
     "electron": "44.11.5",
     "electron-builder": "^26.15.7",

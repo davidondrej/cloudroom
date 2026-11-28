@@ -234,8 +234,8 @@ async function attachmentMimeType(
     }
     return normalized;
   }
-  const { default: mimeTypes } = await import("mime-types");
-  const inferred = mimeTypes.lookup(filename) || mimeTypes.lookup(clientPath);
+  const { lookupMimeType } = await import("@cloudroom/config/mime-types");
+  const inferred = lookupMimeType(filename) || lookupMimeType(clientPath);
   return typeof inferred === "string" ? inferred : "application/octet-stream";
 }
 

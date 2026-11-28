@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -28,25 +28,122 @@ const YEAR_MS = 365 * 24 * 60 * 60_000;
 const LIMITS = "anthropic-ratelimit-unified";
 const windows = process.platform === "win32";
 const USAGE_THROTTLE_MIN_MS = 15_000;
-const USAGE_THROTTLE_BASE_MS = 30_000;
-const USAGE_THROTTLE_MAX_MS = 5 * 60_000;
-const FALLBACK_CLAUDE_USER_AGENT = "claude-code/2.1.280";
+const USAGE_THROTTLE_BASE_MS = 5 * 60_000;
+const USAGE_THROTTLE_MAX_MS = 90 * 60_000;
+const FALLBACK_CLAUDE_VERSION = "2.1.280";
 
 // The same lookup as Harness detection, so every install it finds (~/.npm-global/bin, #1686) works here too.
 const claudeBinary = () => findCliExecutable("claude");
 
-let cachedClaudeUserAgent: { binary: string; value: string } | null = null;
-const usageThrottle = new Map<string, { until: number; streak: number }>();
+const cliVersionCacheSchema = z.object({
+  command: z.string().min(1),
+  mtimeMs: z.number().finite(),
+  version: z.string().min(1),
+});
+const usageThrottleSchema = z.object({
+  tokenHash: z.string().min(1),
+  until: z.number().finite(),
+  streak: z.number().int().positive(),
+});
+type UsageThrottleState = z.infer<typeof usageThrottleSchema>;
+
+export class ClaudeThrottledError extends Error {}
+
+let cachedClaudeUserAgent: {
+  binary: string;
+  mtimeMs: number | undefined;
+  value: string;
+} | null = null;
+
+function uidSuffix(): string {
+  const uid = process.getuid?.();
+  return uid === undefined ? "" : `-${uid}`;
+}
+
+function cliVersionCachePath(): string {
+  return path.join(os.tmpdir(), `cloudroom-claude-cli-version${uidSuffix()}.json`);
+}
+
+function throttleFilePath(tokenHash: string): string {
+  return path.join(
+    os.tmpdir(),
+    `cloudroom-claude-usage-throttle${uidSuffix()}-${tokenHash.slice(0, 16)}.json`,
+  );
+}
+
+function hashToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function formatClaudeUserAgent(version: string | null): string {
+  return `claude-cli/${version ?? FALLBACK_CLAUDE_VERSION} (external, cli)`;
+}
+
+async function readUsageThrottle(tokenHash: string): Promise<UsageThrottleState | null> {
+  try {
+    const raw = await fs.readFile(throttleFilePath(tokenHash), "utf8");
+    const parsed = usageThrottleSchema.safeParse(JSON.parse(raw));
+    if (parsed.success && parsed.data.tokenHash === tokenHash) return parsed.data;
+  } catch {}
+  return null;
+}
+
+async function writeUsageThrottle(next: UsageThrottleState): Promise<void> {
+  const target = throttleFilePath(next.tokenHash);
+  const tmp = `${target}.${randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(tmp, JSON.stringify(next), { mode: 0o600 });
+    await fs.rename(tmp, target);
+  } catch {
+    await fs.unlink(tmp).catch(() => {});
+  }
+}
+
+async function clearUsageThrottle(tokenHash: string): Promise<void> {
+  await fs.unlink(throttleFilePath(tokenHash)).catch(() => {});
+}
 
 async function claudeUserAgent(): Promise<string> {
   const binary = claudeBinary();
-  if (!binary) return FALLBACK_CLAUDE_USER_AGENT;
-  if (cachedClaudeUserAgent?.binary === binary) return cachedClaudeUserAgent.value;
+  if (!binary) return formatClaudeUserAgent(null);
+  const mtimeMs = (await fs.stat(binary).catch(() => null))?.mtimeMs;
+  if (
+    cachedClaudeUserAgent?.binary === binary &&
+    cachedClaudeUserAgent.mtimeMs === mtimeMs
+  ) {
+    return cachedClaudeUserAgent.value;
+  }
+  if (mtimeMs !== undefined) {
+    try {
+      const raw = await fs.readFile(cliVersionCachePath(), "utf8");
+      const parsed = cliVersionCacheSchema.safeParse(JSON.parse(raw));
+      if (
+        parsed.success &&
+        parsed.data.command === binary &&
+        parsed.data.mtimeMs === mtimeMs
+      ) {
+        const value = formatClaudeUserAgent(parsed.data.version);
+        cachedClaudeUserAgent = { binary, mtimeMs, value };
+        return value;
+      }
+    } catch {}
+  }
   const version = await execClaude(binary, ["--version"])
     .then(({ stdout }) => /\b(\d+\.\d+\.\d+)\b/.exec(stdout)?.[1] ?? null)
     .catch(() => null);
-  const value = version ? `claude-code/${version}` : FALLBACK_CLAUDE_USER_AGENT;
-  if (version) cachedClaudeUserAgent = { binary, value };
+  const value = formatClaudeUserAgent(version);
+  if (version) {
+    cachedClaudeUserAgent = { binary, mtimeMs, value };
+    if (mtimeMs !== undefined) {
+      await fs
+        .writeFile(
+          cliVersionCachePath(),
+          JSON.stringify({ command: binary, mtimeMs, version }),
+          { mode: 0o600 },
+        )
+        .catch(() => {});
+    }
+  }
   return value;
 }
 
@@ -356,9 +453,10 @@ export async function profileUsage(profile?: string): Promise<ClaudeUsage | null
   const token = await profileToken(profile);
   if (token === false) return { windows: [], credits: null, loginEnded: true };
   if (!token) return null;
-  const throttled = usageThrottle.get(token);
+  const tokenHash = hashToken(token);
+  const throttled = await readUsageThrottle(tokenHash);
   if (throttled && Date.now() < throttled.until) {
-    throw new Error("Claude usage failed (HTTP 429).");
+    throw new ClaudeThrottledError("Claude usage failed (HTTP 429).");
   }
   const response = await fetch("https://api.anthropic.com/api/oauth/usage", {
     headers: {
@@ -374,18 +472,18 @@ export async function profileUsage(profile?: string): Promise<ClaudeUsage | null
     if (response.status === 401 || response.status === 403) return null;
     if (response.status === 429) {
       const now = Date.now();
-      for (const [key, entry] of usageThrottle) {
-        if (entry.until <= now) usageThrottle.delete(key);
-      }
       const streak = (throttled?.streak ?? 0) + 1;
       const retryAfterMs =
         parseRetryAfterMs(response.headers?.get?.("retry-after"), now) ??
         Math.min(USAGE_THROTTLE_BASE_MS * 2 ** (streak - 1), USAGE_THROTTLE_MAX_MS);
-      usageThrottle.set(token, { until: now + retryAfterMs, streak });
+      await writeUsageThrottle({ tokenHash, until: now + retryAfterMs, streak });
+      throw new ClaudeThrottledError("Claude usage failed (HTTP 429).");
     }
     throw new Error(`Claude usage failed (HTTP ${response.status}).`);
   }
-  usageThrottle.delete(token);
+  if (throttled !== null) {
+    await clearUsageThrottle(tokenHash);
+  }
   const usage = usageSchema.parse(await response.json());
   const hasWindows = "five_hour" in usage || "seven_day" in usage || Array.isArray(usage.limits);
   if (!hasWindows && !usage.extra_usage && !usage.seven_day_overage_included)
@@ -522,9 +620,17 @@ export async function claudeUsage(
   previous?: ClaudeUsage,
 ): Promise<ClaudeUsage> {
   const full: ClaudeUsage | null = profile
-    ? await profileUsage(profile).catch(() =>
-        previous ? { windows: previous.windows, credits: previous.credits, unconfirmed: true as const } : null,
-      )
+    ? await profileUsage(profile).catch((error) => {
+        if (previous) {
+          return {
+            windows: previous.windows,
+            credits: previous.credits,
+            unconfirmed: true as const,
+          };
+        }
+        if (error instanceof ClaudeThrottledError) throw error;
+        return null;
+      })
     : null;
   if (full && !full.loginEnded) return full;
   const response = await fetch("https://api.anthropic.com/v1/messages", {

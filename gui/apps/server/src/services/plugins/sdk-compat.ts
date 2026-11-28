@@ -1,4 +1,4 @@
-import semver from "semver";
+import * as semver from "@cloudroom/domain/semver";
 import { ROOM_APP_COMPAT_VERSION, PLUGIN_SDK_VERSION } from "@cloudroom/domain";
 
 export function isPluginSdkRangeSatisfied(range: string): boolean {

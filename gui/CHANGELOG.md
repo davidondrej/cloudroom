@@ -2,6 +2,18 @@
 
 Also on [cloudroom.dev/changelog](https://www.cloudroom.dev/changelog).
 
+## 175
+
+Scan first, then steer (2026-11-28)
+
+### Changes
+
+- The Director now starts by scanning your threads, shows its progress as a checklist, and signs each message with its name and icon.
+- The Director compacts its own context once it is half full, and you can change that point in its settings.
+- Long chats no longer show blank gaps, and a new button jumps back to your last prompt when you scroll up.
+- Switching models in Cloud threads is instant and never blocks sending, and computer use asks once per thread and opens new tabs instead of new windows.
+- Security fixes.
+
 ## 174
 
 The Director learns from any chat (2026-11-28)

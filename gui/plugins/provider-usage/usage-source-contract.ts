@@ -154,6 +154,7 @@ export const accountViewsSchema = z.array(
         label: z.string(),
         usedPercent: z.number(),
         resetsAt: z.number().nullable(),
+        checkedAt: z.number().nullish(),
       }),
     ),
   }),

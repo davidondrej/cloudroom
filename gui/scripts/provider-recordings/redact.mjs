@@ -53,6 +53,7 @@ const AUTHORIZATION_PATTERN =
   /("|\\")[Aa]uthorization\1\s*:\s*("|\\")(?:(?!\2)[^\\]|\\.)*\2/g;
 const EMAIL_PATTERN = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g;
 const SECRET_ENV_KEY = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|COOKIE|AUTH)/i;
+const ENV_MAP_KEYS = new Set(["env", "envVars", "environment"]);
 const RECORD_DIR_ENV = "BB_PROVIDER_BRIDGE_RECORD_DIR";
 
 function parseArgs(argv) {
@@ -112,7 +113,7 @@ const CATALOG_KEYS = new Set([
 
 function isEnvMap(key, value) {
   return (
-    (key === "env" || key === "envVars" || key === "environment") &&
+    ENV_MAP_KEYS.has(key) &&
     value !== null &&
     typeof value === "object" &&
     !Array.isArray(value)
@@ -141,7 +142,18 @@ function redactValue(value, key, catalogContext) {
   }
   if (Array.isArray(value)) {
     const list = catalogContext && CATALOG_KEYS.has(key) ? namesOnly(value) : value;
-    return list.map((entry) => redactValue(entry, key, catalogContext));
+    return list.map((entry) => {
+      if (
+        ENV_MAP_KEYS.has(key) &&
+        typeof entry?.name === "string" &&
+        SECRET_ENV_KEY.test(entry.name) &&
+        typeof entry.value === "string" &&
+        entry.value !== ""
+      ) {
+        entry = { ...entry, value: "REDACTED" };
+      }
+      return redactValue(entry, key, catalogContext);
+    });
   }
   if (value !== null && typeof value === "object") {
     const out = {};

@@ -1,5 +1,7 @@
 import type { CloudRecord } from "./cloud-timeline";
 
+export type CloudTurnState = "working" | "waiting" | "error" | "idle";
+
 export interface CloudThreadSummary {
   thread_id: string;
   title: string | null;
@@ -9,6 +11,23 @@ export interface CloudThreadSummary {
   woke_at: string | null;
   /** Missing from older websites and from create replies. */
   parent_thread_id?: string | null;
+  harness?: string | null;
+  model?: string | null;
+  reasoning?: string | null;
+  pinned_at?: string | null;
+  turn_state?: CloudTurnState | null;
+  last_turn_at?: string | null;
+}
+
+export interface CloudProjectSummary {
+  project_id: string;
+  name: string;
+  repository: string | null;
+  folder: string | null;
+  workspace?: string | null;
+  default_harness: string | null;
+  default_model: string | null;
+  default_reasoning: string | null;
 }
 
 export interface CloudHistory {
@@ -26,6 +45,7 @@ export interface CloudListeners {
 
 export interface CloudApi {
   threads(): Promise<CloudThreadSummary[]>;
+  projects(): Promise<CloudProjectSummary[]>;
   history(threadId: string, after: number): Promise<CloudHistory>;
   send(
     threadId: string,
@@ -34,6 +54,18 @@ export interface CloudApi {
     surface?: string,
   ): Promise<void>;
   stop(threadId: string): Promise<void>;
+  archive(
+    threadId: string,
+    includeLive?: boolean,
+  ): Promise<{ archivedThreadIds?: string[]; keptLiveThreadIds?: string[] }>;
+  unarchive(threadId: string): Promise<void>;
+  rename(threadId: string, title: string): Promise<void>;
+  pin(threadId: string, pinned: boolean): Promise<void>;
+  delete(threadId: string): Promise<void>;
+  setModel(
+    threadId: string,
+    input: { model?: string; reasoning?: string },
+  ): Promise<void>;
   create(body: CloudCreate): Promise<CloudThreadSummary>;
   warm(): Promise<void>;
   listen(
@@ -41,6 +73,7 @@ export interface CloudApi {
     after: number,
     listeners: CloudListeners,
   ): () => void;
+  subscribeEvents(onChanged: () => void): () => void;
 }
 
 export interface CloudCreate {
@@ -53,6 +86,7 @@ export interface CloudCreate {
   reasoning?: string;
   service_tier?: string;
   target?: string;
+  base_branch?: string;
   /** Set only while usage data is on: the website then counts the message as sent from this surface. */
   surface?: string;
 }
@@ -99,6 +133,12 @@ const post = (threadId: string, body: unknown) =>
 export const cloudApi: CloudApi = {
   threads: async () =>
     (await request<{ threads: CloudThreadSummary[] }>("threads")).threads,
+  projects: async () =>
+    (
+      await request<{ projects: CloudProjectSummary[] }>("projects").catch(
+        () => ({ projects: [] }),
+      )
+    ).projects,
   history: (threadId, after) =>
     request<CloudHistory>(`threads/${threadId}?after=${after}`, {
       signal: AbortSignal.timeout(HISTORY_TIMEOUT_MS),
@@ -111,6 +151,26 @@ export const cloudApi: CloudApi = {
       surface,
     })),
   stop: async (threadId) => void (await post(threadId, { action: "stop" })),
+  archive: (threadId, includeLive = true) =>
+    request<{
+      ok: true;
+      archivedThreadIds?: string[];
+      keptLiveThreadIds?: string[];
+    }>(`threads/${threadId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "archive", include_live: includeLive }),
+    }),
+  unarchive: async (threadId) =>
+    void (await post(threadId, { action: "unarchive" })),
+  rename: async (threadId, title) =>
+    void (await post(threadId, { action: "rename", title })),
+  pin: async (threadId, pinned) =>
+    void (await post(threadId, { action: pinned ? "pin" : "unpin" })),
+  delete: async (threadId) =>
+    void (await post(threadId, { action: "delete" })),
+  setModel: async (threadId, input) =>
+    void (await post(threadId, { action: "set_model", ...input })),
   create: async (body) =>
     (
       await request<{ thread: CloudThreadSummary }>("threads", {
@@ -137,5 +197,51 @@ export const cloudApi: CloudApi = {
       listeners.error();
     };
     return () => source.close();
+  },
+  subscribeEvents(onChanged) {
+    if (typeof WebSocket === "undefined") return () => undefined;
+    let closed = false;
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let delay = 2000;
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const connect = () => {
+      if (closed || document.visibilityState !== "visible") return;
+      try {
+        socket = new WebSocket(`${protocol}//${window.location.host}/__cloud/events`);
+      } catch {
+        return;
+      }
+      socket.onopen = () => {
+        delay = 2000;
+        // One initial client frame arms hibernatable DO close propagation immediately on session revoke.
+        try {
+          socket?.send("hello");
+        } catch {
+          // Ignore if closing.
+        }
+      };
+      socket.onmessage = (event) => {
+        if (typeof event.data === "string" && event.data.includes("threads-changed")) {
+          onChanged();
+        }
+      };
+      socket.onclose = () => {
+        socket = null;
+        if (closed || document.visibilityState !== "visible") return;
+        retryTimer = setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 30_000);
+      };
+      socket.onerror = () => {
+        socket?.close();
+      };
+    };
+    connect();
+    return () => {
+      closed = true;
+      clearTimeout(retryTimer);
+      socket?.close();
+      socket = null;
+    };
   },
 };

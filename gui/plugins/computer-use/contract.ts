@@ -2,6 +2,7 @@ import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 export const APPROVAL_RENDERER_ID = "computer-use-approval";
+export const BROWSER_SETUP_RENDERER_ID = "computer-use-browser-setup";
 export const ACTIVE_CHANGED_CHANNEL = "active-changed";
 
 export const permissionsSchema = z
@@ -10,6 +11,21 @@ export const permissionsSchema = z
     screenRecording: z.boolean().nullable(),
   })
   .strict();
+export const browserControlStatusSchema = z
+  .object({
+    supported: z.boolean(),
+    browserName: z.string(),
+    shortName: z.string(),
+    bundleId: z.string().nullable(),
+    isDefault: z.boolean(),
+    inspectUrl: z.string(),
+    fullDiskAccess: z.boolean().nullable(),
+    remoteDebugging: z.boolean().nullable(),
+    ready: z.boolean(),
+    reason: z.string().nullable(),
+  })
+  .strict();
+export type BrowserControlStatus = z.infer<typeof browserControlStatusSchema>;
 export const hostStatusSchema = z
   .object({
     platform: z.string(),
@@ -19,7 +35,9 @@ export const hostStatusSchema = z
     installed: z.boolean(),
     running: z.boolean(),
     permissions: permissionsSchema,
+    browserControl: browserControlStatusSchema.optional(),
     hint: z.string().nullish(),
+    selfBundleId: z.string().nullish(),
   })
   .strict();
 export type HostStatus = z.infer<typeof hostStatusSchema>;
@@ -27,10 +45,17 @@ export const appSchema = z
   .object({ key: z.string().min(1), name: z.string().min(1) })
   .strict();
 export type AppIdentity = z.infer<typeof appSchema>;
-export const permissionKindSchema = z.enum(["accessibility", "screenRecording"]);
+export const permissionKindSchema = z.enum([
+  "accessibility",
+  "screenRecording",
+  "fullDiskAccess",
+]);
 
 export const hostContract = defineRpcContract({
-  status: { input: z.object({}).strict(), output: hostStatusSchema },
+  status: {
+    input: z.object({ includeBrowser: z.boolean().optional() }).strict(),
+    output: hostStatusSchema,
+  },
   prepare: {
     input: z.object({}).strict(),
     output: hostStatusSchema.extend({ installMs: z.number().nullable() }),
@@ -77,6 +102,10 @@ export const hostContract = defineRpcContract({
     input: z.object({ kind: permissionKindSchema }).strict(),
     output: hostStatusSchema,
   },
+  openBrowserInspect: {
+    input: z.object({}).strict(),
+    output: hostStatusSchema,
+  },
   restart: { input: z.object({}).strict(), output: hostStatusSchema },
 });
 
@@ -87,7 +116,6 @@ export const approvalPayloadSchema = z
     purpose: z.string().nullable(),
     platform: z.string(),
     permissions: permissionsSchema,
-    foreground: z.boolean().optional(),
   })
   .strict();
 export type ApprovalPayload = z.infer<typeof approvalPayloadSchema>;
@@ -95,12 +123,28 @@ export const approvalResponseSchema = z
   .object({ decision: z.enum(["thread", "always", "deny"]) })
   .strict();
 
+export const browserSetupPayloadSchema = z
+  .object({
+    platform: z.string(),
+    browserControl: browserControlStatusSchema,
+  })
+  .strict();
+export type BrowserSetupPayload = z.infer<typeof browserSetupPayloadSchema>;
+export const browserSetupResponseSchema = z
+  .object({ action: z.enum(["retry", "dismiss"]) })
+  .strict();
+
+export const grantedThreadSchema = z
+  .object({ threadId: z.string().min(1), title: z.string().min(1) })
+  .strict();
+export type GrantedThread = z.infer<typeof grantedThreadSchema>;
+
 export const settingsSchema = z
   .object({
     hostId: z.string().nullable(),
     status: hostStatusSchema.nullable(),
     error: z.string().nullable(),
-    alwaysAllowed: z.array(appSchema),
+    grantedThreads: z.array(grantedThreadSchema),
   })
   .strict();
 export const activeThreadSchema = z
@@ -118,13 +162,14 @@ export const activeStateSchema = z
 export const rpcContract = defineRpcContract({
   getActive: { input: z.null(), output: activeStateSchema },
   getSettings: { input: z.null(), output: settingsSchema },
-  removeAlwaysAllowed: {
-    input: z.object({ key: z.string().min(1) }).strict(),
+  revokeThread: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
     output: settingsSchema,
   },
   requestPermission: {
     input: z.object({ kind: permissionKindSchema }).strict(),
     output: settingsSchema,
   },
+  openBrowserInspect: { input: z.null(), output: settingsSchema },
   restart: { input: z.null(), output: settingsSchema },
 });

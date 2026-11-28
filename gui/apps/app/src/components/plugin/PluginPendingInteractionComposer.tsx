@@ -143,7 +143,7 @@ export function PluginPendingInteractionComposer({
   );
 
   // The plugin draws the whole card. It sits at the end of the chat (ThreadDetailView), so nothing grabs focus.
-  if (isChatCardPluginInteraction(request.pluginId)) {
+  if (isChatCardPluginInteraction(request.pluginId, request.rendererId)) {
     return (
       <section aria-label={request.title}>
         {form}

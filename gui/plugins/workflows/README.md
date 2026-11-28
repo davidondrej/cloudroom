@@ -178,8 +178,8 @@ bb workflows status <run-id>
 bb workflows history <run-id> --cursor 0 --limit 100
 bb workflows list --limit 20
 bb workflows stop <run-id>
-bb provider list --environment "$BB_ENVIRONMENT_ID" --json
-bb provider models <provider-id> --environment "$BB_ENVIRONMENT_ID" --json
+bb provider list --environment "$ROOM_ENVIRONMENT_ID" --json
+bb provider models <provider-id> --environment "$ROOM_ENVIRONMENT_ID" --json
 ```
 
 `status` is deliberately bounded: it returns run state, phase, call counts,
@@ -200,9 +200,9 @@ transcript:
 
 ```bash
 run=<run-id>
-mkdir -p "$BB_THREAD_STORAGE/workflows"
+mkdir -p "$ROOM_THREAD_STORAGE/workflows"
 bb workflows history "$run" --cursor 0 --limit 100 \
-  > "$BB_THREAD_STORAGE/workflows/$run.jsonl"
+  > "$ROOM_THREAD_STORAGE/workflows/$run.jsonl"
 ```
 
 The final `page` record reports `hasMore` and `nextCursor`. Fetch the next page
@@ -218,7 +218,7 @@ when a fresh detailed view is needed.
 
 This redirection intentionally happens in the invoking agent's shell. The
 canonical state remains in the plugin's server-side SQLite database, while the
-JSONL file lands in `$BB_THREAD_STORAGE` on that thread's execution host. The
+JSONL file lands in `$ROOM_THREAD_STORAGE` on that thread's execution host. The
 same flow therefore works for local and remote environments without granting
 the server arbitrary filesystem-write access.
 

@@ -3,8 +3,8 @@ Let any agent in a Local thread, or a Cloud thread with Mac access, see and cont
 ## What you get
 
 - Computer use for every harness and model, through `room-cli computer-use`.
-- A card that asks you before an agent controls each new app: always allow, only this thread, or deny.
-- A Settings section for macOS permissions and your always-allowed apps.
+- A card that asks you once per thread before an agent controls desktop apps: allow for this thread or deny.
+- A Settings section for macOS permissions and driver status.
 
 ## How it works
 

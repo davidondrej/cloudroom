@@ -289,9 +289,32 @@ pub struct Session {
     // Memory only: a restart lifts it, and the teleporting app renews it every 2 minutes.
     #[serde(skip)]
     frozen: Option<(String, u64)>,
+    // Last turn state pushed to the website for Mac-off sidebar status (working/waiting/error/idle). Memory only.
+    #[serde(skip)]
+    pub(super) reported_turn_state: Option<&'static str>,
 }
 
 impl Session {
+    pub(super) fn live_turn_state(&self, secrets_waiting: bool) -> &'static str {
+        if secrets_waiting || self.storage_paused {
+            return "waiting";
+        }
+        match self.state {
+            SessionState::Starting
+            | SessionState::Resuming
+            | SessionState::StartingTurn
+            | SessionState::Running
+            | SessionState::Interrupting
+            | SessionState::Closing => "working",
+            SessionState::Failed | SessionState::ProcessLost => "error",
+            SessionState::Idle => match self.last_prompt_state.as_deref() {
+                Some("failed") => "error",
+                _ => "idle",
+            },
+            _ => "idle",
+        }
+    }
+
     fn dashboard_state(&self) -> &'static str {
         if self.storage_paused {
             return "waiting";

@@ -113,6 +113,7 @@ export async function agyUsage(
 
 type Run = {
   child: ChildProcessWithoutNullStreams;
+  mac: boolean;
   home: string;
   url: string | null;
   sent: boolean;
@@ -122,10 +123,10 @@ type Run = {
 };
 // Google's sign-in link, as agy prints it. Cloud accepts the same hosts (web/antigravity-login.py).
 const SIGN_IN_HOSTS = new Set(["accounts.google.com", "antigravity.google"]);
+const plainText = (output: string) =>
+  output.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 const signInLink = (output: string): string | null => {
-  const clean = output
-    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "")
-    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+  const clean = plainText(output);
   for (const [url] of clean.matchAll(/https:\/\/[^\s<>]+(?=\s)/g)) {
     try {
       if (SIGN_IN_HOSTS.has(new URL(url).hostname)) return url;
@@ -137,11 +138,12 @@ const signInLink = (output: string): string | null => {
 export const isAgyCode = (code: string) => /^[!-~]{1,4096}$/.test(code.trim());
 
 /** Google's sign-in for an added account: agy prints a link, the user pastes back the code Google shows, and agy
- *  saves the login in the account's own HOME. The same terminal flow Cloud uses (web/antigravity-login.py). */
+ *  saves the login in the account's own HOME. The same terminal flow Cloud uses (web/antigravity-login.py).
+ *  `mac` signs in this computer's own login instead: the real HOME, saved where agy keeps it (the Keychain). */
 export class AntigravityLogin {
   private readonly runs = new Map<string, Run>();
 
-  async start(home: string): Promise<{ sessionId: string; authorizeUrl: string }> {
+  async start(home: string, mac = false): Promise<{ sessionId: string; authorizeUrl: string }> {
     const agy = findCliExecutable("agy");
     if (!agy) throw new Error("Install Antigravity on this computer, then try again.");
     if (process.platform === "win32")
@@ -156,7 +158,7 @@ export class AntigravityLogin {
     const child = spawn("/bin/sh", ["-c", `cat | { ${tty}; kill 0; }`], {
       env: {
         ...process.env,
-        ...AGY_FILE_LOGIN,
+        ...(mac ? {} : AGY_FILE_LOGIN),
         HOME: home,
         AGY_BIN: agy,
         AGY_CLI_DISABLE_AUTO_UPDATE: "1",
@@ -172,6 +174,7 @@ export class AntigravityLogin {
     const sessionId = randomUUID();
     const run: Run = {
       child,
+      mac,
       home,
       url: null,
       sent: false,
@@ -193,6 +196,14 @@ export class AntigravityLogin {
         run.exited = true;
         // Ended before a code was sent (timed out or cancelled): nothing can finish it any more.
         if (!run.sent) this.runs.delete(sessionId);
+        // This computer's login isn't a file: agy ending by itself without saying Google refused is the success.
+        if (mac && run.sent) {
+          if (stopped) reject(new Error("Antigravity sign-in timed out. Start again."));
+          else if (/couldn't log in|login cancelled/iu.test(plainText(output)))
+            reject(new Error("Google didn't accept that code. Start again."));
+          else resolve("");
+          return;
+        }
         fs.readFile(path.join(home, AGY_TOKEN), "utf8")
           .then((text) => {
             readAgyLogin(text);
@@ -211,9 +222,12 @@ export class AntigravityLogin {
     });
     run.done.catch(() => {});
     child.stdout.on("data", (chunk: Buffer) => {
-      if (run.url) return;
+      if (run.url && !mac) return;
       output = (output + chunk.toString()).slice(-32_768);
+      // After the link, only what agy says about the code matters.
+      if (run.url) return;
       run.url = signInLink(output);
+      if (run.url) output = "";
     });
     this.runs.set(sessionId, run);
     for (let waited = 0; !run.url && !run.exited && waited < 20_000; waited += 250)
@@ -245,13 +259,13 @@ export class AntigravityLogin {
     }
   }
 
-  /** Ends a sign-in the user closed. Returns its HOME, for the caller to delete. */
+  /** Ends a sign-in the user closed. Returns an added account's HOME, for the caller to delete; never the real one. */
   cancel(sessionId: string): string | null {
     const run = this.runs.get(sessionId);
     if (!run) return null;
     this.runs.delete(sessionId);
     run.stop();
-    return run.home;
+    return run.mac ? null : run.home;
   }
 
   /** Ends every sign-in, when the plugin stops. */

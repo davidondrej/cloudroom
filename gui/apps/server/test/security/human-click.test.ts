@@ -386,6 +386,42 @@ describe("human clicks (ADR 0260)", () => {
       value: { approve: true },
     });
 
+    // Computer-use cards also require a real human click (agents cannot self-approve over localhost).
+    const computerUse = harness.deps.pendingInteractions.requestPluginInteraction({
+      pluginId: "computer-use",
+      rendererId: "computer-use-approval",
+      threadId: thread.id,
+      title: "Allow this thread to use Computer Use?",
+      payload: {},
+      timeoutMs: 60_000,
+    });
+    const [cuItem] =
+      harness.deps.pendingInteractions.listPendingThreadInteractions(thread.id);
+    const cuPath = `/api/v1/threads/${thread.id}/interactions/${cuItem!.id}/respond`;
+    expect(
+      (
+        await post(
+          cuPath,
+          { [CALLER_TOKEN_HEADER]: localAgentToken, origin },
+          { value: { decision: "thread" } },
+        )
+      ).status,
+    ).toBe(403);
+    const cuClick = signer.sign("POST", cuPath) ?? "";
+    expect(
+      (
+        await post(
+          cuPath,
+          { [HUMAN_CLICK_HEADER]: cuClick, origin },
+          { value: { decision: "thread" } },
+        )
+      ).status,
+    ).toBe(200);
+    expect(await computerUse).toEqual({
+      outcome: "submitted",
+      value: { decision: "thread" },
+    });
+
     // Ordinary plugin interactions (outside APP_ONLY_PLUGINS) still accept unsigned CLI responses.
     const ordinary = harness.deps.pendingInteractions.requestPluginInteraction({
       pluginId: "ask-user-question",

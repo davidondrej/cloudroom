@@ -8,7 +8,7 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import ReactMarkdown from "react-markdown";
 import type { Root } from "mdast";
-import remarkDirective from "remark-directive";
+import remarkDirective from "./markdown-directive";
 import remarkGfm from "remark-gfm";
 import { describe, expect, it } from "vitest";
 import { STREAMING_MARKDOWN_FIXTURES } from "@/test/fixtures/streaming-markdown";
@@ -298,6 +298,16 @@ const FUZZ_BLOCKS: readonly string[] = [
   "-",
   "crlf line\r\nnext line",
 ];
+
+describe("remarkDirective", () => {
+  it("bounds container nesting to avoid quadratic parsing", () => {
+    const body =
+      ":::note\n".repeat(2048) + "text\n" + ":::\n".repeat(2048);
+    const result = renderWholeDocument(body);
+    expect(result.html).toContain("text");
+    expect(result.html).toContain(":::note");
+  }, 2_000);
+});
 
 describe("findMarkdownPieceCandidates", () => {
   it("starts pieces at unindented lines that follow a blank line", () => {

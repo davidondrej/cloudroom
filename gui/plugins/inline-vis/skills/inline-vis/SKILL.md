@@ -22,7 +22,7 @@ own line where the visual belongs in your reply:
 
 ## Files and directive
 
-- Prefer `source="thread-storage"`: write to `$BB_THREAD_STORAGE/<path>` and
+- Prefer `source="thread-storage"`: write to `$ROOM_THREAD_STORAGE/<path>` and
   pass the storage-relative path. It keeps the repo clean. Omit `source` (or
   use `workspace`) for files that belong in the repo.
 - Use a new file name for each visual. A message shows its file as it is now,

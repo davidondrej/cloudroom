@@ -1,10 +1,10 @@
 // The Director's settings modal, opened from the three dots on its sidebar row.
 // One quiet surface like the chat input: settings on the left, the two prompts on the right, all visible at once.
 import { useEffect, useState, type ReactNode } from "react";
-import { experimental_ProviderModelPicker as AgentPicker } from "@get-bb/plugin-sdk/app";
+import { experimental_ProviderModelPicker as AgentPicker, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@cloudroom/shared-ui/dialog";
 import { Switch } from "@cloudroom/shared-ui/switch";
-import { COLORS, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, Tile, WeakModel, timeLeft, useSettings, type Config } from "./parts.js";
+import { COLORS, COMPACT_MAX, COMPACT_MIN, COMPACT_PRESETS, CompactPercent, ICONS, INTERVALS, MaxThreads, Meter, Minutes, Prompt, Tile, WeakModel, timeLeft, useSettings, type Config } from "./parts.js";
 
 type Settings = ReturnType<typeof useSettings>;
 type Ready = Settings & { view: NonNullable<Settings["view"]>; config: Config; onClose(): void };
@@ -112,11 +112,60 @@ const PingMessage = (props: Ready) => (
   <Prompt key={props.config.prompt} value={props.config.prompt} fallback={props.view.defaults.prompt} rows={2} max={2000} className={`resize-none rounded-xl ${QUIET_INPUT}`} reset="secondary" onSave={(prompt) => props.save({ prompt })} />
 );
 
-function Footer({ run, busy, view, error, onClose }: Ready) {
+function AutoCompact({ view, config, save }: Ready) {
+  const supported = view.supportsAutoCompact;
+  const active = supported && config.autoCompact;
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between">
+        <span className={LABEL}>Auto-compact</span>
+        <Switch checked={config.autoCompact} disabled={!supported} onCheckedChange={(autoCompact) => save({ autoCompact })} aria-label="Auto-compact Director context" />
+      </div>
+      <div className={`space-y-2 transition-opacity ${active ? "" : "opacity-40"}`}>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {COMPACT_PRESETS.map((percent) => (
+            <Chip key={percent} on={active && config.autoCompactPercent === percent} onClick={() => supported && save({ autoCompact: true, autoCompactPercent: percent })}>
+              {percent}%
+            </Chip>
+          ))}
+          <CompactPercent
+            key={config.autoCompactPercent}
+            value={config.autoCompactPercent}
+            disabled={!supported}
+            className={`!h-7 !w-14 rounded-full text-center text-[13px] ${QUIET_INPUT}`}
+            onSave={(autoCompactPercent) => supported && save({ autoCompact: true, autoCompactPercent })}
+          />
+          <span className="text-xs text-subtle-foreground">%</span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {!supported
+            ? "Not supported by this harness."
+            : config.autoCompact
+              ? `Compacts the Director's thread when context hits ${config.autoCompactPercent}% (${COMPACT_MIN}%–${COMPACT_MAX}%).`
+              : "Off. The harness decides when to compact."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function Footer({ run, scan, busy, config, view, error, onClose }: Ready) {
+  const navigate = useBbNavigate();
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Quiet onClick={() => run("pingNow")} disabled={busy}>
         Ping now
+      </Quiet>
+      <Quiet
+        onClick={() =>
+          scan((threadId) => {
+            onClose();
+            navigate.toThread(threadId);
+          })
+        }
+        disabled={busy || !config.learning}
+      >
+        Scan threads
       </Quiet>
       <span className={`min-w-40 flex-1 truncate px-1 text-xs ${error ? "text-destructive" : "text-subtle-foreground"}`}>{error ?? (view.last ? `Last ping: ${view.last.text}` : "")}</span>
       <Quiet onClick={onClose}>Done</Quiet>
@@ -243,6 +292,7 @@ export function DirectorModal({ onClose }: { onClose(): void }) {
             <div className="space-y-5">
               {section("Role", <Role {...props} />)}
               {section("Ping message", <PingMessage {...props} />)}
+              <AutoCompact {...props} />
             </div>
           </div>
         </div>

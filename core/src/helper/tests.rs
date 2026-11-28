@@ -206,16 +206,20 @@ fn ask_first_popup_shows_agent_text_as_text() {
 async fn ask_first_popup_shows_the_folder_the_command_runs_in() {
     // #2470: `.` and `..` in the agent's folder text could show a project folder while the command ran in a temp folder.
     let raw = format!(
-        "/Users/me/code/{}{}private/tmp/b",
+        "/Users/me/code/{}{}private/tmp/cloudroom.b",
         "./".repeat(100),
         "../".repeat(30)
     );
     let cwd = jobs::realpath(Path::new(&raw));
-    assert_eq!(cwd, Path::new("/private/tmp/b"));
+    assert_eq!(cwd, Path::new("/private/tmp/cloudroom.b"));
     let job = json!({"id": "job", "command": "make", "cwd": cwd, "write": true});
     let text = jobs::popup_text(&job, Path::new("/Users/me"));
-    assert!(text.contains("Warning: the command uses files in a temp folder."));
-    assert!(text.ends_with("Folder: /private/tmp/b"));
+    // By /private/tmp's identity (#1933), so only where it exists (macOS).
+    assert_eq!(
+        text.contains("Warning: the command uses files in a temp folder."),
+        Path::new(jobs::PRIVATE_TMP).exists()
+    );
+    assert!(text.ends_with("Folder: /private/tmp/cloudroom.b"));
     let home = json!({"id": "job", "command": "make", "cwd": "/Users/me/code", "write": true});
     assert!(jobs::popup_text(&home, Path::new("/Users/me")).ends_with("\n\nFolder: ~/code"));
     // `..` never skips a missing part or a file, which the OS would refuse to start in.
@@ -277,7 +281,7 @@ fn ask_first_popup_shows_a_push_as_a_copy() {
     // Security fix (#222): a push says where its one item really lands. Other commands warn about what they can't show.
     let home = folder("copy-popup");
     let mut copy = json!({"id": "copy", "command": "touch ~/.zshrc", "cwd": "/", "stdin": "1f8b", "copy": {"name": "a\nb", "to": "~"}});
-    assert_eq!(jobs::as_copy(&mut copy, &home, &[]), None);
+    assert_eq!(jobs::as_copy(&mut copy, &home, Path::new("")), None);
     assert_eq!(
         (&copy["cwd"], &copy["write"], &copy["sandbox"]),
         (&Value::Null, &json!(true), &json!(false))
@@ -306,11 +310,21 @@ fn ask_first_popup_shows_a_push_as_a_copy() {
     );
     let real = real.to_string();
     let mut temp = json!({"copy": {"name": "x", "to": format!("{real}/")}});
-    assert_eq!(jobs::as_copy(&mut temp, &home, &[real.as_str()]), None);
+    assert_eq!(jobs::as_copy(&mut temp, &home, &home), None);
     assert!(temp["write"] == json!(true) && temp["sandbox"] == json!(true));
+    // By identity, never by name (#1933).
+    let mut odd = json!({"copy": {"name": "x", "to": format!("{real}/ſh-thd-1/new/")}});
+    assert!(jobs::as_copy(&mut odd, &home, &home).is_none() && odd["sandbox"] == json!(true));
+    // Where READ_ONLY lets it unpack (#1933).
+    assert!(
+        temp["command"]
+            .as_str()
+            .unwrap()
+            .contains(r#"mktemp -d "$b/cloudroom.XXXXXX""#)
+    );
     let mut bad = json!({"copy": {"name": "x", "to": "~", "staged": "/tmp/cloudroom.a/.."}});
     assert_eq!(
-        jobs::as_copy(&mut bad, &home, &[]).as_deref(),
+        jobs::as_copy(&mut bad, &home, Path::new("")).as_deref(),
         Some("This copy has a name or place the Mac cannot use, so nothing was copied.")
     );
     std::fs::remove_dir_all(home).unwrap();
@@ -354,7 +368,7 @@ async fn push_places_only_its_named_item() {
         // The sandbox's own command, folder, and write flag never count.
         let mut job = json!({"id": name, "command": format!("touch {}/ran", root.display()), "cwd": outside, "write": false,
             "stdin": super::hex(&data), "copy": {"name": name, "to": to, "staged": staged}});
-        if let Some(refused) = super::jobs::as_copy(&mut job, &home, &[]) {
+        if let Some(refused) = super::jobs::as_copy(&mut job, &home, Path::new("")) {
             return (126, String::new(), refused);
         }
         let result = jobs.run(&job, &core, false, &root, None, None).await;
@@ -471,7 +485,13 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
         "<?xml version=\"1.0\"?><plist><dict>",
     )
     .unwrap();
-    let args = jobs::read_only(&data, &home, &["helper.read-only", "helper.read-only.job"]);
+    let temp = home.join("temp");
+    let args = jobs::read_only(
+        &data,
+        &home,
+        &temp,
+        &["helper.read-only", "helper.read-only.job"],
+    );
     let params: Vec<(String, PathBuf)> = args
         .iter()
         .enumerate()
@@ -514,6 +534,16 @@ fn read_only_hides_every_cloudroom_folder_with_keys() {
         ])
     );
     let profile = &args[args.iter().position(|arg| arg == "-p").unwrap() + 1];
+    // #1933: writes only in its own temp folder and copy staging, not other programs' temp files or sockets.
+    assert!(params.contains(&("TEMP".into(), temp)));
+    assert!(profile.contains(r##"(allow file-write* (subpath (param "TEMP")) (regex #"^/private/tmp/cloudroom\.") (regex #"^/private/tmp/cloudroom-copy-") (literal "/dev/null")"##));
+    // bash 3.2's own here-documents in /tmp, never written into once they exist; Unix listening only in its own folder.
+    assert!(profile.contains(
+        r##"(allow file-write-create file-write-unlink (regex #"^/private/tmp/sh-thd-[0-9]+$"))(allow file-write-data (literal "/private/tmp"))"##
+    ));
+    assert!(profile.contains(
+        r##"(deny network-bind (local unix-socket (path-regex #"^/")))(allow network-bind (subpath (param "TEMP")))"##
+    ));
     assert!(
         params
             .iter()
@@ -591,7 +621,16 @@ async fn read_only_command_leaves_nothing_running() {
     // outlives it, its stop, its sandbox's stream, or its helper, even after setsid and a double fork, or as a chain of
     // processes that each fork and end at once. Full commands keep theirs (dev servers), and others run on.
     use std::sync::Arc;
-    let (root, beats) = (folder("read-only-ends"), folder("read-only-beats"));
+    // Beats live in copy staging, the only shared place read-only commands may write (#1933).
+    let (root, beats) = (
+        folder("read-only-ends"),
+        PathBuf::from(format!(
+            "/private/tmp/cloudroom.beats{}",
+            std::process::id()
+        )),
+    );
+    let _ = std::fs::remove_dir_all(&beats);
+    std::fs::create_dir_all(&beats).unwrap();
     let jobs = Arc::new(jobs::Jobs::new(Arc::new(super::net::Shared::new(
         root.clone(),
     ))));
@@ -675,7 +714,7 @@ async fn read_only_command_leaves_nothing_running() {
     let mut others = Vec::new();
     for (marks, name) in marks.iter().zip(["old", "other"]) {
         let marks: Vec<&str> = marks.iter().map(String::as_str).collect();
-        let argv = jobs::read_only(&root, &super::home(), &marks);
+        let argv = jobs::read_only(&root, &super::home(), &beats, &marks);
         let loop_ = format!("perl -e '{each}' {b}/{name}");
         others.push(
             std::process::Command::new(&argv[0])

@@ -3,14 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Built-in computer use: agents see and control desktop apps through Cua Driver, with per-app approvals.",
+  "description": "Built-in computer use: agents see and control desktop apps through Cua Driver, with one approval per thread.",
   "engines": {
     "bb": ">=0.41",
     "bbPluginSdk": ">=0.4.48"
   },
   "bb": {
     "name": "Computer Use",
-    "description": "Agents see and control desktop apps. Cloudroom asks before each new app.",
+    "description": "Agents see and control desktop apps. Cloudroom asks once per thread.",
     "branding": {
       "icon": "Cursor"
     },

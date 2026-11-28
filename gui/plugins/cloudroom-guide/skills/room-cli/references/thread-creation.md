@@ -117,7 +117,7 @@ worktree` only; a provider takes its branch through `--environment-inputs`.
   `room-cli machine list --json` or `room-cli machine show` and ask the user to change it
   in the app.
 - `room-cli machine providers`, `show`, `join-code`, `rename`, `retry-update`,
-  `suspend`, `resume`, `retry-cleanup`, and `remove` cover the Settings →
+  `suspend`, `resume`, `retry-cleanup`, `forget`, and `remove` cover the Settings →
   Machines lifecycle. Use `room-cli machine provider-cli status|install` to inspect
   or install provider CLIs on a selected machine.
 - `room-cli updates` runs the default `room-cli updates status` action. It aggregates Cloudroom and provider

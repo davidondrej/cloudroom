@@ -16,11 +16,11 @@ const pendingInteractionIdSchema = z
   .string()
   .regex(/^pint_[23456789abcdefghijkmnpqrstuvwxyz]{10}$/);
 
-/** Cards only the user answers, in the app window: paid GPU sessions (ADR 0331). Requires a signed desktop human click
- *  or a signed-in Connect phone session (never a forged Origin header or a remote Connect machine). When the server was
- *  started without a human-click key (dev/test), falls back to requiring an Origin header while still refusing remote
- *  machines. */
-const APP_ONLY_PLUGINS = new Set(["gpu"]);
+/** Cards only the user answers, in the app window: paid GPU sessions (ADR 0331) and computer-use approvals.
+ *  Requires a signed desktop human click or a signed-in Connect phone session (never a forged Origin header or a
+ *  remote Connect machine). When the server was started without a human-click key (dev/test), falls back to
+ *  requiring an Origin header while still refusing remote machines. */
+const APP_ONLY_PLUGINS = new Set(["gpu", "computer-use"]);
 
 function parsePendingInteractionId(rawInteractionId: string): string {
   const parsedInteractionId =
