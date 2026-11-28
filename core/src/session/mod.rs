@@ -57,9 +57,7 @@ pub struct Record {
 const MAX_CLIENT_RECORD: usize = 8 << 20;
 
 impl Record {
-    // Preserve the existing wire format without storing params twice alongside the native frame.
     fn for_client(mut self) -> Result<Self> {
-        runtime::for_client(&mut self.data, self.native.as_deref())?;
         let bytes = serde_json::to_vec(&self).map_err(io::Error::other)?.len();
         if bytes > MAX_CLIENT_RECORD {
             // The record keeps its place and drops its body. A kind apps don't know, so none parses the missing body.
