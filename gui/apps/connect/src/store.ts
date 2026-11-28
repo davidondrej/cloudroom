@@ -421,13 +421,18 @@ export async function registerServer(
 
 export const newHandle = () => randomString(HANDLE_ALPHABET, 10);
 
-/** Gives an account's VPS its address (ADR 0319). Registering again replaces the old row, so the website's saved
- *  handle, which it got before this ran, is always the live one. */
-export async function registerVps(db: D1Database, userId: string, handle: string, name: string | null): Promise<string> {
-  const installId = `vps-${userId}`;
+/** Gives one of an account's VPSs its address (ADR 0319). Each VPS has its own row, keyed by its VPS token, so an
+ *  account can connect several. Registering again replaces that VPS's old row, so the website's saved handle, which it
+ *  got before this ran, is always the live one. A row from before several VPSs (keyed by the account) goes too: if it
+ *  was another VPS's, that VPS registers again under its own key the next time it connects. */
+export async function registerVps(db: D1Database, userId: string, token: string, handle: string, name: string | null): Promise<string> {
+  const installId = `vps:${await sha256Hex(token)}`;
   const credential = randomToken();
-  const old = await db.prepare("DELETE FROM server WHERE user_id = ? AND install_id = ? RETURNING handle").bind(userId, installId).first<{ handle: string }>();
-  if (old) drop(servers, old.handle);
+  const old = await db
+    .prepare("DELETE FROM server WHERE user_id = ? AND kind = 'vps' AND install_id IN (?, ?) RETURNING handle")
+    .bind(userId, installId, `vps-${userId}`)
+    .all<{ handle: string }>();
+  for (const row of old.results) drop(servers, row.handle);
   await db
     .prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, name, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, 'vps', ?)")
     .bind(crypto.randomUUID(), userId, installId, handle, await sha256Hex(credential), name, Date.now())

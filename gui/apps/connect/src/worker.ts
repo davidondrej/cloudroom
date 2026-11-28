@@ -423,7 +423,8 @@ async function removeMachine(request: Request, env: Env, owner: Server): Promise
   return json({ ok: true });
 }
 
-/** A user's VPS gets its address once the website confirms its token (ADR 0319). The website saves the handle first. */
+/** A user's VPS gets its address once the website confirms its token (ADR 0319). The website saves the handle first,
+ *  on the VPS that token belongs to: an account may have several. */
 async function vpsRegister(request: Request, env: Env): Promise<Response> {
   const token = bearer(request);
   if (!/^[a-f0-9]{64}$/.test(token)) return json({ error: "Unknown VPS." }, 401);
@@ -442,7 +443,7 @@ async function vpsRegister(request: Request, env: Env): Promise<Response> {
   if (typeof userId !== "string" || !userId) {
     return json({ error: "Cloudroom could not verify this VPS. Try again soon." }, 503);
   }
-  const credential = await registerVps(env.DB, userId, handle, name);
+  const credential = await registerVps(env.DB, userId, token, handle, name);
   return json({ handle, credential, baseDomain: env.BASE_DOMAIN });
 }
 
