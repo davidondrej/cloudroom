@@ -225,6 +225,34 @@ describe("Cloudroom Connect relay", () => {
     serveMac(tunnel);
   });
 
+  it("gives each of an account's VPSs its own address, and replaces only that VPS's row when it registers again", async () => {
+    const db = await mf.getD1Database("DB");
+    website = () => MiniflareResponse.json({ userId: "user-vpses" });
+    // A VPS row from before an account could have several, keyed by the account.
+    await db.prepare("INSERT INTO server (id, user_id, install_id, handle, credential_hash, kind, created_at) VALUES ('legacy-vps', 'user-vpses', 'vps-user-vpses', 'legacyvps', 'hash-legacy-vps', 'vps', ?)")
+      .bind(Date.now()).run();
+    const registerVps = async (token: string, name: string) => {
+      const response = await fetchRelay(`https://${BASE}/api/vps/register`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as { handle: string; credential: string };
+    };
+    const rows = async () =>
+      (await db.prepare("SELECT handle, name FROM server WHERE user_id = 'user-vpses' AND kind = 'vps' ORDER BY name").all<{ handle: string; name: string | null }>()).results;
+
+    const first = await registerVps("a".repeat(64), "alpha");
+    const second = await registerVps("b".repeat(64), "beta");
+    expect(first.handle).not.toBe(second.handle);
+    expect(await rows()).toEqual([{ handle: first.handle, name: "alpha" }, { handle: second.handle, name: "beta" }]);
+
+    const again = await registerVps("a".repeat(64), "alpha");
+    expect(await rows()).toEqual([{ handle: again.handle, name: "alpha" }, { handle: second.handle, name: "beta" }]);
+    website = () => MiniflareResponse.json({ userId: "user-1" });
+  });
+
   it("shows the code page to a phone that is not signed in", async () => {
     const page = await fetchRelay(`https://${handle}.${BASE}/`, { headers: HTML });
     expect(page.status).toBe(401);
